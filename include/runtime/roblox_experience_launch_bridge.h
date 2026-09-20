@@ -43,6 +43,16 @@ struct RobloxExperienceLaunchRequest {
 Status ParseRobloxExperienceLaunchJson(const std::string &json,
                                        RobloxExperienceLaunchRequest *request);
 
+// Translates a private/reserved web-join hybrid command
+// ({moduleID:"Game",functionName:"launchGame",params:{request:{...}}}}) into
+// an experience-launch request the host can start itself. The APK's Game
+// hybrid handler only serves RequestGame joins, so without this translation
+// a private join is rejected by the app while the host has already hidden
+// the browser window. Returns Invalid when the payload is not a private join
+// or carries no launchable place.
+Status TranslateRobloxWebViewPrivateJoinToLaunchRequest(
+    const std::string &payload, RobloxExperienceLaunchRequest *request);
+
 GameJoinRequest
 MakeGameJoinRequest(uint64_t request_id,
                     const RobloxExperienceLaunchRequest &request);

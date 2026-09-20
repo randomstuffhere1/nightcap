@@ -936,8 +936,19 @@ Status RobloxExperienceComposition::RouteCurrentWebSurfaceEvent(
     const std::shared_ptr<WebViewHelperProcess>& source_process,
     uint64_t process_generation, uint64_t logical_generation,
     const WebViewHelperEvent& event) {
+  std::vector<WebViewHelperEvent> events;
+  events.push_back(event);
+  return RouteWebSurfaceEventBatch(source_process, process_generation,
+                                   logical_generation, events);
+}
+
+Status RobloxExperienceComposition::RouteWebSurfaceEventBatch(
+    const std::shared_ptr<WebViewHelperProcess>& source_process,
+    uint64_t process_generation, uint64_t logical_generation,
+    std::vector<WebViewHelperEvent>& events) {
   WebSurfaceRoute route = WebSurfaceRoute::kNone;
   RobloxWebViewBridge* web_view_bridge = nullptr;
+  RobloxBrowserServiceBridge* browser_service_bridge = nullptr;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (source_process != web_surface_process_ || process_generation == 0 ||
@@ -946,14 +957,179 @@ Status RobloxExperienceComposition::RouteCurrentWebSurfaceEvent(
         logical_generation != web_surface_logical_generation_ ||
         web_surface_route_ == WebSurfaceRoute::kNone) {
       // Closing or replacing the helper invalidates buffered surface events.
+      for (WebViewHelperEvent& remaining : events) {
+        SecurelyClearString(&remaining.payload);
+      }
       return Status::Ok();
     }
     route = web_surface_route_;
     web_view_bridge = web_view_bridge_.get();
+    browser_service_bridge = browser_service_bridge_.get();
   }
-  return event.type == WebViewHelperEventType::kRobloxCookie
-             ? AcceptWebViewRobloxCookie(event.payload)
-             : RouteWebSurfaceEvent(route, event, web_view_bridge);
+  // Relay the whole flush against the snapshot above. Dismissing mid-batch
+  // would detach the logical route the remaining messages are validated
+  // against and drop them, which is exactly what stalls multi-message
+  // private-server joins until an unrelated later page switch retries them.
+  bool saw_standard_join = false;
+  RobloxExperienceLaunchRequest private_request;
+  bool have_private_request = false;
+  for (std::size_t index = 0; index < events.size(); ++index) {
+    WebViewHelperEvent& event = events[index];
+    const bool hybrid_command =
+        event.type == WebViewHelperEventType::kExecuteRoblox ||
+        event.type == WebViewHelperEventType::kRobloxWkHybrid;
+    // Private joins are translated and launched by the host: the app cannot
+    // serve them, so relaying would only poison its queue with a join that
+    // can unblock on a later page switch and relaunch the game after the
+    // user left it.
+    const bool private_join =
+        hybrid_command && IsRobloxWebViewPrivateJoinCommand(event.payload);
+    const Status route_status =
+        event.type == WebViewHelperEventType::kRobloxCookie
+            ? AcceptWebViewRobloxCookie(event.payload)
+            : (private_join ? Status::Ok()
+                            : RouteWebSurfaceEvent(route, event,
+                                                   web_view_bridge));
+    if (route_status.ok() && hybrid_command) {
+      if (private_join) {
+        // The app rejects private/reserved joins (its Game handler only
+        // serves RequestGame), so translate the command into an
+        // experience-launch request the host starts itself. A payload that
+        // cannot be translated leaves the window open so the page keeps its
+        // response channel and the user can navigate back.
+        RobloxExperienceLaunchRequest translated;
+        const Status translate_status =
+            TranslateRobloxWebViewPrivateJoinToLaunchRequest(event.payload,
+                                                             &translated);
+        if (translate_status.ok()) {
+          private_request = std::move(translated);
+          have_private_request = true;
+        } else {
+          std::fprintf(stderr,
+                       "  [webview] private game join ignored: %s\n",
+                       translate_status.message().c_str());
+        }
+      } else if (IsRobloxWebViewGameLaunchCommand(event.payload)) {
+        saw_standard_join = true;
+      }
+    }
+    SecurelyClearString(&event.payload);
+    if (!route_status.ok()) {
+      for (WebViewHelperEvent& remaining : events) {
+        SecurelyClearString(&remaining.payload);
+      }
+      return route_status;
+    }
+  }
+  bool launch_queued = false;
+  if (have_private_request && !private_request.join_attempt_id.empty()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (private_request.join_attempt_id == last_private_join_attempt_id_) {
+      // Same click redelivered (hidden-page retry, helper flush, superseded
+      // surface): not a new user gesture. Re-queueing would relaunch the
+      // server after the user left it, once the leave cleared the
+      // active/pending dedup state. A fresh click carries a fresh id.
+      std::fprintf(stderr,
+                   "  [webview] duplicate private game join suppressed\n");
+      have_private_request = false;
+      private_request = RobloxExperienceLaunchRequest{};
+    }
+  }
+  if (have_private_request) {
+    const Status dispatch_status = Dispatch(private_request);
+    if (dispatch_status.ok()) {
+      std::fprintf(stderr,
+                   "  [webview] private game join translated; launching the "
+                   "experience\n");
+      launch_queued = true;
+      if (!private_request.join_attempt_id.empty()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        last_private_join_attempt_id_ = private_request.join_attempt_id;
+      }
+    } else {
+      std::fprintf(stderr,
+                   "  [webview] could not queue the private game join: %s\n",
+                   dispatch_status.message().c_str());
+    }
+  }
+  if (!saw_standard_join && !launch_queued) {
+    return Status::Ok();
+  }
+  // Every join command is already relayed. Closing the surface queues the
+  // window-gone event the app waits on (WebView.handleWindowClose for a
+  // MessageBus window, DataModel focus hand-back for a notification
+  // window, BrowserWindowClosed for a BrowserService window), but queued
+  // events are only published by the bridge drains. Without an immediate
+  // drain the join stays queued until an unrelated later page switch pumps
+  // the queue again. A failed dismissal only affects presentation, so it
+  // must not abort the platform event drain that keeps the running app
+  // alive.
+  (void)DismissWebSurfaceForGameLaunch(source_process, process_generation,
+                                       logical_generation);
+  if (web_view_bridge != nullptr) {
+    const Status close_status = web_view_bridge->DrainHostWindowEvents();
+    if (!close_status.ok()) {
+      std::fprintf(stderr,
+                   "  [webview] could not deliver the in-app browser close "
+                   "for the experience: %s\n",
+                   close_status.message().c_str());
+    }
+  }
+  if (browser_service_bridge != nullptr) {
+    const Status browser_status =
+        browser_service_bridge->DrainOutgoingEvents();
+    if (!browser_status.ok()) {
+      std::fprintf(stderr,
+                   "  [browser] could not deliver the browser window close "
+                   "for the experience: %s\n",
+                   browser_status.message().c_str());
+    }
+  }
+  return Status::Ok();
+}
+
+Status RobloxExperienceComposition::DismissWebSurfaceForGameLaunch(
+    const std::shared_ptr<WebViewHelperProcess>& source_process,
+    uint64_t process_generation, uint64_t logical_generation) {
+  std::lock_guard<std::mutex> operation_lock(web_surface_operation_mutex_);
+  std::shared_ptr<WebViewHelperProcess> process;
+  WebViewHelperExitObserver exit_observer;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (source_process != web_surface_process_ || process_generation == 0 ||
+        process_generation != web_surface_process_generation_ ||
+        logical_generation == 0 ||
+        logical_generation != web_surface_logical_generation_ ||
+        web_surface_route_ == WebSurfaceRoute::kNone) {
+      // A superseded or already dismissed surface must not close the window
+      // that replaced it.
+      return Status::Ok();
+    }
+    // Detach the logical route but keep the helper process alive: killing it
+    // here would drop in-flight handshake packets of a multi-message join and
+    // force the next surface to respawn. The next OpenWebSurface reuses the
+    // hidden process via LoadUrl, which navigates away from the old document.
+    process = web_surface_process_;
+    exit_observer = std::move(web_surface_logical_exit_observer_);
+    web_surface_route_ = WebSurfaceRoute::kNone;
+    web_surface_logical_generation_ = 0;
+  }
+  // Roblox's Android WebViewProtocol leaves the browser window as part of the
+  // join transition and only starts the queued experience once the host reports
+  // the surface gone: WebView.handleWindowClose for a MessageBus window, and a
+  // DataModel focus hand-back for a notification window such as the game
+  // servers page.
+  std::fprintf(stderr,
+               "  [webview] game join relayed; dismissing the in-app browser "
+               "window for the experience\n");
+  if (process != nullptr && process->running() && !process->SetVisible(false)) {
+    std::fprintf(stderr,
+                 "  [webview] could not hide the in-app browser window\n");
+  }
+  if (exit_observer.valid()) {
+    exit_observer.on_exit(exit_observer.context.get());
+  }
+  return Status::Ok();
 }
 
 Status RobloxExperienceComposition::DrainPlatformEvents() {
@@ -982,25 +1158,22 @@ Status RobloxExperienceComposition::DrainPlatformEvents() {
                  ? Unavailable("could not receive WebView helper events")
                  : Status::Ok();
     }
-    for (WebViewHelperEvent& event : events) {
-      const Status event_status = RouteCurrentWebSurfaceEvent(
-          process, process_generation, logical_generation, event);
-      SecurelyClearString(&event.payload);
-      if (!event_status.ok()) {
-        for (WebViewHelperEvent& remaining : events) {
-          SecurelyClearString(&remaining.payload);
-        }
-        return event_status;
-      }
-    }
-    return Status::Ok();
+    // The batch relays every message drained in this flush before the join
+    // dismissal detaches the route, and publishes the resulting window-gone
+    // event on the same tick.
+    return RouteWebSurfaceEventBatch(process, process_generation,
+                                     logical_generation, events);
   };
-  Status status = web_view_bridge != nullptr
-                      ? web_view_bridge->DrainHostWindowEvents()
-                      : Status::Ok();
-  if (status.ok()) {
-    status = drain_helper(web_surface_process, process_generation,
-                          logical_generation);
+  // The browser window dismissal unblocks the queued join already waiting in
+  // the app: the close/return event must be observable on the same tick that
+  // relayed the join command. A dismissal queued here is only published the
+  // NEXT time this drain runs, which defers the join until an unrelated later
+  // event (e.g. a page switch) pumps the queue again, so helper events go
+  // first and host-window events are re-drained immediately after.
+  Status status = drain_helper(web_surface_process, process_generation,
+                               logical_generation);
+  if (status.ok() && web_view_bridge != nullptr) {
+    status = web_view_bridge->DrainHostWindowEvents();
   }
   if (status.ok() && browser_service_bridge != nullptr) {
     status = browser_service_bridge->DrainOutgoingEvents();
@@ -1563,6 +1736,7 @@ Status RobloxExperienceComposition::Shutdown() {
     controlled_switch_waiting_for_return_ = false;
     lua_app_surface_recreation_pending_ = false;
     pending_launch_requests_.clear();
+    last_private_join_attempt_id_.clear();
     bridge = std::move(bridge_);
     web_view_bridge = std::move(web_view_bridge_);
     browser_service_bridge = std::move(browser_service_bridge_);

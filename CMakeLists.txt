@@ -78,15 +78,101 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# --- Build acceleration: ccache/sccache auto-detection -----------------------
+# Enable transparent compiler caching if available.  Users can override with
+# -DCMAKE_CXX_COMPILER_LAUNCHER=<launcher> or -DMOCKTAIL_DISABLE_CCACHE=ON.
+option(MOCKTAIL_DISABLE_CCACHE "Disable automatic ccache/sccache detection" OFF)
+if(NOT MOCKTAIL_DISABLE_CCACHE AND NOT CMAKE_CXX_COMPILER_LAUNCHER)
+  find_program(MOCKTAIL_SCCACHE_PROGRAM sccache)
+  find_program(MOCKTAIL_CCACHE_PROGRAM ccache)
+  if(MOCKTAIL_SCCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${MOCKTAIL_SCCACHE_PROGRAM}" CACHE STRING
+      "Compiler launcher for sccache" FORCE)
+    message(STATUS "Mocktail: using sccache (${MOCKTAIL_SCCACHE_PROGRAM})")
+  elseif(MOCKTAIL_CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${MOCKTAIL_CCACHE_PROGRAM}" CACHE STRING
+      "Compiler launcher for ccache" FORCE)
+    message(STATUS "Mocktail: using ccache (${MOCKTAIL_CCACHE_PROGRAM})")
+  endif()
+endif()
+
+# --- Build acceleration: faster linker auto-detection ------------------------
+# mold > lld > bfd.  Only applied if the linker is available and the user
+# hasn't already set a custom linker flag.  Disable with
+# -DMOCKTAIL_DISABLE_FAST_LINKER=ON.
+option(MOCKTAIL_DISABLE_FAST_LINKER "Disable automatic mold/lld detection" OFF)
+if(NOT MOCKTAIL_DISABLE_FAST_LINKER)
+  include(CheckLinkerFlag)
+  find_program(MOCKTAIL_MOLD_PROGRAM mold)
+  find_program(MOCKTAIL_LLD_PROGRAM ld.lld)
+  if(MOCKTAIL_MOLD_PROGRAM)
+    check_linker_flag(CXX "-fuse-ld=mold" MOCKTAIL_LINKER_SUPPORTS_MOLD)
+    if(MOCKTAIL_LINKER_SUPPORTS_MOLD)
+      add_link_options("-fuse-ld=mold")
+      message(STATUS "Mocktail: using mold linker (${MOCKTAIL_MOLD_PROGRAM})")
+    endif()
+  elseif(MOCKTAIL_LLD_PROGRAM)
+    check_linker_flag(CXX "-fuse-ld=lld" MOCKTAIL_LINKER_SUPPORTS_LLD)
+    if(MOCKTAIL_LINKER_SUPPORTS_LLD)
+      add_link_options("-fuse-ld=lld")
+      message(STATUS "Mocktail: using lld linker (${MOCKTAIL_LLD_PROGRAM})")
+    endif()
+  endif()
+endif()
+
+# --- Build acceleration: optional unity / PCH --------------------------------
+# Useful for iterative development on 4-core machines.  OFF by default
+# (unity can hide ODR issues) but can be enabled with
+# -DMOCKTAIL_ENABLE_UNITY_BUILD=ON -DMOCKTAIL_ENABLE_PCH=ON.
+option(MOCKTAIL_ENABLE_UNITY_BUILD "Enable CMAKE_UNITY_BUILD for faster clean builds" OFF)
+option(MOCKTAIL_ENABLE_PCH "Enable precompiled headers for faster builds" OFF)
+if(MOCKTAIL_ENABLE_UNITY_BUILD)
+  set(CMAKE_UNITY_BUILD ON)
+  # Avoid batching too many TUs together which inflates memory on 4-core/16GB.
+  set(CMAKE_UNITY_BUILD_BATCH_SIZE 8)
+  message(STATUS "Mocktail: unity build enabled (batch 8)")
+endif()
+
 # libjnivm uses C++ exceptions, so these cannot be directory-wide.
 add_library(mocktail_compile_options INTERFACE)
 target_compile_options(mocktail_compile_options INTERFACE
-  "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Wno-unused-parameter;-fno-exceptions;-g>"
+  "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Wno-unused-parameter;-fno-exceptions>"
 )
+# Debug symbols are controlled by the build type (Debug/RelWithDebInfo add
+# -g via CMAKE_CXX_FLAGS_*).  Release stays lean for fast linking.
+# Opt-in with -DMOCKTAIL_FORCE_DEBUG_SYMBOLS=ON if profiling Release.
+option(MOCKTAIL_FORCE_DEBUG_SYMBOLS "Add -g to all build types (slower link)" OFF)
+if(MOCKTAIL_FORCE_DEBUG_SYMBOLS)
+  target_compile_options(mocktail_compile_options INTERFACE
+    "$<$<COMPILE_LANGUAGE:CXX>:-g>"
+  )
+endif()
 
 function(mocktail_apply_compile_options target_name)
   target_link_libraries(${target_name} PRIVATE mocktail_compile_options)
 endfunction()
+
+if(MOCKTAIL_ENABLE_PCH)
+  # Heavy headers that dominate compile time.  INTERFACE so all consumers
+  # of mocktail_compile_options benefit automatically.
+  target_precompile_headers(mocktail_compile_options INTERFACE
+    <string>
+    <string_view>
+    <vector>
+    <unordered_map>
+    <unordered_set>
+    <memory>
+    <functional>
+    <algorithm>
+    <chrono>
+    <mutex>
+    <thread>
+    <utility>
+    <optional>
+    <variant>
+  )
+  message(STATUS "Mocktail: precompiled headers enabled")
+endif()
 
 option(MOCKTAIL_ENABLE_UPSTREAM_JNIVM
   "Build upstream libjnivm for the incremental JNI runtime migration" ON)

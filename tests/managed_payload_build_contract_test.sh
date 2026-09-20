@@ -23,8 +23,14 @@ build_route="$(
 )"
 grep -Fq 'git submodule update --init --recursive' <<<"${build_route}" ||
   Fail 'make build does not initialize pinned source dependencies'
-grep -Fq 'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF' \
+grep -Fq 'cmake -S . -B build' \
+  <<<"${build_route}" || Fail 'make build does not configure the build directory'
+grep -Fq -- '-DCMAKE_BUILD_TYPE=Release' \
   <<<"${build_route}" || Fail 'make build does not configure dynamic Release'
+grep -Fq -- '-DBUILD_TESTING=OFF' \
+  <<<"${build_route}" || Fail 'make build does not disable tests for dynamic Release'
+grep -Eq -- '-G (Ninja|Unix Makefiles)' \
+  <<<"${build_route}" || Fail 'make build does not select a CMake generator (Ninja preferred)'
 grep -Fq 'cmake --build build -j2' <<<"${build_route}" ||
   Fail 'make build does not invoke the native CMake build'
 if grep -Eq 'build\.sh|build_release\.sh|appimagetool|--apk([[:space:]]|$)' \
@@ -36,7 +42,9 @@ default_route="$(
   make -C "${ROOT}" --no-print-directory --dry-run JOBS=2 |
     NormalizeDryRun
 )"
-grep -Fq 'cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF' \
+grep -Fq 'cmake -S . -B build' \
+  <<<"${default_route}" || Fail 'plain make is not an alias for make build'
+grep -Fq -- '-DCMAKE_BUILD_TYPE=Release' \
   <<<"${default_route}" || Fail 'plain make is not an alias for make build'
 
 release_route="$(
@@ -85,6 +93,11 @@ set -euo pipefail
 printf 'git' >>"${MOCKTAIL_TEST_TOOL_LOG}"
 printf ' %q' "$@" >>"${MOCKTAIL_TEST_TOOL_LOG}"
 printf '\n' >>"${MOCKTAIL_TEST_TOOL_LOG}"
+# Emulate a missing submodule so the smart init path (`status` -> `update`)
+# is exercised under the fake toolchain.
+if [[ "${1:-}" == submodule && "${2:-}" == status ]]; then
+  printf -- '-0000000000000000000000000000000000000000 third_party/libjnivm\n'
+fi
 exit 0
 EOF
 
@@ -116,6 +129,8 @@ grep -Fq 'git submodule update --init --recursive' "${TOOL_LOG}" ||
   Fail 'default build did not initialize pinned source submodules'
 grep -Fq "cmake -S . -B ${TEMP_DIR}/managed-build" "${TOOL_LOG}" ||
   Fail 'default build did not configure the requested CMake directory'
+grep -Eq -- '-G (Ninja|Unix Makefiles)' "${TOOL_LOG}" ||
+  Fail 'default build did not select a CMake generator (Ninja preferred)'
 grep -Fq "cmake --build ${TEMP_DIR}/managed-build -j1" "${TOOL_LOG}" ||
   Fail 'default build did not compile the configured CMake directory'
 

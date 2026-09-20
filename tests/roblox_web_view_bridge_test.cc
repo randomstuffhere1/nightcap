@@ -10,10 +10,155 @@
 #include <vector>
 
 #include "jnivm/jnivm.h"
+#include "runtime/roblox_experience_launch_bridge.h"
 
 namespace mocktail {
 namespace runtime {
 namespace {
+
+TEST(RobloxWebViewGameLaunchPolicyTest,
+     DetectsBrowserJoinCommandsWithoutMatchingVerificationTraffic) {
+  const std::string private_server =
+      R"({"moduleID":"Game","functionName":"launchGame",)"
+      R"("params":{"request":{"requestType":"RequestGameJob",)"
+      R"("placeId":"1962086868","instanceId":"97ea-49e4",)"
+      R"("isPlayTogetherGame":false,"browserTrackerId":"tracker"}},)"
+      R"("callbackID":"join-callback"})";
+  EXPECT_TRUE(IsRobloxWebViewGameLaunchCommand(private_server));
+  EXPECT_TRUE(IsRobloxWebViewGameLaunchCommand(
+      R"({"moduleID":"Game","functionName":"joinGame",)"
+      R"("params":{"request":{"requestType":"RequestGame"}}})"));
+  // The request type is authoritative even when the module or function name is
+  // rewritten by a future web bundle.
+  EXPECT_TRUE(IsRobloxWebViewGameLaunchCommand(
+      R"({"moduleID":"Navigation","functionName":"navigateToFeature",)"
+      R"("params":{"request":{"requestType":"JoinServer"}}})"));
+  EXPECT_TRUE(IsRobloxWebViewGameLaunchCommand(
+      R"({"moduleID":"Game","functionName":"launchGame","params":{}})"));
+  // The private-servers "Join Server" button names the join after the server,
+  // with the link/access code inside the request payload.
+  EXPECT_TRUE(IsRobloxWebViewGameLaunchCommand(
+      R"({"moduleID":"Game","functionName":"joinServer",)"
+      R"("params":{"request":{"requestType":"JoinServer",)"
+      R"("placeId":"1962086868","linkCode":"Wxyz","accessCode":"code"}},)"
+      R"("callbackID":"join-callback"})"));
+  EXPECT_TRUE(IsRobloxWebViewGameLaunchCommand(
+      R"({"moduleID":"Game","functionName":"joinPrivateServer",)"
+      R"("params":{}})"));
+
+  // A verification callback and an ordinary navigation must keep the window
+  // open.
+  EXPECT_FALSE(IsRobloxWebViewGameLaunchCommand(
+      R"({"moduleID":"Navigation","functionName":"navigateToFeature",)"
+      R"("params":{"params":{"feature":"CaptchaShown"}},"callbackID":"cap"})"));
+  EXPECT_FALSE(IsRobloxWebViewGameLaunchCommand(
+      R"({"moduleID":"Game","functionName":"getGameDetails"})"));
+  EXPECT_FALSE(IsRobloxWebViewGameLaunchCommand(
+      R"({"moduleID":"Game","functionName":"getGameDetails",)"
+      R"("params":{"request":{"requestType":"RequestFollowUser"}}})"));
+  EXPECT_FALSE(IsRobloxWebViewGameLaunchCommand(""));
+  EXPECT_FALSE(IsRobloxWebViewGameLaunchCommand("not-json"));
+  EXPECT_FALSE(IsRobloxWebViewGameLaunchCommand("[]"));
+  // A payload that cannot be audited within the bounded-JSON contract is never
+  // treated as a join.
+  EXPECT_FALSE(IsRobloxWebViewGameLaunchCommand(
+      std::string(kMaximumRobloxWebViewJsonBytes + 1, 'x')));
+}
+
+TEST(RobloxWebViewGameLaunchPolicyTest,
+     DetectsPrivateJoinsTheAppCannotServeItself) {
+  // The website issues private-server joins through the same Game.launchGame
+  // hybrid, but with a RequestPrivateGame request the APK's Game handler
+  // rejects (it only serves RequestGame).
+  const std::string private_join =
+      R"({"moduleID":"Game","functionName":"launchGame",)"
+      R"("params":{"request":{"requestType":"RequestPrivateGame",)"
+      R"("placeId":"1962086868","accessCode":"access-code",)"
+      R"("browserTrackerId":"tracker"}},)"
+      R"("callbackID":"join-callback"})";
+  EXPECT_TRUE(IsRobloxWebViewPrivateJoinCommand(private_join));
+  EXPECT_TRUE(IsRobloxWebViewPrivateJoinCommand(
+      R"({"moduleID":"Game","functionName":"launchGame",)"
+      R"("params":{"request":{"requestType":"RequestReservedGame",)"
+      R"("placeId":1962086868,"reservedServerAccessCode":"reserved"}}})"));
+  // A public join carries no private request type and stays app-owned.
+  EXPECT_FALSE(IsRobloxWebViewPrivateJoinCommand(
+      R"({"moduleID":"Game","functionName":"launchGame",)"
+      R"("params":{"request":{"requestType":"RequestGame",)"
+      R"("placeId":"1962086868"}}})"));
+  EXPECT_FALSE(IsRobloxWebViewPrivateJoinCommand(
+      R"({"moduleID":"Game","functionName":"joinGame",)"
+      R"("params":{"request":{"requestType":"RequestGameJob",)"
+      R"("placeId":"1962086868","instanceId":"id"}}})"));
+  // The Game.launchGame naming gate keeps unrelated payloads that happen to
+  // carry codes (e.g. share dialogs) from matching.
+  EXPECT_FALSE(IsRobloxWebViewPrivateJoinCommand(
+      R"({"moduleID":"Navigation","functionName":"navigateToFeature",)"
+      R"("params":{"request":{"requestType":"RequestPrivateGame",)"
+      R"("placeId":"1962086868","accessCode":"code"}}})"));
+  EXPECT_FALSE(IsRobloxWebViewPrivateJoinCommand(
+      R"({"moduleID":"Game","functionName":"getGameDetails",)"
+      R"("params":{"request":{"requestType":"RequestPrivateGame",)"
+      R"("placeId":"1962086868"}}})"));
+  EXPECT_FALSE(IsRobloxWebViewPrivateJoinCommand(""));
+  EXPECT_FALSE(IsRobloxWebViewPrivateJoinCommand("not-json"));
+}
+
+TEST(RobloxWebViewGameLaunchPolicyTest,
+     TranslatesPrivateJoinsIntoLaunchRequests) {
+  const std::string private_join =
+      R"({"moduleID":"Game","functionName":"launchGame",)"
+      R"("params":{"request":{"requestType":"RequestPrivateGame",)"
+      R"("placeId":"1962086868","accessCode":"access-code",)"
+      R"("linkCode":"link-code","joinAttemptId":"attempt",)"
+      R"("browserTrackerId":"tracker","isPlayTogetherGame":false}},)"
+      R"("callbackID":"join-callback"})";
+  RobloxExperienceLaunchRequest request;
+  ASSERT_TRUE(TranslateRobloxWebViewPrivateJoinToLaunchRequest(private_join,
+                                                               &request)
+                  .ok());
+  EXPECT_EQ(request.place_id, 1962086868);
+  EXPECT_EQ(request.access_code, "access-code");
+  EXPECT_EQ(request.link_code, "link-code");
+  EXPECT_EQ(request.join_attempt_id, "attempt");
+  EXPECT_TRUE(request.game_instance_id.empty());
+  // The canonical JSON round-trips through the launch parser, so queueing
+  // the translated request satisfies the fresh-launch validation.
+  RobloxExperienceLaunchRequest reparsed;
+  ASSERT_TRUE(
+      ParseRobloxExperienceLaunchJson(request.canonical_json, &reparsed).ok());
+  EXPECT_EQ(reparsed.place_id, request.place_id);
+  EXPECT_EQ(reparsed.access_code, request.access_code);
+
+  // The website's servers list joins name the instance "instanceId".
+  RobloxExperienceLaunchRequest instanced;
+  ASSERT_TRUE(TranslateRobloxWebViewPrivateJoinToLaunchRequest(
+                  R"({"moduleID":"Game","functionName":"launchGame",)"
+                  R"("params":{"request":{"requestType":"RequestPrivateGame",)"
+                  R"("placeId":123,"instanceId":"game-id"}}})",
+                  &instanced)
+                  .ok());
+  EXPECT_EQ(instanced.place_id, 123);
+  EXPECT_EQ(instanced.game_instance_id, "game-id");
+
+  // Not a private join, or no launchable place: rejected.
+  RobloxExperienceLaunchRequest rejected;
+  EXPECT_FALSE(TranslateRobloxWebViewPrivateJoinToLaunchRequest(
+                   R"({"moduleID":"Game","functionName":"launchGame",)"
+                   R"("params":{"request":{"requestType":"RequestGame",)"
+                   R"("placeId":"1962086868"}}})",
+                   &rejected)
+                   .ok());
+  EXPECT_FALSE(TranslateRobloxWebViewPrivateJoinToLaunchRequest(
+                   R"({"moduleID":"Game","functionName":"launchGame",)"
+                   R"("params":{"request":{"requestType":"RequestPrivateGame",)"
+                   R"("accessCode":"code"}}})",
+                   &rejected)
+                   .ok());
+  EXPECT_FALSE(TranslateRobloxWebViewPrivateJoinToLaunchRequest(
+                   "not-json", &rejected)
+                   .ok());
+}
 
 class ScopedNativeLogin final {
  public:

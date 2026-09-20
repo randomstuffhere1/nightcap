@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "mocktail/status.h"
 #include "runtime/owned_pthread.h"
@@ -195,6 +196,29 @@ class RobloxExperienceComposition final {
       uint64_t process_generation, uint64_t logical_generation,
       const WebViewHelperEvent& event);
   Status AcceptWebViewRobloxCookie(std::string_view value);
+  // Relays every event drained in one helper flush before dismissing the
+  // surface for a game launch. A private-server join arrives as several hybrid
+  // messages in a single flush (e.g. a RequestGameJob precursor followed by
+  // the JoinServer command carrying the link/access code); dismissing after
+  // the first message would invalidate the generations the remaining messages
+  // are validated against and silently drop the real join. Clears each payload
+  // once relayed.
+  Status RouteWebSurfaceEventBatch(
+      const std::shared_ptr<WebViewHelperProcess>& source_process,
+      uint64_t process_generation, uint64_t logical_generation,
+      std::vector<WebViewHelperEvent>& events);
+  // Roblox's Android WebViewProtocol starts an experience by dismissing the
+  // browser window first; the queued join only proceeds once the host reports
+  // the window closed. The standalone helper owns its own GTK window and
+  // cannot make that transition, so the host dismisses the surface after
+  // relaying a join command. Re-validates the surface generation so a
+  // superseded window can never close its replacement. The dismissal only
+  // hides the helper window and detaches the logical route: the helper
+  // process is kept alive for reuse so in-flight handshake packets are not
+  // lost by killing it mid-join.
+  Status DismissWebSurfaceForGameLaunch(
+      const std::shared_ptr<WebViewHelperProcess>& source_process,
+      uint64_t process_generation, uint64_t logical_generation);
   Status OpenWebSurface(const std::string& url, const char* transport,
                         WebSurfaceRoute route,
                         WebViewHelperExitObserver exit_observer,
@@ -265,6 +289,13 @@ class RobloxExperienceComposition final {
   std::unique_ptr<LaunchTask> active_launch_;
   std::optional<RobloxExperienceLaunchRequest> presence_request_;
   std::string active_game_canonical_json_;
+  // joinAttemptId of the last translated private web join that was queued.
+  // The website generates a fresh id per click, so a repeated id marks a
+  // stale retry (hidden page, helper redelivery) rather than a new user
+  // gesture. Re-dispatching it after the user left the game would relaunch
+  // the server on the next page switch, once the queue/return bookkeeping no
+  // longer deduplicates it.
+  std::string last_private_join_attempt_id_;
   OwnedPthread launch_worker_;
   uint64_t next_request_id_ = 1;
   bool platform_protocols_initialized_ = false;

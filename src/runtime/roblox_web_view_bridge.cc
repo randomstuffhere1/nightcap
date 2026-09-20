@@ -36,6 +36,7 @@ constexpr char kNativeGlInterfaceClass[] =
 constexpr char kConnectionPointerField[] = "a";
 constexpr std::size_t kMaximumPendingHostWindowEvents = 256;
 constexpr std::string_view kBrowserLoginUrl = "https://www.roblox.com/login";
+constexpr std::size_t kMaximumHybridIdentifierBytes = 128;
 
 bool EqualsIgnoreCase(std::string_view a, std::string_view b) {
   if (a.size() != b.size()) return false;
@@ -45,6 +46,64 @@ bool EqualsIgnoreCase(std::string_view a, std::string_view b) {
       return false;
     }
   }
+  return true;
+}
+
+bool IsGameLaunchFunction(std::string_view function) {
+  constexpr std::string_view kFunctions[] = {
+      "launchgame",       "joingame",        "joinserver",
+      "joinprivateserver", "startgame",       "rejoingame",
+      "playgame",         "launchexperience", "joinexperience",
+  };
+  for (const std::string_view candidate : kFunctions) {
+    if (EqualsIgnoreCase(function, candidate)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsGameRequestType(std::string_view request_type) {
+  constexpr std::string_view kTypes[] = {
+      "RequestGame",      "RequestGameJob",   "JoinGame",
+      "JoinServer",       "JoinExperience",   "LaunchGame",
+  };
+  for (const std::string_view candidate : kTypes) {
+    if (EqualsIgnoreCase(request_type, candidate)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool IsPrivateLaunchRequestType(std::string_view request_type) {
+  // Mirrors the APK's join-request vocabulary (see the native JoinRequestType
+  // name table): only RequestGame is served by the Game hybrid handler, so a
+  // private/reserved request would be rejected by the app.
+  constexpr std::string_view kPrivateTypes[] = {
+      "RequestPrivateGame",
+      "RequestReservedGame",
+      "RequestPrivatePartyGame",
+  };
+  for (const std::string_view candidate : kPrivateTypes) {
+    if (EqualsIgnoreCase(request_type, candidate)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ReadBoundedIdentifier(const nlohmann::json& object, const char* key,
+                           std::string* value) {
+  const auto found = object.find(key);
+  if (found == object.end() || !found->is_string()) {
+    return false;
+  }
+  const std::string& text = found->get_ref<const std::string&>();
+  if (text.empty() || text.size() > kMaximumHybridIdentifierBytes) {
+    return false;
+  }
+  *value = text;
   return true;
 }
 
@@ -459,6 +518,79 @@ Status ParseRobloxPurchaseRobuxNotification(const std::string& json,
   request->url = "https://www.roblox.com/upgrades/robux?showHeader=true";
   request->title = "Robux";
   return Status::Ok();
+}
+
+bool IsRobloxWebViewGameLaunchCommand(const std::string& payload) {
+  if (payload.empty() || payload.size() > kMaximumRobloxWebViewJsonBytes ||
+      payload.find('\0') != std::string::npos) {
+    return false;
+  }
+
+  const nlohmann::json command =
+      nlohmann::json::parse(payload.begin(), payload.end(), nullptr, false);
+  if (command.is_discarded() || !command.is_object()) {
+    return false;
+  }
+
+  std::string module;
+  std::string function;
+  const bool named_launch =
+      ReadBoundedIdentifier(command, "moduleID", &module) &&
+      EqualsIgnoreCase(module, "Game") &&
+      ReadBoundedIdentifier(command, "functionName", &function) &&
+      IsGameLaunchFunction(function);
+
+  const auto params = command.find("params");
+  if (params != command.end() && params->is_object()) {
+    const auto request = params->find("request");
+    if (request != params->end() && request->is_object()) {
+      std::string request_type;
+      if (ReadBoundedIdentifier(*request, "requestType", &request_type) &&
+          IsGameRequestType(request_type)) {
+        return true;
+      }
+    }
+  }
+  return named_launch;
+}
+
+bool IsRobloxWebViewPrivateJoinCommand(const std::string& payload) {
+  if (payload.empty() || payload.size() > kMaximumRobloxWebViewJsonBytes ||
+      payload.find('\0') != std::string::npos) {
+    return false;
+  }
+
+  const nlohmann::json command =
+      nlohmann::json::parse(payload.begin(), payload.end(), nullptr, false);
+  if (command.is_discarded() || !command.is_object()) {
+    return false;
+  }
+
+  // The Game.launchGame naming gate keeps unrelated payloads that happen to
+  // carry codes (e.g. share dialogs) from ever matching: the site issues
+  // every web join through this single hybrid function.
+  std::string module;
+  std::string function;
+  if (!ReadBoundedIdentifier(command, "moduleID", &module) ||
+      !EqualsIgnoreCase(module, "Game") ||
+      !ReadBoundedIdentifier(command, "functionName", &function) ||
+      !IsGameLaunchFunction(function)) {
+    return false;
+  }
+  const auto params = command.find("params");
+  if (params == command.end() || !params->is_object()) {
+    return false;
+  }
+  const auto request = params->find("request");
+  if (request == params->end() || !request->is_object()) {
+    return false;
+  }
+  std::string request_type;
+  if (ReadBoundedIdentifier(*request, "requestType", &request_type) &&
+      IsPrivateLaunchRequestType(request_type)) {
+    return true;
+  }
+  return false;
 }
 
 RobloxWebViewBridge::RobloxWebViewBridge(JniEnvironmentProvider environment,

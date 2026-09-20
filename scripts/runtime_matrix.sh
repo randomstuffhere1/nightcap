@@ -12,7 +12,15 @@ TIMEOUT_SIGNAL="${TIMEOUT_SIGNAL:-KILL}"
 mkdir -p "${LOG_DIR}"
 
 if [[ ! -x "${BINARY}" ]]; then
-  cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -DCMAKE_BUILD_TYPE=Debug
+  _generator="${CMAKE_GENERATOR:-auto}"
+  if [[ "${_generator}" == auto ]]; then
+    if command -v ninja &>/dev/null; then
+      _generator="Ninja"
+    else
+      _generator="Unix Makefiles"
+    fi
+  fi
+  cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" -G "${_generator}" -DCMAKE_BUILD_TYPE=Debug
 fi
 
 cmake --build "${BUILD_DIR}" -j"$(nproc)"

@@ -54,7 +54,7 @@ git remote add upstream https://github.com/komaruworld/mocktail.git
 git fetch upstream
 git switch -c vr upstream/vr
 git submodule update --init --recursive
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMOCKTAIL_ENABLE_VR=ON
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DMOCKTAIL_ENABLE_VR=ON
 cmake --build build -j4
 ```
 

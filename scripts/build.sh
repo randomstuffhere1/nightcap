@@ -39,6 +39,8 @@ Options:
   --cmake-toolchain FILE
                       Explicit CMake toolchain file.
   --cmake-sysroot DIR Explicit compiler/CMake sysroot.
+  --generator NAME    CMake generator: auto (default, Ninja if available),
+                      Ninja, or Unix Makefiles. Env CMAKE_GENERATOR honored.
   --build-type TYPE   Debug, Release, or RelWithDebInfo (default: Release).
   --jobs N            Parallel build jobs (default: nproc).
   --run-tests         Run CTest after building.
@@ -67,6 +69,7 @@ RUN_TESTS=false
 CLEAN=false
 CMAKE_TOOLCHAIN_FILE=""
 CMAKE_SYSROOT=""
+CMAKE_GENERATOR="${CMAKE_GENERATOR:-auto}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -99,6 +102,11 @@ while [[ $# -gt 0 ]]; do
     --cmake-sysroot)
       [[ $# -ge 2 ]] || die "--cmake-sysroot requires a directory"
       CMAKE_SYSROOT="$2"
+      shift 2
+      ;;
+    --generator)
+      [[ $# -ge 2 ]] || die "--generator requires a name"
+      CMAKE_GENERATOR="$2"
       shift 2
       ;;
     --build-type)  BUILD_TYPE="$2"; shift 2 ;;
@@ -135,8 +143,16 @@ if [[ -n "${CMAKE_SYSROOT}" ]]; then
     die "CMake sysroot not found: ${CMAKE_SYSROOT}"
   CMAKE_SYSROOT="$(cd -P -- "${CMAKE_SYSROOT}" && pwd)"
 fi
+if [[ "${CMAKE_GENERATOR}" == auto ]]; then
+  if command -v ninja &>/dev/null; then
+    CMAKE_GENERATOR="Ninja"
+  else
+    CMAKE_GENERATOR="Unix Makefiles"
+  fi
+  info "Auto-selected CMake generator: ${CMAKE_GENERATOR}"
+fi
 
-info "Mocktail build: ${BUILD_TYPE}, -j${JOBS}"
+info "Mocktail build: ${BUILD_TYPE}, -j${JOBS} (${CMAKE_GENERATOR})"
 info "Project root: ${PROJECT_ROOT}"
 info "Build directory: ${BUILD_DIR}"
 
@@ -153,6 +169,9 @@ check_tool() {
 }
 
 check_tool cmake   "install CMake 3.20 or newer"
+if [[ "${CMAKE_GENERATOR}" == Ninja ]]; then
+  check_tool ninja "install ninja (or pass --generator 'Unix Makefiles')"
+fi
 if [[ -z "${CMAKE_TOOLCHAIN_FILE}" ]]; then
   check_tool c++ "install GCC or Clang with C++17 support"
 fi
@@ -236,6 +255,7 @@ fi
 cmake_arguments=(
   -S "${PROJECT_ROOT}"
   -B "${BUILD_DIR}"
+  -G "${CMAKE_GENERATOR}"
   -DCMAKE_BUILD_TYPE="${BUILD_TYPE}"
   -DBUILD_TESTING="${CMAKE_BUILD_TESTING}"
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON

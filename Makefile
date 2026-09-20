@@ -10,6 +10,13 @@ LIBC ?= auto
 MODE ?= standalone
 CMAKE_TOOLCHAIN_FILE ?=
 CMAKE_SYSROOT ?=
+CMAKE_GENERATOR ?= auto
+CMAKE_EXTRA_ARGS ?=
+# Enable via `make build MOCKTAIL_ENABLE_UNITY_BUILD=ON MOCKTAIL_ENABLE_PCH=ON` for max clean-build speed.
+MOCKTAIL_ENABLE_UNITY_BUILD ?=
+MOCKTAIL_ENABLE_PCH ?=
+MOCKTAIL_DISABLE_CCACHE ?=
+MOCKTAIL_DISABLE_FAST_LINKER ?=
 RELEASE_BUILD_DIR ?=
 PORTABLE_MODE ?= standalone
 PORTABLE_CANONICAL_MODE := $(if $(filter dynamic minimal,$(PORTABLE_MODE)),thin,$(if $(filter full static,$(PORTABLE_MODE)),standalone,$(PORTABLE_MODE)))
@@ -23,14 +30,50 @@ FLATPAK_BUILD_DIR ?= build-flatpak
 FLATPAK_MANIFEST ?= packaging/flatpak/io.github.CoderDayton.nightcap.json
 FLATPAK_JOBS ?= 4
 
+# Auto-detect fastest generator: Ninja > Unix Makefiles.  Override with
+# `make build CMAKE_GENERATOR="Unix Makefiles"` if needed.
+ifeq ($(CMAKE_GENERATOR),auto)
+  _MOCKTAIL_HAS_NINJA := $(shell command -v ninja >/dev/null 2>&1 && echo 1 || echo 0)
+  MOCKTAIL_CMAKE_GENERATOR := $(if $(filter 1,$(_MOCKTAIL_HAS_NINJA)),Ninja,Unix Makefiles)
+else
+  MOCKTAIL_CMAKE_GENERATOR := $(CMAKE_GENERATOR)
+endif
+
 define build_native_runtime
-	@git submodule update --init --recursive
-	@cmake -S . -B "$(BUILD_DIR)" \
-		-DCMAKE_BUILD_TYPE="$(1)" \
-		-DBUILD_TESTING="$(2)" \
-		-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-		$(if $(strip $(CMAKE_TOOLCHAIN_FILE)),-DCMAKE_TOOLCHAIN_FILE="$(CMAKE_TOOLCHAIN_FILE)") \
-		$(if $(strip $(CMAKE_SYSROOT)),-DCMAKE_SYSROOT="$(CMAKE_SYSROOT)")
+	@if ! git submodule status --recursive 2>/dev/null | grep -q "^-"; then \
+		echo "[mocktail] submodules up to date"; \
+	else \
+		echo "[mocktail] initializing submodules..."; \
+		git submodule update --init --recursive --jobs "$(JOBS)"; \
+	fi
+	@_need_configure=0; _need_wipe=0; \
+	if [ ! -f "$(BUILD_DIR)/CMakeCache.txt" ]; then \
+		_need_configure=1; \
+	elif ! grep -q "CMAKE_GENERATOR:INTERNAL=$(MOCKTAIL_CMAKE_GENERATOR)" "$(BUILD_DIR)/CMakeCache.txt" 2>/dev/null; then \
+		echo "[mocktail] generator changed -> $(MOCKTAIL_CMAKE_GENERATOR), wiping cache..."; \
+		_need_configure=1; _need_wipe=1; \
+	elif ! grep -q "CMAKE_BUILD_TYPE:STRING=$(1)" "$(BUILD_DIR)/CMakeCache.txt" 2>/dev/null; then \
+		_need_configure=1; \
+	elif ! grep -q "BUILD_TESTING:BOOL=$(2)" "$(BUILD_DIR)/CMakeCache.txt" 2>/dev/null; then \
+		_need_configure=1; \
+	fi; \
+	if [ "$$_need_wipe" = "1" ]; then rm -rf "$(BUILD_DIR)/CMakeCache.txt" "$(BUILD_DIR)/CMakeFiles"; fi; \
+	if [ "$$_need_configure" = "1" ]; then \
+		echo "[mocktail] configuring ($(MOCKTAIL_CMAKE_GENERATOR), $(1), testing=$(2))..."; \
+		cmake -S . -B "$(BUILD_DIR)" -G "$(MOCKTAIL_CMAKE_GENERATOR)" \
+			-DCMAKE_BUILD_TYPE="$(1)" \
+			-DBUILD_TESTING="$(2)" \
+			-DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+			$(if $(strip $(MOCKTAIL_ENABLE_UNITY_BUILD)),-DMOCKTAIL_ENABLE_UNITY_BUILD="$(MOCKTAIL_ENABLE_UNITY_BUILD)") \
+			$(if $(strip $(MOCKTAIL_ENABLE_PCH)),-DMOCKTAIL_ENABLE_PCH="$(MOCKTAIL_ENABLE_PCH)") \
+			$(if $(strip $(MOCKTAIL_DISABLE_CCACHE)),-DMOCKTAIL_DISABLE_CCACHE="$(MOCKTAIL_DISABLE_CCACHE)") \
+			$(if $(strip $(MOCKTAIL_DISABLE_FAST_LINKER)),-DMOCKTAIL_DISABLE_FAST_LINKER="$(MOCKTAIL_DISABLE_FAST_LINKER)") \
+			$(if $(strip $(CMAKE_TOOLCHAIN_FILE)),-DCMAKE_TOOLCHAIN_FILE="$(CMAKE_TOOLCHAIN_FILE)") \
+			$(if $(strip $(CMAKE_SYSROOT)),-DCMAKE_SYSROOT="$(CMAKE_SYSROOT)") \
+			$(CMAKE_EXTRA_ARGS); \
+	else \
+		echo "[mocktail] build dir already configured, skipping cmake configure"; \
+	fi
 	@cmake --build "$(BUILD_DIR)" -j"$(JOBS)"
 endef
 
@@ -45,6 +88,12 @@ release: ## Build AppImage (LIBC=auto|glibc|musl MODE=standalone|thin)
 		MOCKTAIL_RELEASE_BUILD_DIR="$(RELEASE_BUILD_DIR)" \
 		CMAKE_TOOLCHAIN_FILE="$(CMAKE_TOOLCHAIN_FILE)" \
 		CMAKE_SYSROOT="$(CMAKE_SYSROOT)" \
+		CMAKE_GENERATOR="$(CMAKE_GENERATOR)" \
+		CMAKE_EXTRA_ARGS="$(CMAKE_EXTRA_ARGS)" \
+		MOCKTAIL_ENABLE_UNITY_BUILD="$(MOCKTAIL_ENABLE_UNITY_BUILD)" \
+		MOCKTAIL_ENABLE_PCH="$(MOCKTAIL_ENABLE_PCH)" \
+		MOCKTAIL_DISABLE_CCACHE="$(MOCKTAIL_DISABLE_CCACHE)" \
+		MOCKTAIL_DISABLE_FAST_LINKER="$(MOCKTAIL_DISABLE_FAST_LINKER)" \
 		./scripts/build_release.sh --libc "$(LIBC)" --mode "$(MODE)"
 
 debug: ## Debug build

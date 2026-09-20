@@ -66,6 +66,23 @@ Status ParseRobloxProfileViewUrl(const std::string& url,
 Status ParseRobloxPurchaseRobuxNotification(const std::string& json,
                                             RobloxWebViewOpenRequest* request);
 
+// A RobloxHybrid command that asks the native app to start an experience
+// (moduleID "Game"/functionName "launchGame", or a params.request.requestType
+// of RequestGameJob and friends) is the in-app browser's game/server join.
+// Roblox's Android WebViewProtocol performs that transition as an Activity
+// change: the browser window is dismissed first and the queued join only
+// proceeds once the host reports the window closed. The standalone webview
+// helper cannot observe that transition on its own, so the host must close the
+// surface after relaying the command.
+bool IsRobloxWebViewGameLaunchCommand(const std::string& payload);
+
+// A Game.launchGame hybrid the app cannot serve itself. The APK's Game
+// handler only starts RequestGame joins: private/reserved joins
+// (RequestPrivateGame and friends) are rejected, so without host help the
+// window merely hides and the join stalls until an unrelated page switch.
+// The host translates these into experience-launch requests instead.
+bool IsRobloxWebViewPrivateJoinCommand(const std::string& payload);
+
 using DispatchRobloxWebViewOpenFn =
     Status (*)(void *context, const RobloxWebViewOpenRequest &request,
                WebViewHelperExitObserver exit_observer);

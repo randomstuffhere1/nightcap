@@ -2,10 +2,14 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <utility>
+
+#include "runtime/roblox_web_view_bridge.h"
 
 namespace mocktail {
 namespace runtime {
@@ -154,6 +158,172 @@ GameJoinRequest
 MakeGameJoinRequest(uint64_t request_id,
                     const RobloxExperienceLaunchRequest &request) {
   return {request_id, request.place_id, request.canonical_json};
+}
+
+namespace {
+
+Status ReadLenientWebJoinInteger(const nlohmann::json &object, const char *name,
+                                 int64_t *value) {
+  const auto found = object.find(name);
+  if (found == object.end() || found->is_null()) {
+    return Status::Ok();
+  }
+  if (found->is_number_integer()) {
+    if (found->is_number_unsigned() &&
+        found->get<uint64_t>() >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      return Invalid(
+          std::string("web join integer is out of range: ") + name);
+    }
+    *value = found->get<int64_t>();
+    return Status::Ok();
+  }
+  // The website serializes identifiers such as placeId as strings.
+  if (found->is_string()) {
+    const std::string &text = found->get_ref<const std::string &>();
+    if (text.empty() || text.size() > 32) {
+      return Invalid(std::string("web join integer is invalid: ") + name);
+    }
+    errno = 0;
+    char *end = nullptr;
+    const long long parsed = std::strtoll(text.c_str(), &end, 10);
+    if (errno != 0 || end == nullptr || *end != '\0' || parsed < 0 ||
+        static_cast<uint64_t>(parsed) >
+            static_cast<uint64_t>(std::numeric_limits<int64_t>::max())) {
+      return Invalid(std::string("web join integer is invalid: ") + name);
+    }
+    *value = static_cast<int64_t>(parsed);
+    return Status::Ok();
+  }
+  return Invalid(std::string("web join field is not an integer: ") + name);
+}
+
+Status ReadLenientWebJoinString(const nlohmann::json &object, const char *name,
+                                std::string *value) {
+  const auto found = object.find(name);
+  if (found == object.end() || found->is_null()) {
+    return Status::Ok();
+  }
+  if (!found->is_string()) {
+    return Invalid(std::string("web join field is not a string: ") + name);
+  }
+  if (found->get_ref<const std::string &>().size() >
+      kMaximumLaunchStringBytes) {
+    return Invalid(std::string("web join field is too large: ") + name);
+  }
+  *value = found->get<std::string>();
+  return Status::Ok();
+}
+
+}  // namespace
+
+Status TranslateRobloxWebViewPrivateJoinToLaunchRequest(
+    const std::string &payload, RobloxExperienceLaunchRequest *request) {
+  if (request == nullptr) {
+    return Invalid("private join output is null");
+  }
+  *request = {};
+  if (!IsRobloxWebViewPrivateJoinCommand(payload)) {
+    return Invalid("web join command is not a private join");
+  }
+  const nlohmann::json command =
+      nlohmann::json::parse(payload.begin(), payload.end(), nullptr, false);
+  if (command.is_discarded() || !command.is_object()) {
+    return Invalid("web join command is not a JSON object");
+  }
+  const auto params = command.find("params");
+  const nlohmann::json *web_request = nullptr;
+  if (params != command.end() && params->is_object()) {
+    const auto found = params->find("request");
+    if (found != params->end() && found->is_object()) {
+      web_request = &(*found);
+    }
+  }
+  if (web_request == nullptr) {
+    return Invalid("web join command has no request object");
+  }
+
+  int64_t place_id = 0;
+  int64_t user_id = 0;
+  int64_t conversation_id = 0;
+  int64_t referred_by_player_id = 0;
+  Status status = ReadLenientWebJoinInteger(*web_request, "placeId", &place_id);
+  if (status.ok()) {
+    status = ReadLenientWebJoinInteger(*web_request, "userId", &user_id);
+  }
+  if (status.ok()) {
+    status = ReadLenientWebJoinInteger(*web_request, "conversationId",
+                                       &conversation_id);
+  }
+  if (status.ok()) {
+    status = ReadLenientWebJoinInteger(*web_request, "referredByPlayerId",
+                                       &referred_by_player_id);
+  }
+  std::string game_instance_id;
+  std::string reserved_server_access_code;
+  std::string call_id;
+  std::string referral_page;
+  std::string access_code;
+  std::string link_code;
+  std::string launch_data;
+  std::string event_id;
+  std::string game_join_context;
+  std::string join_attempt_id;
+  std::string join_attempt_origin;
+  std::string iso_context;
+  if (status.ok()) {
+    status = ReadLenientWebJoinString(*web_request, "gameInstanceId",
+                                      &game_instance_id);
+  }
+  if (status.ok() && game_instance_id.empty()) {
+    // The website's servers list joins carry the instance under "instanceId".
+    status =
+        ReadLenientWebJoinString(*web_request, "instanceId", &game_instance_id);
+  }
+  struct StringField {
+    const char *name;
+    std::string *member;
+  };
+  const StringField kStringFields[] = {
+      {"reservedServerAccessCode", &reserved_server_access_code},
+      {"callId", &call_id},
+      {"referralPage", &referral_page},
+      {"accessCode", &access_code},
+      {"linkCode", &link_code},
+      {"launchData", &launch_data},
+      {"eventId", &event_id},
+      {"gameJoinContext", &game_join_context},
+      {"joinAttemptId", &join_attempt_id},
+      {"joinAttemptOrigin", &join_attempt_origin},
+      {"isoContext", &iso_context},
+  };
+  for (const StringField &field : kStringFields) {
+    if (!status.ok()) {
+      break;
+    }
+    status = ReadLenientWebJoinString(*web_request, field.name, field.member);
+  }
+  if (!status.ok()) {
+    return status;
+  }
+  nlohmann::json document = nlohmann::json::object();
+  document["placeId"] = place_id;
+  document["userId"] = user_id;
+  document["conversationId"] = conversation_id;
+  document["referredByPlayerId"] = referred_by_player_id;
+  document["gameInstanceId"] = game_instance_id;
+  document["reservedServerAccessCode"] = reserved_server_access_code;
+  document["callId"] = call_id;
+  document["referralPage"] = referral_page;
+  document["accessCode"] = access_code;
+  document["linkCode"] = link_code;
+  document["launchData"] = launch_data;
+  document["eventId"] = event_id;
+  document["gameJoinContext"] = game_join_context;
+  document["joinAttemptId"] = join_attempt_id;
+  document["joinAttemptOrigin"] = join_attempt_origin;
+  document["isoContext"] = iso_context;
+  return ParseRobloxExperienceLaunchJson(document.dump(), request);
 }
 
 RobloxExperienceLaunchBridge::RobloxExperienceLaunchBridge(
