@@ -164,6 +164,39 @@ TEST(SdlEventConverterTest, ConvertsFocusWithoutOwningTheSdlQueue) {
   EXPECT_TRUE(focus->focused);
 }
 
+TEST(SdlEventConverterTest, PreservesHostWheelDirectionAndPrecision) {
+  ASSERT_TRUE(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy"));
+  ASSERT_TRUE(SDL_Init(SDL_INIT_VIDEO)) << SDL_GetError();
+  SDL_Window* window =
+      SDL_CreateWindow("Mocktail event converter test", 64, 64,
+                       SDL_WINDOW_HIDDEN);
+  ASSERT_NE(window, nullptr) << SDL_GetError();
+
+  SDL_Event source{};
+  source.type = SDL_EVENT_MOUSE_WHEEL;
+  source.wheel.mouse_x = 120.0f;
+  source.wheel.mouse_y = 240.0f;
+  platform::PlatformEvent event;
+
+  for (const auto direction :
+       {SDL_MOUSEWHEEL_NORMAL, SDL_MOUSEWHEEL_FLIPPED}) {
+    source.wheel.direction = direction;
+    source.wheel.x = 0.25f;
+    source.wheel.y = -1.5f;
+    ASSERT_TRUE(platform::ConvertSdlEvent(window, source, &event));
+    const auto* wheel = std::get_if<platform::MouseWheelEvent>(&event.payload);
+    ASSERT_NE(wheel, nullptr);
+    EXPECT_FLOAT_EQ(wheel->delta_x, 0.25f);
+    EXPECT_FLOAT_EQ(wheel->delta_y, -1.5f);
+    EXPECT_FLOAT_EQ(wheel->mouse_x, 120.0f);
+    EXPECT_FLOAT_EQ(wheel->mouse_y, 240.0f);
+  }
+
+  SDL_DestroyWindow(window);
+  SDL_Quit();
+  ASSERT_TRUE(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, ""));
+}
+
 TEST(SdlEventConverterTest, RejectsInvalidArgumentsAndUnsupportedEvents) {
   SDL_Event source{};
   source.type = SDL_EVENT_USER;

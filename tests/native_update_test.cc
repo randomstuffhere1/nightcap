@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "compat/build_profile.h"
+#include "compat/guest_abi.h"
 #include "compat/host_abi_profile.h"
 #include "update/apkpure_provider.h"
 #include "update/compatibility_catalog.h"
@@ -646,7 +647,7 @@ TEST(PayloadStoreTest, RestagingIdenticalBytesKeepsTheInstalledPayload) {
   const std::filesystem::path restaged = temporary.root() / "restaged";
   Write(prepared / "libroblox.so", "native-library");
   Write(prepared / "sober_apk/base.apk", "base-apk");
-  Write(prepared / "sober_apk/split_config.x86_64.apk", "split-apk");
+  Write(prepared / "sober_apk" / compat::kGuestSplitApkFile, "split-apk");
   Write(prepared / "assets/content/fixture", "asset");
   std::string error;
   std::size_t asset_count = 0;
@@ -662,8 +663,8 @@ TEST(PayloadStoreTest, RestagingIdenticalBytesKeepsTheInstalledPayload) {
       {"sha256",
        {{"libroblox", HashRegularFile(prepared / "libroblox.so")},
         {"base_apk", HashRegularFile(prepared / "sober_apk/base.apk")},
-        {"x86_64_split_apk",
-         HashRegularFile(prepared / "sober_apk/split_config.x86_64.apk")}}},
+        {std::string(compat::kGuestSplitApkHashKey),
+         HashRegularFile(prepared / "sober_apk" / compat::kGuestSplitApkFile)}}},
       {"assets", {{"file_count", asset_count}, {"sha256_tree", asset_hash}}},
       {"source", "apk-pure-native"},
       {"imported_at", "2026-09-04T03:49:16Z"},
@@ -707,7 +708,7 @@ TEST(PayloadStoreTest, StagesAndPromotesVerifiedExactPayload) {
   const std::filesystem::path prepared = temporary.root() / "prepared";
   Write(prepared / "libroblox.so", "native-library");
   Write(prepared / "sober_apk/base.apk", "base-apk");
-  Write(prepared / "sober_apk/split_config.x86_64.apk", "split-apk");
+  Write(prepared / "sober_apk" / compat::kGuestSplitApkFile, "split-apk");
   Write(prepared / "assets/content/fixture", "asset");
   std::string error;
   std::size_t asset_count = 0;
@@ -725,8 +726,8 @@ TEST(PayloadStoreTest, StagesAndPromotesVerifiedExactPayload) {
       {"sha256",
        {{"libroblox", HashRegularFile(prepared / "libroblox.so")},
         {"base_apk", HashRegularFile(prepared / "sober_apk/base.apk")},
-        {"x86_64_split_apk",
-         HashRegularFile(prepared / "sober_apk/split_config.x86_64.apk")}}},
+        {std::string(compat::kGuestSplitApkHashKey),
+         HashRegularFile(prepared / "sober_apk" / compat::kGuestSplitApkFile)}}},
       {"assets", {{"file_count", asset_count}, {"sha256_tree", asset_hash}}},
   };
   Write(prepared / "roblox_payload.json", metadata.dump(2) + "\n");
@@ -770,7 +771,7 @@ TEST(PayloadStoreTest, RestagesReadOnlyCorruptPayloadCollision) {
   const std::filesystem::path prepared = temporary.root() / "prepared";
   Write(prepared / "libroblox.so", "native-library");
   Write(prepared / "sober_apk/base.apk", "base-apk");
-  Write(prepared / "sober_apk/split_config.x86_64.apk", "split-apk");
+  Write(prepared / "sober_apk" / compat::kGuestSplitApkFile, "split-apk");
   Write(prepared / "assets/content/fixture", "asset");
   std::string error;
   std::size_t asset_count = 0;
@@ -788,8 +789,8 @@ TEST(PayloadStoreTest, RestagesReadOnlyCorruptPayloadCollision) {
       {"sha256",
        {{"libroblox", HashRegularFile(prepared / "libroblox.so")},
         {"base_apk", HashRegularFile(prepared / "sober_apk/base.apk")},
-        {"x86_64_split_apk",
-         HashRegularFile(prepared / "sober_apk/split_config.x86_64.apk")}}},
+        {std::string(compat::kGuestSplitApkHashKey),
+         HashRegularFile(prepared / "sober_apk" / compat::kGuestSplitApkFile)}}},
       {"assets", {{"file_count", asset_count}, {"sha256_tree", asset_hash}}},
   };
   Write(prepared / "roblox_payload.json", metadata.dump(2) + "\n");
@@ -840,7 +841,7 @@ TEST(PayloadStoreTest, PromoteRehashesBytesTamperedAfterStaging) {
   const std::filesystem::path prepared = temporary.root() / "prepared";
   Write(prepared / "libroblox.so", "native-library");
   Write(prepared / "sober_apk/base.apk", "base-apk");
-  Write(prepared / "sober_apk/split_config.x86_64.apk", "split-apk");
+  Write(prepared / "sober_apk" / compat::kGuestSplitApkFile, "split-apk");
   Write(prepared / "assets/content/fixture", "asset");
   std::string error;
   std::size_t asset_count = 0;
@@ -856,8 +857,8 @@ TEST(PayloadStoreTest, PromoteRehashesBytesTamperedAfterStaging) {
       {"sha256",
        {{"libroblox", HashRegularFile(prepared / "libroblox.so")},
         {"base_apk", HashRegularFile(prepared / "sober_apk/base.apk")},
-        {"x86_64_split_apk",
-         HashRegularFile(prepared / "sober_apk/split_config.x86_64.apk")}}},
+        {std::string(compat::kGuestSplitApkHashKey),
+         HashRegularFile(prepared / "sober_apk" / compat::kGuestSplitApkFile)}}},
       {"assets", {{"file_count", asset_count}, {"sha256_tree", asset_hash}}},
   };
   Write(prepared / "roblox_payload.json", metadata.dump(2) + "\n");
@@ -900,7 +901,7 @@ TEST(PayloadStoreTest, PromoteRejectsALibraryTamperedAfterStaging) {
   const std::filesystem::path prepared = temporary.root() / "prepared";
   Write(prepared / "libroblox.so", "native-library");
   Write(prepared / "sober_apk/base.apk", "base-apk");
-  Write(prepared / "sober_apk/split_config.x86_64.apk", "split-apk");
+  Write(prepared / "sober_apk" / compat::kGuestSplitApkFile, "split-apk");
   Write(prepared / "assets/content/fixture", "asset");
   std::string error;
   std::size_t asset_count = 0;
@@ -916,8 +917,8 @@ TEST(PayloadStoreTest, PromoteRejectsALibraryTamperedAfterStaging) {
       {"sha256",
        {{"libroblox", HashRegularFile(prepared / "libroblox.so")},
         {"base_apk", HashRegularFile(prepared / "sober_apk/base.apk")},
-        {"x86_64_split_apk",
-         HashRegularFile(prepared / "sober_apk/split_config.x86_64.apk")}}},
+        {std::string(compat::kGuestSplitApkHashKey),
+         HashRegularFile(prepared / "sober_apk" / compat::kGuestSplitApkFile)}}},
       {"assets", {{"file_count", asset_count}, {"sha256_tree", asset_hash}}},
   };
   Write(prepared / "roblox_payload.json", metadata.dump(2) + "\n");
@@ -961,7 +962,7 @@ TEST(PayloadStoreTest, RequiresTwoRuntimeBoundCanariesForLatestCandidate) {
   const std::filesystem::path prepared = temporary.root() / "prepared";
   Write(prepared / "libroblox.so", "new-native-library");
   Write(prepared / "sober_apk/base.apk", "new-base-apk");
-  Write(prepared / "sober_apk/split_config.x86_64.apk", "new-split-apk");
+  Write(prepared / "sober_apk" / compat::kGuestSplitApkFile, "new-split-apk");
   Write(prepared / "assets/content/fixture", "new-asset");
   std::string error;
   std::size_t asset_count = 0;
@@ -975,13 +976,13 @@ TEST(PayloadStoreTest, RequiresTwoRuntimeBoundCanariesForLatestCandidate) {
       {"package", "com.roblox.client"},
       {"version_name", "2.732.1043"},
       {"version_code", 2814},
-      {"abi", "x86_64"},
+      {"abi", std::string(compat::kGuestAbi)},
       {"elf_build_id", kBuildId},
       {"sha256",
        {{"libroblox", HashRegularFile(prepared / "libroblox.so")},
         {"base_apk", HashRegularFile(prepared / "sober_apk/base.apk")},
-        {"x86_64_split_apk",
-         HashRegularFile(prepared / "sober_apk/split_config.x86_64.apk")}}},
+        {std::string(compat::kGuestSplitApkHashKey),
+         HashRegularFile(prepared / "sober_apk" / compat::kGuestSplitApkFile)}}},
       {"assets", {{"file_count", asset_count}, {"sha256_tree", asset_hash}}},
   };
   Write(prepared / "roblox_payload.json", metadata.dump(2) + "\n");
