@@ -180,3 +180,6 @@ lsan.log*
 
 # Working plans, not part of the shipped documentation
 /docs/plans/
+
+# AI Agents
+AGENTS.md
