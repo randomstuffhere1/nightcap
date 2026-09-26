@@ -15,6 +15,35 @@ namespace mocktail::runtime {
 // thread is waiting for. The stack can: a guest mutex, a socket read and a
 // condition variable each look like a stall until you see the frames under it.
 
+// One executable mapping from /proc/self/maps. A Release build carries no
+// symbols for the guest, so a frame can often only be named by the image it
+// falls in. That is still enough to tell the cases apart: a frame in the
+// guest's own image means the engine is blocking, and one inside a system
+// library's read or connect means it is the network.
+struct AddressRegion {
+  std::uintptr_t start = 0;
+  std::uintptr_t end = 0;
+  std::uintptr_t base = 0;
+  bool executable = false;
+  std::string module;
+
+  std::uintptr_t offset_from_base = 0;
+  bool Contains(const void* address) const;
+  // The image containing `address`, or a region with an empty module name
+  // when the address is in no known mapping.
+  static AddressRegion For(const void* address);
+};
+
+// Parses one /proc/self/maps line. False for anything that is not a mapping, so
+// a caller skips it rather than recording a region that contains nothing.
+bool ParseMapsLine(std::string_view line, AddressRegion *region);
+
+// The mappings of this process. Read once and cached, because a guest library
+// can be mapped after the first sample; a miss is re-read rather than cached
+// as absent, so a late-loaded image is still found.
+const std::vector<AddressRegion> &HostAddressRegions();
+void RefreshHostAddressRegions();
+
 // Frames are captured by the caller, which owns the execinfo dependency, so
 // this type and the policy below stay testable without one.
 using PumpStallFrames = std::vector<std::string>;
@@ -23,6 +52,29 @@ using PumpStallFrames = std::vector<std::string>;
 // wait, however far apart they happened, so they are counted together instead
 // of filling the log with near-duplicates.
 std::string PumpStallSignature(const PumpStallFrames &frames);
+
+// Frames that are identical on every sample and identify nothing: the capture
+// helper and the pump itself. The pump's caller is kept separately, because two
+// call sites reaching the same wait are otherwise indistinguishable.
+bool IsPumpFrame(std::string_view frame);
+
+// Splits an unwind into the frames below the pump and the caller that reached
+// it. False when nothing identifying remains, which is the case for a pump
+// called straight from the main loop.
+bool SplitPumpFrames(const PumpStallFrames &frames, PumpStallFrames *identifying,
+                     std::string *driven_from);
+
+// One stall, including which call site drove the pump. `identifying` is the
+// trimmed stack; when it is a single explanatory placeholder the line says so
+// rather than implying a cause was found.
+std::string FormatPumpStallWithCaller(std::string_view driven_from,
+                                      const PumpStallFrames &identifying,
+                                      std::uint64_t stall_ns);
+
+// What a trimmed stack contains when the unwind carried nothing below the
+// pump. The log has to say the stack was thin rather than imply a cause.
+inline constexpr std::string_view kNoIdentifyingFrames =
+    "blocked in host code; no frame below the pump";
 
 // Decides what to do with one finished pump step.
 //

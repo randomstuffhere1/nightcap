@@ -979,14 +979,36 @@ std::uint64_t MonotonicThreadCpuNs() {
          static_cast<std::uint64_t>(now.tv_nsec);
 }
 
-// The frames the pump itself adds are the same on every sample, so they are
-// dropped: what identifies a stall is the guest code underneath.
-constexpr std::size_t kPumpStallFrames = 24;
-constexpr std::size_t kPumpStallDropFrames = 3;
+constexpr std::size_t kPumpStallFrames = 32;
 
-// Samples the calling thread's stack and hands it to the recorder. Skips the
-// frames belonging to this function and the pump, so the top of the list is
-// guest code.
+// Labels one frame with the image it falls in. A Release build has no symbols
+// for the guest, so `backtrace_symbols` alone yields little more than
+// "main+0x50cf" and the wait cannot be named. The address is still meaningful,
+// and the mapping it falls in is what identifies a wait in practice: a frame in
+// the guest's own image says the engine is blocking, and one inside a system
+// library's read or connect says it is the network.
+std::string DescribeFrame(void* address, const char* symbol) {
+  const mocktail::runtime::AddressRegion region =
+      mocktail::runtime::AddressRegion::For(address);
+  std::string described = region.module.empty() ? std::string("?")
+                                                : region.module;
+  if (region.offset_from_base != 0) {
+    char buffer[32];
+    std::snprintf(buffer, sizeof(buffer), "+0x%llx",
+                  static_cast<unsigned long long>(region.offset_from_base));
+    described += buffer;
+  }
+  // A named frame is more useful than a bare mapping, so a real symbol is kept
+  // alongside it, but it never replaces the mapping.
+  if (symbol != nullptr && symbol[0] != '\0' &&
+      std::string(symbol).find("+0x") == std::string::npos) {
+    described += " [";
+    described += symbol;
+    described += ']';
+  }
+  return described;
+}
+
 void ReportEnginePumpStall(std::uint64_t start_ns, std::uint64_t end_ns) {
   const std::uint64_t duration_ns = end_ns - start_ns;
   mocktail::runtime::PumpStallRecorder& recorder =
@@ -996,27 +1018,44 @@ void ReportEnginePumpStall(std::uint64_t start_ns, std::uint64_t end_ns) {
   }
   void* frames[kPumpStallFrames];
   const int count = ::backtrace(frames, static_cast<int>(kPumpStallFrames));
-  if (count <= static_cast<int>(kPumpStallDropFrames)) {
+  if (count <= 1) {
     return;
   }
-  char** symbols = ::backtrace_symbols(
-      frames + kPumpStallDropFrames, count - static_cast<int>(kPumpStallDropFrames));
+  // Starts at the top of the unwind and includes the capture helper, so the
+  // pump's own frames can be found and trimmed rather than assumed.
+  char** symbols =
+      ::backtrace_symbols(frames, count);
   if (symbols == nullptr) {
     return;
   }
-  mocktail::runtime::PumpStallFrames captured;
-  captured.reserve(static_cast<std::size_t>(count - kPumpStallDropFrames));
-  for (int index = kPumpStallDropFrames; index < count; ++index) {
-    captured.emplace_back(symbols[index - kPumpStallDropFrames] != nullptr
-                              ? symbols[index - kPumpStallDropFrames]
-                              : "?");
+  mocktail::runtime::PumpStallFrames described;
+  described.reserve(static_cast<std::size_t>(count));
+  for (int index = 0; index < count; ++index) {
+    described.emplace_back(DescribeFrame(
+        frames[index], index < count ? symbols[index] : nullptr));
   }
   free(symbols);
-  const std::string line = recorder.Record(captured, duration_ns);
-  if (!line.empty()) {
-    std::fputs(line.c_str(), stderr);
-    std::fflush(stderr);
-  }
+
+  mocktail::runtime::PumpStallFrames identifying;
+  std::string driven_from;
+  const bool has_identifying = mocktail::runtime::SplitPumpFrames(
+      described, &identifying, &driven_from);
+  // The recorder sees the identifying frames only, so a shape is keyed on the
+  // wait rather than on which call site reached it.
+  (void)recorder.Record(identifying, duration_ns);
+  // A stall with nothing below the pump blocked in host code, and the log has
+  // to say the stack was thin rather than imply a cause was found.
+  std::fputs(
+      mocktail::runtime::FormatPumpStallWithCaller(
+          driven_from,
+          has_identifying ? identifying
+                          : mocktail::runtime::PumpStallFrames{
+                                std::string(
+                                    mocktail::runtime::kNoIdentifyingFrames)},
+          duration_ns)
+          .c_str(),
+      stderr);
+  std::fflush(stderr);
 }
 
 const PumpTraceHooks& PumpTrace() {
@@ -1042,7 +1081,11 @@ const PumpTraceHooks& PumpTrace() {
   return hooks;
 }
 
-void PumpRobloxMainThreadMessagesOnce() {
+// `driven_as_poll_callback` marks a call made from someone else's wait loop.
+// The step is idle by construction in that case, so it is excluded from stall
+// reporting: a 178 ms call while joining the startup thread is the join
+// working, not the engine freezing.
+void PumpRobloxMainThreadMessagesOnce(bool driven_as_poll_callback = false) {
   static const bool force_early =
       IsEnabled("MOCKTAIL_FORCE_EARLY_MAIN_THREAD_MESSAGE_PUMP");
   static const bool pump_disabled =
@@ -1143,7 +1186,7 @@ void PumpRobloxMainThreadMessagesOnce() {
   // A step that blocks with no CPU is the commonest source of the multi-second
   // freezes a trace shows, and the duration alone cannot say what the thread is
   // waiting for. The stack can, so it is captured when one happens.
-  if (stall_enabled) {
+  if (stall_enabled && !driven_as_poll_callback) {
     ReportEnginePumpStall(pump_call_start_ns, MonotonicNowNs());
   }
   if (trace != nullptr) {
@@ -1169,7 +1212,10 @@ void PumpRobloxMainThreadMessagesOnce() {
 
 void PumpStartupOwnerThread(void* /*context*/) {
   RunPendingMainThreadTaskSchedulerForeground();
-  PumpRobloxMainThreadMessagesOnce();
+  // Driven as a thread-join poll callback. The step is expected to be idle
+  // here, because the thread being waited on is the one doing the work, so a
+  // long call is a startup wait rather than an engine stall.
+  PumpRobloxMainThreadMessagesOnce(/*driven_as_poll_callback=*/true);
 }
 
 std::string GetEnvString(const char* name, const char* default_value) {

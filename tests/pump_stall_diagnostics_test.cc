@@ -217,6 +217,183 @@ TEST(PumpStallTest, PolicyDefaultsAreUsable) {
   EXPECT_EQ(recorder.signature_count(), 1U);
 }
 
+TEST(PumpStallTest, ParsesAMapsLine) {
+  AddressRegion region;
+  ASSERT_TRUE(ParseMapsLine(
+      "7f9c2a000000-7f9c2a021000 r-xp 00000000 08:01 1234 "
+      "/home/you/.cache/mocktail/rbx_bin/libroblox.so",
+      &region));
+  EXPECT_EQ(region.start, 0x7f9c2a000000ULL);
+  EXPECT_EQ(region.end, 0x7f9c2a021000ULL);
+  EXPECT_EQ(region.base, 0x7f9c2a000000ULL);
+  EXPECT_TRUE(region.executable);
+  EXPECT_EQ(region.module, "libroblox.so");
+  EXPECT_TRUE(region.Contains(reinterpret_cast<void*>(0x7f9c2a010000ULL)));
+  EXPECT_FALSE(region.Contains(reinterpret_cast<void*>(0x7f9c2a030000ULL)));
+}
+
+TEST(PumpStallTest, MapsOffsetIsRelativeToTheImageBase) {
+  AddressRegion region;
+  // A later segment of the same image has a non-zero file offset, and the
+  // frame's distance from the image base has to include it or two mappings of
+  // one library would report different offsets for the same address.
+  ASSERT_TRUE(ParseMapsLine(
+      "55a000000000-55a000021000 r--p 00000000 08:01 99 /lib/libc.so.6",
+      &region));
+  ASSERT_EQ(region.base, 0x55a000000000ULL);
+  ASSERT_TRUE(ParseMapsLine(
+      "55a000021000-55a000123000 r-xp 000021000 08:01 99 /lib/libc.so.6",
+      &region));
+  EXPECT_EQ(region.base, 0x55a000021000ULL - 0x21000);
+  EXPECT_TRUE(region.executable);
+}
+
+TEST(PumpStallTest, RejectsLinesThatAreNotMappings) {
+  AddressRegion region;
+  EXPECT_FALSE(ParseMapsLine("", &region));
+  EXPECT_FALSE(ParseMapsLine("garbage", &region));
+  EXPECT_FALSE(ParseMapsLine("7f9c2a000000 r-xp 0000 /lib/x.so", &region));
+  // A reversed range contains nothing and must not be recorded.
+  EXPECT_FALSE(ParseMapsLine(
+      "7f9c2a021000-7f9c2a000000 r-xp 00000000 08:01 1 /lib/x.so",
+      &region));
+  EXPECT_FALSE(ParseMapsLine("7f9c2a0-7f9c2a0 r-xp 0 0 0 /lib/x.so",
+                              &region));
+  EXPECT_FALSE(ParseMapsLine(
+      "7f9c2a000000-7f9c2a021000 r-xp 00000000 08:01 1 /lib/x.so",
+      nullptr));
+}
+
+TEST(PumpStallTest, ANonExecutableMappingIsStillFound) {
+  AddressRegion region;
+  // Data mappings matter: a wait can be on a lock inside the guest's data
+  // rather than its code.
+  ASSERT_TRUE(ParseMapsLine(
+      "7f9c30000000-7f9c30200000 rw-p 00000000 08:01 7 /lib/libc.so.6",
+      &region));
+  EXPECT_FALSE(region.executable);
+  EXPECT_TRUE(region.Contains(reinterpret_cast<void*>(0x7f9c30100000ULL)));
+  EXPECT_EQ(region.module, "libc.so.6");
+}
+
+TEST(PumpStallTest, ReadsThisProcessesOwnMappings) {
+  const std::vector<AddressRegion> &regions = HostAddressRegions();
+  // The pump's own image is mapped in any process that got this far, so its
+  // absence would mean the parse is wrong rather than the map being unusual.
+  bool found_self = false;
+  for (const AddressRegion &region : regions) {
+    if (region.module.find("pump_stall_diagnostics") != std::string::npos ||
+        region.module.find("mocktail") != std::string::npos) {
+      found_self = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_self);
+  // The main executable is always mapped too.
+  bool found_executable = false;
+  for (const AddressRegion &region : regions) {
+    if (region.module.find("pump_stall_diagnostics_test") !=
+        std::string::npos) {
+      found_executable = true;
+      break;
+    }
+  }
+  EXPECT_TRUE(found_executable);
+}
+
+TEST(PumpStallTest, ResolvesAnAddressToItsImage) {
+  const AddressRegion here =
+      AddressRegion::For(reinterpret_cast<void*>(&ParseMapsLine));
+  EXPECT_FALSE(here.module.empty());
+  EXPECT_GT(here.offset_from_base, 0U);
+  // An address in no mapping, such as one below every mapping, is reported as
+  // unknown rather than attributed to whatever happens to be first.
+  const AddressRegion nowhere = AddressRegion::For(reinterpret_cast<void*>(1));
+  EXPECT_TRUE(nowhere.module.empty());
+  EXPECT_EQ(nowhere.offset_from_base, 0U);
+}
+
+TEST(PumpStallTest, RecognisesThePumpsOwnFrames) {
+  EXPECT_TRUE(IsPumpFrame("mocktail::runtime::ReportEnginePumpStall+0x40"));
+  EXPECT_TRUE(IsPumpFrame("PumpRobloxMainThreadMessagesOnce(bool)"));
+  EXPECT_TRUE(IsPumpFrame("mocktail::legacy::PumpStartupOwnerThread(void*)"));
+  // A guest frame must not be mistaken for one of ours, or the trim would eat
+  // the very frames that name the wait.
+  EXPECT_FALSE(IsPumpFrame("libroblox.so+0x4a1b2c [pthread_cond_wait]"));
+  EXPECT_FALSE(IsPumpFrame("main+0x50cf"));
+}
+
+TEST(PumpStallTest, TrimsThePumpsOwnFramesAndKeepsItsCaller) {
+  // Shaped like a real unwind: capture helper, the pump, its caller, then the
+  // frames that actually say where the thread is stuck.
+  const PumpStallFrames unwind = Frames({
+      "ReportEnginePumpStall",
+      "PumpRobloxMainThreadMessagesOnce",
+      "OwnedPthread::WaitFor",
+      "libroblox.so+0x4a1b2c",
+      "libc.so.6+0x111 [read]",
+      "main",
+  });
+  PumpStallFrames identifying;
+  std::string driven_from;
+  ASSERT_TRUE(SplitPumpFrames(unwind, &identifying, &driven_from));
+  EXPECT_EQ(driven_from, "OwnedPthread::WaitFor");
+  ASSERT_EQ(identifying.size(), 3U);
+  EXPECT_EQ(identifying[0], "libroblox.so+0x4a1b2c");
+  EXPECT_EQ(identifying[2], "main");
+}
+
+TEST(PumpStallTest, TwoCallSitesToTheSameWaitStayDistinguishable) {
+  // The same guest wait reached from the main loop and from a join loop is one
+  // shape but two contexts, so the context is reported on its own line.
+  const PumpStallFrames from_main = Frames({
+      "ReportEnginePumpStall", "PumpRobloxMainThreadMessagesOnce", "main",
+      "libroblox.so+0x4a1b2c"});
+  const PumpStallFrames from_join = Frames({
+      "ReportEnginePumpStall", "PumpRobloxMainThreadMessagesOnce",
+      "OwnedPthread::WaitFor", "libroblox.so+0x4a1b2c"});
+  PumpStallFrames a;
+  PumpStallFrames b;
+  std::string from_a;
+  std::string from_b;
+  ASSERT_TRUE(SplitPumpFrames(from_main, &a, &from_a));
+  ASSERT_TRUE(SplitPumpFrames(from_join, &b, &from_b));
+  EXPECT_EQ(a, b);
+  EXPECT_EQ(PumpStallSignature(a), PumpStallSignature(b));
+  EXPECT_EQ(from_a, "main");
+  EXPECT_EQ(from_b, "OwnedPthread::WaitFor");
+}
+
+TEST(PumpStallTest, AStackWithNothingBelowThePumpIsReportedAsThin) {
+  const PumpStallFrames unwind =
+      Frames({"ReportEnginePumpStall", "PumpRobloxMainThreadMessagesOnce",
+              "main"});
+  PumpStallFrames identifying;
+  std::string driven_from;
+  EXPECT_FALSE(SplitPumpFrames(unwind, &identifying, &driven_from));
+  EXPECT_TRUE(identifying.empty());
+  EXPECT_EQ(driven_from, "main");
+
+  const std::string line = FormatPumpStallWithCaller(
+      driven_from, PumpStallFrames{std::string(kNoIdentifyingFrames)},
+      63 * kMs);
+  EXPECT_NE(line.find("blocked 63 ms"), std::string::npos);
+  EXPECT_NE(line.find("driven from main"), std::string::npos);
+  EXPECT_NE(line.find(kNoIdentifyingFrames), std::string::npos);
+}
+
+TEST(PumpStallTest, FormatNamesTheCallerAndTheFrames) {
+  const std::string line = FormatPumpStallWithCaller(
+      "OwnedPthread::WaitFor",
+      Frames({"libroblox.so+0x4a1b2c", "libc.so.6+0x111 [read]"}), 347 * kMs);
+  EXPECT_NE(line.find("347 ms"), std::string::npos);
+  EXPECT_NE(line.find("driven from OwnedPthread::WaitFor"), std::string::npos);
+  EXPECT_NE(line.find("#0 libroblox.so+0x4a1b2c"), std::string::npos);
+  EXPECT_NE(line.find("#1 libc.so.6"), std::string::npos);
+  // The pump's own frames must not be printed back at the reader.
+  EXPECT_EQ(line.find("ReportEnginePumpStall"), std::string::npos);
+}
+
 TEST(PumpStallTest, FormatNamesTheWaitAndTheCount) {
   const std::string line =
       FormatPumpStall("sig", Frames({"cond_wait", "frame_step"}), 347 * kMs,

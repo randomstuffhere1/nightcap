@@ -44,16 +44,25 @@ Over a 78 s session, 22.09 s was spent inside
 steps were all at 0% CPU, the worst at 347 ms.
 
 What it blocks on is still open, and that is the work. `MOCKTAIL_TRACE_PUMP_STALLS=1`
-prints the stack underneath a wait, which is the only way to tell a guest mutex
+captures the stack underneath a wait, which is the only way to tell a guest mutex
 from a socket read from a condition variable. The near-exact second multiples
 in the freeze times point at a timeout or a poll interval rather than work, so
 the candidates are a blocked socket read, a server-side join wait, and a retry
 backoff in the engine's join path.
 
-- Run the same scenario with `MOCKTAIL_TRACE_PUMP_STALLS=1` and read the stack.
-  This is the first thing to do and it may end the item.
+A first run of the stall report did not settle it, and said something useful
+anyway. Across a 41 s session it found two stalls, both during startup, and
+none at all during 20 s of gameplay — the freezes did not reproduce, and frame
+pacing stayed near 53 fps throughout. So the freezes are intermittent, or
+specific to the place and session that produced the first trace. One session
+without a freeze is not evidence they are gone.
+
+- Reproduce first. The freezes need to happen in the same session that gets
+  traced, and a Debug build if the guest function matters, since a Release
+  build names a frame by its module and offset only.
 - Three runs per scenario before claiming anything, per
-  [BENCHMARKING.md](BENCHMARKING.md). One run is not a result.
+  [BENCHMARKING.md](BENCHMARKING.md). One run is not a result, and one run here
+  already produced a misleading one.
 - Whatever it turns out to be, it is upstream engine behaviour reached through
   the guest, so a fix may be a workaround rather than a change.
 

@@ -158,17 +158,35 @@ they need different fixes. For that, capture the stack:
 MOCKTAIL_TRACE_PUMP_STALLS=1 mocktail
 ```
 
-Each stall over the threshold prints the wait, how many times that shape has
-been seen, and the stack underneath it:
+Each stall over the threshold prints the wait, which call site drove the pump,
+and the frames underneath it:
 
 ```
-  [stall] engine main-thread step blocked 347 ms with no CPU (3 times)
-        #0 __pthread_mutex_lock_full
-        #1 ...
+  [stall] engine main-thread step blocked 347 ms with no CPU, driven from main
+        #0 libroblox.so+0x4a1b2c
+        #1 libc.so.6+0x111 [read]
 ```
+
+**Know what this can and cannot tell you.** A Release build carries no symbols
+for the guest, so each frame is named by the image it falls in, read from
+`/proc/self/maps`, with a real symbol appended when one exists. That is enough
+to separate the cases that matter — a frame in `libroblox.so` means the engine
+is blocking, one inside a system library's `read` or `connect` means it is the
+network — but it will not name a function inside the guest. Build with
+`-DCMAKE_BUILD_TYPE=Debug` if you need that.
+
+Two more limits worth knowing:
+
+- A stall is only reported when the pump is called from the main loop. When it
+  is driven as a thread-join poll callback the step is idle by construction,
+  so a long call there is the join working rather than the engine freezing,
+  and it is skipped.
+- If the unwind carries nothing below the pump, the log says so rather than
+  implying a cause was found:
+  `blocked in host code; no frame below the pump`.
 
 The top frames are what identify the wait, so only those are compared. Two
-stalls with the same top frames are counted as one shape and the stack is
+stalls with the same top frames are counted as one shape, and the stack is
 printed once rather than every time, because a stall that fires every frame
 would otherwise bury anything new. A new shape is always printed, even inside
 another shape's window.

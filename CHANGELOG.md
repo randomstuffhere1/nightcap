@@ -37,12 +37,17 @@ GitHub are taken from the matching section here.
   freezes: 22.09 s of `nativeCallMessagesFromMainThread` across a 78 s session
   used 0.38 s of CPU, and the ten longest steps were all at 0%. The engine
   blocks rather than computes, but a guest mutex, a socket read, and a
-  condition variable look identical from outside a trace. The stall report
-  prints the wait, how many times that shape has been seen, and the stack, so
-  the three can be told apart. Only the top frames identify a wait, so
-  repeating shapes are counted rather than reprinted. Off unless enabled;
+  condition variable look identical from outside a trace, so the report names
+  the wait by the image each frame falls in, read from `/proc/self/maps`, and
+  says which call site drove the pump. Only the top frames identify a wait, so
+  repeating shapes are counted rather than reprinted. A Release build has no
+  guest symbols, so a frame is named by its module and offset rather than by
+  function; use a Debug build when the function matters. Off unless enabled;
   `MOCKTAIL_PUMP_STALL_MIN_MS` and `MOCKTAIL_PUMP_STALL_COOLDOWN_MS` tune the
   threshold and the capture rate.
+- A pump call made as a thread-join poll callback is no longer reported as an
+  engine stall. It is idle by construction there, so a 178 ms call while
+  joining the startup thread was the join working, not the engine freezing.
 - A pipeline cache fallback for clients that do not seed one themselves. The
   Android client already persists `shadercachevk.bin` and passes it to
   `vkCreatePipelineCache`, so on a stock client this changes nothing: the
