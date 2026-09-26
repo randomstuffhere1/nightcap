@@ -972,9 +972,8 @@ Status RobloxExperienceComposition::RouteWebSurfaceEventBatch(
   // would detach the logical route the remaining messages are validated
   // against and drop them, which is exactly what stalls multi-message
   // private-server joins until an unrelated later page switch retries them.
-  bool saw_standard_join = false;
-  RobloxExperienceLaunchRequest private_request;
-  bool have_private_request = false;
+  bool saw_relayed_join = false;
+  bool launch_queued = false;
   for (std::size_t index = 0; index < events.size(); ++index) {
     WebViewHelperEvent& event = events[index];
     const bool hybrid_command =
@@ -986,34 +985,68 @@ Status RobloxExperienceComposition::RouteWebSurfaceEventBatch(
     // user left it.
     const bool private_join =
         hybrid_command && IsRobloxWebViewPrivateJoinCommand(event.payload);
-    const Status route_status =
-        event.type == WebViewHelperEventType::kRobloxCookie
-            ? AcceptWebViewRobloxCookie(event.payload)
-            : (private_join ? Status::Ok()
-                            : RouteWebSurfaceEvent(route, event,
-                                                   web_view_bridge));
-    if (route_status.ok() && hybrid_command) {
+    // Every other launchGame is parsed here as well. Roblox defers a signalled
+    // launchGame until the Lua app next navigates, so relaying one stalls the
+    // join until the user clicks an unrelated sidebar tab. A request the host
+    // starts itself is never forwarded, so the deferred copy Roblox may still
+    // be holding cannot start a second join later.
+    RobloxExperienceLaunchRequest parsed_request;
+    const bool host_launch =
+        hybrid_command && !private_join &&
+        ParseRobloxWebViewLaunchGame(event.payload, &parsed_request).ok();
+
+    Status route_status = Status::Ok();
+    if (event.type == WebViewHelperEventType::kRobloxCookie) {
+      route_status = AcceptWebViewRobloxCookie(event.payload);
+    } else if (hybrid_command) {
+      RobloxExperienceLaunchRequest request;
+      bool have_request = false;
       if (private_join) {
         // The app rejects private/reserved joins (its Game handler only
         // serves RequestGame), so translate the command into an
         // experience-launch request the host starts itself. A payload that
         // cannot be translated leaves the window open so the page keeps its
         // response channel and the user can navigate back.
-        RobloxExperienceLaunchRequest translated;
         const Status translate_status =
             TranslateRobloxWebViewPrivateJoinToLaunchRequest(event.payload,
-                                                             &translated);
-        if (translate_status.ok()) {
-          private_request = std::move(translated);
-          have_private_request = true;
-        } else {
+                                                             &request);
+        have_request = translate_status.ok();
+        if (!have_request) {
           std::fprintf(stderr,
                        "  [webview] private game join ignored: %s\n",
                        translate_status.message().c_str());
         }
-      } else if (IsRobloxWebViewGameLaunchCommand(event.payload)) {
-        saw_standard_join = true;
+      } else if (host_launch) {
+        request = std::move(parsed_request);
+        have_request = true;
+      } else {
+        // Roblox serves this command, so relay it. A relayed join still
+        // needs the dismissal below.
+        if (IsRobloxWebViewGameLaunchCommand(event.payload)) {
+          saw_relayed_join = true;
+        }
+        route_status = RouteWebSurfaceEvent(route, event, web_view_bridge);
       }
+      if (have_request) {
+        bool duplicate = false;
+        const Status dispatch_status = DispatchWebJoinLaunch(request,
+                                                             &duplicate);
+        if (dispatch_status.ok()) {
+          // A redelivered duplicate queues nothing, so it must not trigger
+          // the dismissal either.
+          launch_queued = !duplicate;
+        } else if (!private_join) {
+          // The host could not start this one after all, so relay it instead
+          // of dropping the click. Roblox defers it until the app navigates,
+          // which is the stall this path exists to avoid, but losing the join
+          // outright is worse than the old behaviour. It parsed as a join, so
+          // the dismissal below still applies to it.
+          saw_relayed_join = true;
+          route_status = RouteWebSurfaceEvent(route, event, web_view_bridge);
+        }
+      }
+    } else {
+      route_status = RouteWebSurfaceEvent(route, event, web_view_bridge);
     }
     SecurelyClearString(&event.payload);
     if (!route_status.ok()) {
@@ -1023,49 +1056,18 @@ Status RobloxExperienceComposition::RouteWebSurfaceEventBatch(
       return route_status;
     }
   }
-  bool launch_queued = false;
-  if (have_private_request && !private_request.join_attempt_id.empty()) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (private_request.join_attempt_id == last_private_join_attempt_id_) {
-      // Same click redelivered (hidden-page retry, helper flush, superseded
-      // surface): not a new user gesture. Re-queueing would relaunch the
-      // server after the user left it, once the leave cleared the
-      // active/pending dedup state. A fresh click carries a fresh id.
-      std::fprintf(stderr,
-                   "  [webview] duplicate private game join suppressed\n");
-      have_private_request = false;
-      private_request = RobloxExperienceLaunchRequest{};
-    }
-  }
-  if (have_private_request) {
-    const Status dispatch_status = Dispatch(private_request);
-    if (dispatch_status.ok()) {
-      std::fprintf(stderr,
-                   "  [webview] private game join translated; launching the "
-                   "experience\n");
-      launch_queued = true;
-      if (!private_request.join_attempt_id.empty()) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        last_private_join_attempt_id_ = private_request.join_attempt_id;
-      }
-    } else {
-      std::fprintf(stderr,
-                   "  [webview] could not queue the private game join: %s\n",
-                   dispatch_status.message().c_str());
-    }
-  }
-  if (!saw_standard_join && !launch_queued) {
+  if (!saw_relayed_join && !launch_queued) {
     return Status::Ok();
   }
-  // Every join command is already relayed. Closing the surface queues the
-  // window-gone event the app waits on (WebView.handleWindowClose for a
-  // MessageBus window, DataModel focus hand-back for a notification
-  // window, BrowserWindowClosed for a BrowserService window), but queued
-  // events are only published by the bridge drains. Without an immediate
-  // drain the join stays queued until an unrelated later page switch pumps
-  // the queue again. A failed dismissal only affects presentation, so it
-  // must not abort the platform event drain that keeps the running app
-  // alive.
+  // Every join command is already handled: host-launched ones were dispatched
+  // above, and any relayed one has reached Roblox. Closing the surface queues
+  // the window-gone event the app waits on (WebView.handleWindowClose for a
+  // MessageBus window, DataModel focus hand-back for a notification window,
+  // BrowserWindowClosed for a BrowserService window), but queued events are
+  // only published by the bridge drains. Without an immediate drain the join
+  // stays queued until an unrelated later page switch pumps the queue again. A
+  // failed dismissal only affects presentation, so it must not abort the
+  // platform event drain that keeps the running app alive.
   (void)DismissWebSurfaceForGameLaunch(source_process, process_generation,
                                        logical_generation);
   if (web_view_bridge != nullptr) {
@@ -1433,6 +1435,43 @@ Status RobloxExperienceComposition::Dispatch(
   return QueueLaunchRequestLocked(request);
 }
 
+Status RobloxExperienceComposition::DispatchWebJoinLaunch(
+    const RobloxExperienceLaunchRequest& request, bool* duplicate) {
+  if (duplicate != nullptr) {
+    *duplicate = false;
+  }
+  if (!request.join_attempt_id.empty()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (request.join_attempt_id == last_web_join_attempt_id_) {
+      // Same click redelivered (hidden-page retry, helper flush, superseded
+      // surface): not a new user gesture. Re-dispatching it after the user
+      // left the game would relaunch the server on the next page switch, once
+      // the leave cleared the active/pending dedup state. A fresh click
+      // carries a fresh id.
+      if (duplicate != nullptr) {
+        *duplicate = true;
+      }
+      std::fprintf(stderr,
+                   "  [webview] duplicate web game join suppressed\n");
+      return Status::Ok();
+    }
+  }
+  const Status status = Dispatch(request);
+  if (!status.ok()) {
+    std::fprintf(stderr, "  [webview] could not queue the web game join: %s\n",
+                 status.message().c_str());
+    return status;
+  }
+  std::fprintf(stderr,
+               "  [webview] web game join launched by the host; launching the "
+               "experience\n");
+  if (!request.join_attempt_id.empty()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    last_web_join_attempt_id_ = request.join_attempt_id;
+  }
+  return Status::Ok();
+}
+
 Status RobloxExperienceComposition::DrainExternalLaunchRequests() {
   std::size_t available = 0;
   {
@@ -1792,7 +1831,7 @@ Status RobloxExperienceComposition::Shutdown() {
     controlled_switch_waiting_for_return_ = false;
     lua_app_surface_recreation_pending_ = false;
     pending_launch_requests_.clear();
-    last_private_join_attempt_id_.clear();
+    last_web_join_attempt_id_.clear();
     bridge = std::move(bridge_);
     web_view_bridge = std::move(web_view_bridge_);
     browser_service_bridge = std::move(browser_service_bridge_);

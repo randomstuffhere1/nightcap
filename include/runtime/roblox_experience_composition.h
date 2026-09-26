@@ -202,13 +202,23 @@ class RobloxExperienceComposition final {
       uint64_t process_generation, uint64_t logical_generation,
       const WebViewHelperEvent& event);
   Status AcceptWebViewRobloxCookie(std::string_view value);
+  // Starts a web join the host owns instead of relaying it to Roblox, and
+  // records its joinAttemptId so a redelivered click is not dispatched twice.
+  // Sets *duplicate when the request repeats the click that was already
+  // dispatched and was therefore dropped without queueing anything. Returns a
+  // failure when the request could not be queued at all; the caller decides
+  // whether that still has to reach Roblox.
+  Status DispatchWebJoinLaunch(const RobloxExperienceLaunchRequest& request,
+                               bool* duplicate);
   // Relays every event drained in one helper flush before dismissing the
   // surface for a game launch. A private-server join arrives as several hybrid
   // messages in a single flush (e.g. a RequestGameJob precursor followed by
   // the JoinServer command carrying the link/access code); dismissing after
   // the first message would invalidate the generations the remaining messages
-  // are validated against and silently drop the real join. Clears each payload
-  // once relayed.
+  // are validated against and silently drop the real join. A launchGame the
+  // host can launch itself is dispatched instead of relayed, because Roblox
+  // defers a signalled launchGame until the app next navigates. Clears each
+  // payload once relayed.
   Status RouteWebSurfaceEventBatch(
       const std::shared_ptr<WebViewHelperProcess>& source_process,
       uint64_t process_generation, uint64_t logical_generation,
@@ -298,13 +308,14 @@ class RobloxExperienceComposition final {
   std::unique_ptr<LaunchTask> active_launch_;
   std::optional<RobloxExperienceLaunchRequest> presence_request_;
   std::string active_game_canonical_json_;
-  // joinAttemptId of the last translated private web join that was queued.
+  // joinAttemptId of the last web join the host launched itself, whether it
+  // came from the private-join translation or from a parsed launchGame.
   // The website generates a fresh id per click, so a repeated id marks a
   // stale retry (hidden page, helper redelivery) rather than a new user
   // gesture. Re-dispatching it after the user left the game would relaunch
   // the server on the next page switch, once the queue/return bookkeeping no
   // longer deduplicates it.
-  std::string last_private_join_attempt_id_;
+  std::string last_web_join_attempt_id_;
   OwnedPthread launch_worker_;
   uint64_t next_request_id_ = 1;
   bool platform_protocols_initialized_ = false;

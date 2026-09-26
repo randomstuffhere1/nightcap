@@ -1392,6 +1392,89 @@ TEST_F(RobloxExperienceCompositionWebSurfaceTest,
 }
 
 TEST_F(RobloxExperienceCompositionWebSurfaceTest,
+       LaunchesParsedServerJoinWithoutWaitingForNavigation) {
+  jnivm::VM vm;
+  Probe probe{&vm};
+  g_probe = &probe;
+  for (const char* class_name : {
+           "com/roblox/engine/jni/NativeGLInterface",
+           "android/view/Surface",
+           "com/roblox/engine/jni/model/PlatformParams",
+           "android/app/Activity",
+           "com/roblox/engine/jni/autovalue/AutoValue_StartGameParams",
+           "com/roblox/engine/jni/autovalue/StartAppParams",
+           "com/roblox/universalapp/messagebus/MessageBus",
+           "com/roblox/universalapp/messagebus/Connection",
+           "com/roblox/engine/jni/memstorage/MemStorage",
+           "com/roblox/engine/jni/memstorage/Connection",
+           "com/roblox/engine/jni/memstorage/Callback",
+       }) {
+    vm.RegisterClass(class_name);
+  }
+  RobloxExperienceComposition composition(
+      {vm.GetJavaVM(), &vm, Prepare}, {GetLaunchId, Subscribe, Disconnect},
+      {GetWebViewOpenId, GetWebViewHandleWindowCloseId, GetWebViewProtocolName,
+       GetWebViewAvailabilityId, GetWebViewMessageId, InitializeWebViewProtocol,
+       Subscribe, Disconnect, SetRequestHandler, ClearNativeRequestHandler,
+       PublishRaw, BroadcastDataModelFocus, GetWebViewMutateId,
+       GetWebViewCloseId, SignalWebViewJavascriptCallback,
+       UpdateCookieSetHandler},
+      BrowserServiceSymbols(), PermissionsSymbols(),
+      {Foreground, Start, Update, PauseGame, ResumeGame, Leave, PauseApp,
+       DestroyApp, UpdateApp, StartApp, CallMessagesFromMainThread},
+      JniFactory(&probe), {&probe, RegisterObserver, ClearObserver}, {},
+      nullptr, {}, {&probe, ObservePresence}, false, true);
+  RobloxLuaAppExperienceReadiness readiness;
+  readiness.principal = {GameSessionPrincipalKind::kAuthenticated, 4, "42",
+                         "https://www.roblox.com"};
+  readiness.surface = {7, 0x1234, 1280, 720};
+  readiness.username = "typed-user";
+
+  ASSERT_TRUE(composition.InitializePlatformProtocols().ok());
+  ASSERT_TRUE(composition.OnLuaAppReady(readiness).ok());
+  ASSERT_TRUE(composition.subscribed());
+
+  // Roblox defers a signalled launchGame until the Lua app next navigates, so
+  // relaying this one stalls the join until the user clicks a sidebar tab. The
+  // host parses and starts it instead, on both hybrid transports.
+  const std::string server_join =
+      R"({"moduleID":"Game","functionName":"launchGame",)"
+      R"("params":{"request":{"requestType":"RequestGameJob",)"
+      R"("placeId":"1962086868","instanceId":"97ea-49e4",)"
+      R"("isPlayTogetherGame":false,"browserTrackerId":"tracker"}},)"
+      R"("callbackID":"join-callback"})";
+  for (const WebViewHelperEventType type :
+       {WebViewHelperEventType::kExecuteRoblox,
+        WebViewHelperEventType::kRobloxWkHybrid}) {
+    auto exit_probe = std::make_shared<ExitProbe>();
+    Activate(&composition, false, 71, 81, exit_probe);
+    std::vector<WebViewHelperEvent> batch = {{type, server_join}};
+    ASSERT_TRUE(RouteBatch(&composition, 71, 81, batch).ok());
+    // Queued as a host launch and never forwarded, so the deferred copy Roblox
+    // is still holding cannot start a second join on a later page switch.
+    EXPECT_TRUE(probe.web_view_javascript_callbacks.empty());
+    EXPECT_EQ(exit_probe->calls, 1);
+  }
+
+  // A command the host cannot parse stays with Roblox and must not dismiss the
+  // window, or a verification page would vanish under the user.
+  auto exit_probe = std::make_shared<ExitProbe>();
+  Activate(&composition, false, 91, 92, exit_probe);
+  const std::string navigation =
+      R"({"moduleID":"Navigation","functionName":"navigateToFeature",)"
+      R"("params":{"params":{"feature":"CaptchaShown"}},"callbackID":"cap"})";
+  std::vector<WebViewHelperEvent> navigation_batch = {
+      {WebViewHelperEventType::kRobloxWkHybrid, navigation},
+  };
+  ASSERT_TRUE(RouteBatch(&composition, 91, 92, navigation_batch).ok());
+  EXPECT_EQ(probe.web_view_javascript_callbacks.back(), navigation);
+  EXPECT_EQ(exit_probe->calls, 0);
+
+  EXPECT_TRUE(composition.Shutdown().ok());
+  g_probe = nullptr;
+}
+
+TEST_F(RobloxExperienceCompositionWebSurfaceTest,
        SuppressesRedeliveredPrivateJoinAfterLeave) {
   jnivm::VM vm;
   Probe probe{&vm};
