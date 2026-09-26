@@ -10,7 +10,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(Mocktail
   VERSION 1.0.4
-  DESCRIPTION "Android x86-64 Roblox compatibility runtime for Linux"
+  DESCRIPTION "Android Roblox compatibility runtime for Linux"
   LANGUAGES CXX
 )
 
@@ -906,7 +906,7 @@ set(CPACK_PACKAGE_CONTACT "vii <coderdayton14@gmail.com>")
 set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/CoderDayton/nightcap")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "${PROJECT_DESCRIPTION}")
 set(CPACK_PACKAGE_DESCRIPTION
-  "Runs the Android x86-64 Roblox client on Linux."
+  "Runs the Android Roblox client on Linux."
 )
 set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
 set(CPACK_PACKAGING_INSTALL_PREFIX "/usr")

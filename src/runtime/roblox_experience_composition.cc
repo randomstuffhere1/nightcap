@@ -12,6 +12,7 @@
 
 #include "jnivm/jnivm.h"
 #include "runtime/external_launch_broker.h"
+#include "runtime/roblox_launch_uri.h"
 #include "runtime/webview_helper_launcher.h"
 #include "window/window.h"
 
