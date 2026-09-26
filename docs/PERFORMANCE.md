@@ -151,6 +151,42 @@ Set it to `1` to turn upscaling off:
 MOCKTAIL_SMALL_TEXTURE_UPSCALE=1 mocktail
 ```
 
+## The pipeline cache
+
+The first visit to an experience compiles every pipeline the place uses. That
+shows up in the trace as `vkCreateShaderModule` and `vkCreateGraphicsPipelines`
+slices, and it is most of the hitch on entering a place you have not been in.
+
+The Vulkan adapter now keeps the driver's own pipeline cache blob under
+`~/.cache/mocktail/graphics/pipelinecache` and feeds it back the next time the
+same engine creates its cache, so the second visit skips the compile. Startup
+prints which way it went:
+
+```
+  [vulkan] pipeline cache building: /home/you/.cache/mocktail/graphics/pipelinecache/NVIDIA_GeForce_RTX_4090-version-1234-8f2a1c….vkpipelinecache
+  [vulkan] pipeline cache reusing: …/pipelinecache/NVIDIA_GeForce_RTX_4090-version-1234-8f2a1c….vkpipelinecache (3145728 bytes)
+```
+
+`building` means there was nothing stored yet, so that session compiles and
+writes a blob on the way out. `reusing` means the stored blob was handed to the
+driver as initial data.
+
+The file name is keyed on the GPU, the driver version, and the Roblox version,
+so a driver update or a Roblox update lands on a new key and starts fresh
+rather than handing the driver a blob it cannot use. Blobs are capped at 64 MiB
+and carry a checksum; one that fails either check is discarded rather than
+retried on every launch.
+
+Three settings, all in `config.yaml` under `graphics`:
+
+- `pipeline_cache: on` (default) reads and writes the cache.
+- `pipeline_cache: clear` deletes the stored blob and runs that one session
+  uncached, which is the repair to reach for if a place ever comes up wrong.
+- `pipeline_cache: off` never reads or writes one.
+
+`MOCKTAIL_PIPELINE_CACHE_MODE` sets the same thing from the environment, and
+`MOCKTAIL_PIPELINE_CACHE_DIR` moves the directory.
+
 ## Frame rate and present mode
 
 `graphics.frame_rate_limit` (default `-1`) leaves Roblox's own in-game

@@ -172,6 +172,7 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       "graphics.backend",
       "graphics.frame_rate_limit",
       "graphics.vsync",
+      "graphics.pipeline_cache",
       "performance.multithreaded_rendering",
       "performance.physics_worker_mode",
       "performance.memory_limit_mb",
@@ -340,6 +341,15 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       return false;
     }
     (*environment)["MOCKTAIL_VSYNC"] = *vsync;
+  }
+  if (const auto pipeline_cache = value("graphics.pipeline_cache");
+      pipeline_cache.has_value()) {
+    if (*pipeline_cache != "on" && *pipeline_cache != "off" &&
+        *pipeline_cache != "clear") {
+      *error = "graphics.pipeline_cache must be on, off, or clear";
+      return false;
+    }
+    (*environment)["MOCKTAIL_PIPELINE_CACHE_MODE"] = *pipeline_cache;
   }
   if (const auto multithreaded_rendering =
           value("performance.multithreaded_rendering");
@@ -791,6 +801,8 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
     result.error = "graphics backend is invalid";
   } else if (!result.config.theme_mode_valid()) {
     result.error = "theme mode is invalid";
+  } else if (!result.config.pipeline_cache_mode_valid()) {
+    result.error = "pipeline cache mode is invalid";
   } else if (!result.config.window().high_dpi_valid) {
     result.error = "window high-DPI policy is invalid";
   } else if (result.config.vsync_mode() != "auto" &&
@@ -927,6 +939,8 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
       SetEnvironmentValue("MOCKTAIL_FRAME_RATE_LIMIT",
                           FrameRateValue(config.frame_rate()), error) &&
       SetEnvironmentValue("MOCKTAIL_VSYNC", config.vsync_mode(), error) &&
+      SetEnvironmentValue("MOCKTAIL_PIPELINE_CACHE_MODE",
+                          config.pipeline_cache_mode(), error) &&
       SetEnvironmentValue(
           "MOCKTAIL_MULTITHREADED_RENDERING",
           config.performance().multithreaded_rendering ? "1" : "0", error) &&

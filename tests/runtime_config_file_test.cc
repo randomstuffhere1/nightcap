@@ -574,6 +574,46 @@ audio:
   EXPECT_NE(error.find("invalid audio output device"), std::string::npos);
 }
 
+TEST(RuntimeConfigFileTest, AcceptsEveryPipelineCacheMode) {
+  TemporaryDirectory temporary;
+  for (const char* mode : {"on", "off", "clear"}) {
+    const std::filesystem::path file = temporary.Write(std::string(R"yaml(
+version: 1
+graphics:
+  pipeline_cache: )yaml") + mode + "\n");
+    const RuntimeConfigLoadResult loaded =
+        LoadRuntimeConfig(MapEnvironment(), file);
+    ASSERT_TRUE(loaded) << mode << ": " << loaded.error;
+    EXPECT_TRUE(loaded.file_loaded);
+    EXPECT_EQ(loaded.config.pipeline_cache_mode(), mode);
+  }
+}
+
+TEST(RuntimeConfigFileTest, DefaultsToPipelineCacheOn) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path file = temporary.Write(R"yaml(
+version: 1
+)yaml");
+  const RuntimeConfigLoadResult loaded =
+      LoadRuntimeConfig(MapEnvironment(), file);
+  ASSERT_TRUE(loaded) << loaded.error;
+  EXPECT_EQ(loaded.config.pipeline_cache_mode(), "on");
+}
+
+TEST(RuntimeConfigFileTest, RejectsAnUnknownPipelineCacheMode) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path file = temporary.Write(R"yaml(
+version: 1
+graphics:
+  pipeline_cache: maybe
+)yaml");
+  unsetenv("MOCKTAIL_PIPELINE_CACHE_MODE");
+  const RuntimeConfigLoadResult loaded =
+      LoadRuntimeConfig(MapEnvironment(), file);
+  EXPECT_FALSE(loaded);
+  EXPECT_NE(loaded.error.find("graphics.pipeline_cache"), std::string::npos);
+}
+
 TEST(RuntimeConfigFileTest, RejectsInvalidHighDpiPolicy) {
   TemporaryDirectory temporary;
   const std::filesystem::path file = temporary.Write(R"yaml(

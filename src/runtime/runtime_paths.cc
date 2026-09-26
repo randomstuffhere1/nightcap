@@ -343,6 +343,7 @@ RuntimePaths RuntimePaths::FromEnvironment(
   paths.android_cache_root_ = paths.cache_root_ / "android";
   paths.vulkan_shader_cache_file_ =
       paths.cache_root_ / "graphics/shadercachevk.bin";
+  paths.pipeline_cache_dir_ = paths.cache_root_ / "graphics/pipelinecache";
   paths.config_file_ = paths.config_root_ / "config.yaml";
   paths.active_payload_manifest_ = paths.data_root_ / "current.json";
 
@@ -593,7 +594,8 @@ bool ExportRuntimePathEnvironment(const RuntimePaths& paths,
   std::error_code filesystem_error;
   for (const std::filesystem::path& directory :
        {paths.android_runtime_root(), paths.android_cache_root(),
-        paths.vulkan_shader_cache_file().parent_path()}) {
+        paths.vulkan_shader_cache_file().parent_path(),
+        paths.pipeline_cache_dir()}) {
     if (!RuntimePaths::EnsureDirectory(directory, &filesystem_error)) {
       if (error != nullptr) {
         *error = "cannot create resolved runtime path: " + directory.string();
@@ -608,6 +610,8 @@ bool ExportRuntimePathEnvironment(const RuntimePaths& paths,
                                paths.android_cache_root(), error) &&
          SetEnvironmentDefault("MOCKTAIL_VULKAN_SHADER_CACHE_HOST_PATH",
                                paths.vulkan_shader_cache_file(), error) &&
+         SetEnvironmentDefault("MOCKTAIL_PIPELINE_CACHE_DIR",
+                               paths.pipeline_cache_dir(), error) &&
          SetEnvironmentDefault("MOCKTAIL_TEXTURE_OVERRIDE_DIR",
                                paths.config_root() / "textures", error);
 }

@@ -128,6 +128,8 @@ TEST(RuntimePathsTest, DerivesXdgDefaults) {
             "/home/mocktail/.cache/mocktail/android");
   EXPECT_EQ(paths.vulkan_shader_cache_file(),
             "/home/mocktail/.cache/mocktail/graphics/shadercachevk.bin");
+  EXPECT_EQ(paths.pipeline_cache_dir(),
+            "/home/mocktail/.cache/mocktail/graphics/pipelinecache");
   EXPECT_EQ(paths.auth_root(), "/home/mocktail/.local/share/mocktail/auth");
   EXPECT_EQ(paths.cookie_file(),
             "/home/mocktail/.local/share/mocktail/auth/roblox.cookie");
@@ -594,6 +596,7 @@ TEST(RuntimePathsTest, ExportsXdgBackedAndroidPathsAndCreatesParents) {
   ASSERT_EQ(unsetenv("MOCKTAIL_RUNTIME_ROOT"), 0);
   ASSERT_EQ(unsetenv("MOCKTAIL_ANDROID_CACHE_HOST_ROOT"), 0);
   ASSERT_EQ(unsetenv("MOCKTAIL_VULKAN_SHADER_CACHE_HOST_PATH"), 0);
+  ASSERT_EQ(unsetenv("MOCKTAIL_PIPELINE_CACHE_DIR"), 0);
   ASSERT_EQ(unsetenv("MOCKTAIL_TEXTURE_OVERRIDE_DIR"), 0);
 
   const MapEnvironment environment({
@@ -618,6 +621,11 @@ TEST(RuntimePathsTest, ExportsXdgBackedAndroidPathsAndCreatesParents) {
   EXPECT_TRUE(std::filesystem::is_directory(paths.android_cache_root()));
   EXPECT_TRUE(std::filesystem::is_directory(
       paths.vulkan_shader_cache_file().parent_path()));
+  // The Vulkan adapter reads its pipeline cache directory from the
+  // environment, so this has to be exported and created.
+  EXPECT_STREQ(std::getenv("MOCKTAIL_PIPELINE_CACHE_DIR"),
+               paths.pipeline_cache_dir().c_str());
+  EXPECT_TRUE(std::filesystem::is_directory(paths.pipeline_cache_dir()));
 }
 
 TEST(RuntimePathsTest, PreservesExplicitAndroidPathOverrides) {

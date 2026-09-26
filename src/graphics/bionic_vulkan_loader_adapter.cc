@@ -13,6 +13,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -22,6 +23,7 @@
 #include "mocktail/graphics/chrome_trace_writer.h"
 #include "mocktail/graphics/present_mode_policy.h"
 #include "mocktail/graphics/vulkan_etc2_emulation.h"
+#include "mocktail/graphics/vulkan_pipeline_cache.h"
 #include "mocktail/graphics/vulkan_text_overlay_compositor.h"
 #include "mocktail/platform/platform_runtime.h"
 
@@ -194,6 +196,8 @@ struct AdapterState {
   size_t active_instance_count = 0;
   mocktail::graphics::VulkanTextOverlayCompositor text_overlay;
   mocktail::graphics::VulkanEtc2Emulation etc2;
+  std::mutex pipeline_cache_mutex;
+  mocktail::graphics::PipelineCacheRegistry pipeline_caches;
   std::atomic<NotePresentFn> note_present{nullptr};
   std::atomic<NoteHostPresentBeginFn> note_host_present_begin{nullptr};
   std::atomic<NoteHostPresentEndFn> note_host_present_end{nullptr};
@@ -1176,7 +1180,8 @@ void RecordProfiledFrame(mocktail::graphics::ChromeTraceWriter* trace,
 }
 
 // Pipeline and shader creation is wrapped only while profiling, so a normal
-// session calls the host driver directly.
+// session calls the host driver directly. The pipeline cache pair is the
+// exception; see CachedCreatePipelineCache.
 VkResult VKAPI_CALL ProfiledCreateGraphicsPipelines(
     VkDevice device, VkPipelineCache cache, std::uint32_t count,
     const VkGraphicsPipelineCreateInfo* infos,
@@ -1235,7 +1240,12 @@ VkResult VKAPI_CALL ProfiledCreateShaderModule(
   return result;
 }
 
-VkResult VKAPI_CALL ProfiledCreatePipelineCache(
+// Seeds a new pipeline cache from the stored blob, and adopts the cache so it
+// is written back when the engine destroys it. The seeded bytes are what turn
+// a first visit to an experience into a cached one: without them every launch
+// recompiles every pipeline the place uses, which is the stutter the trace's
+// pipeline slices show.
+VkResult VKAPI_CALL CachedCreatePipelineCache(
     VkDevice device, const VkPipelineCacheCreateInfo* create_info,
     const VkAllocationCallbacks* allocator, VkPipelineCache* cache) {
   const auto host = reinterpret_cast<PFN_vkCreatePipelineCache>(
@@ -1245,13 +1255,98 @@ VkResult VKAPI_CALL ProfiledCreatePipelineCache(
   }
   mocktail::graphics::TraceScope scope(mocktail::graphics::ActiveProfileTrace(),
                                        "vkCreatePipelineCache", "pipeline");
-  const VkResult result = host(device, create_info, allocator, cache);
+
+  const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(device);
+  AdapterState& state = State();
+  std::vector<std::uint8_t> seed;
+  {
+    std::lock_guard<std::mutex> lock(state.pipeline_cache_mutex);
+    mocktail::graphics::PipelineCacheStore* store =
+        state.pipeline_caches.StoreFor(key);
+    if (store != nullptr && store->enabled() && store->has_seed()) {
+      seed = store->seed();
+    }
+  }
+
+  // A caller that brought its own initial data owns those bytes, so the
+  // stored blob is not injected over them and the cache is not adopted.
+  const bool caller_seeded = create_info != nullptr &&
+                             create_info->pInitialData != nullptr &&
+                             create_info->initialDataSize != 0;
+  VkPipelineCacheCreateInfo seeded_info{};
+  const VkPipelineCacheCreateInfo* host_info = create_info;
+  if (!caller_seeded && !seed.empty() && create_info != nullptr) {
+    seeded_info = *create_info;
+    seeded_info.pInitialData = seed.data();
+    seeded_info.initialDataSize = seed.size();
+    host_info = &seeded_info;
+  }
+
+  const VkResult result = host(device, host_info, allocator, cache);
+  if (result == VK_SUCCESS && cache != nullptr && *cache != VK_NULL_HANDLE) {
+    const std::uintptr_t adopted = reinterpret_cast<std::uintptr_t>(*cache);
+    std::lock_guard<std::mutex> lock(state.pipeline_cache_mutex);
+    if (mocktail::graphics::PipelineCacheStore* store =
+            state.pipeline_caches.StoreFor(key);
+        store != nullptr && store->enabled() && !caller_seeded) {
+      store->Adopt(adopted);
+    }
+  }
+  scope.Arg("seeded_bytes", static_cast<std::int64_t>(seed.size()));
   scope.Arg("initial_bytes",
             create_info != nullptr
                 ? static_cast<std::int64_t>(create_info->initialDataSize)
                 : 0);
   scope.Arg("result", result);
   return result;
+}
+
+// Persists the blob on the way out, which is also the only point at which the
+// driver has finished writing to it.
+void VKAPI_CALL CachedDestroyPipelineCache(
+    VkDevice device, VkPipelineCache cache,
+    const VkAllocationCallbacks* allocator) {
+  const auto host = reinterpret_cast<PFN_vkDestroyPipelineCache>(
+      HostDeviceProc(device, "vkDestroyPipelineCache"));
+  const std::uintptr_t device_key = reinterpret_cast<std::uintptr_t>(device);
+  const std::uintptr_t cache_key = reinterpret_cast<std::uintptr_t>(cache);
+  if (host != nullptr && cache != VK_NULL_HANDLE) {
+    mocktail::graphics::PipelineCacheStore* store = nullptr;
+    {
+      AdapterState& state = State();
+      std::lock_guard<std::mutex> lock(state.pipeline_cache_mutex);
+      store = state.pipeline_caches.StoreFor(device_key);
+    }
+    if (store != nullptr && store->Owns(cache_key)) {
+      std::size_t size = 0;
+      if (const auto host_get_data =
+              reinterpret_cast<PFN_vkGetPipelineCacheData>(
+                  HostDeviceProc(device, "vkGetPipelineCacheData"));
+          host_get_data != nullptr &&
+          host_get_data(device, cache, &size, nullptr) == VK_SUCCESS &&
+          size != 0) {
+        std::vector<std::uint8_t> payload(size);
+        if (host_get_data(device, cache, &size, payload.data()) == VK_SUCCESS) {
+          payload.resize(size);
+          if (store->Persist(cache_key, payload.data(), payload.size())) {
+            std::fprintf(stderr,
+                         "  [vulkan] stored pipeline cache: %s (%zu bytes)\n",
+                         store->file().c_str(), payload.size());
+          }
+        }
+      }
+    }
+    host(device, cache, allocator);
+  }
+  {
+    AdapterState& state = State();
+    std::lock_guard<std::mutex> lock(state.pipeline_cache_mutex);
+    if (mocktail::graphics::PipelineCacheStore* store =
+            state.pipeline_caches.StoreFor(device_key);
+        store != nullptr) {
+      store->Forget(cache_key);
+    }
+  }
 }
 
 VkResult VKAPI_CALL ProfiledAllocateMemory(
@@ -1281,7 +1376,18 @@ VkResult VKAPI_CALL ProfiledAllocateMemory(
 // These take precedence over the ETC2 wrappers, so a command both wrap is
 // timed inside its adapter function instead.
 PFN_vkVoidFunction ProfileAdapterProc(const char* name) {
-  if (name == nullptr || mocktail::graphics::ActiveProfileTrace() == nullptr) {
+  if (name == nullptr) {
+    return nullptr;
+  }
+  // The pipeline cache pair is always wrapped, because persistence is not a
+  // profiling feature. Its wrapper emits its own trace scope.
+  if (std::strcmp(name, "vkCreatePipelineCache") == 0) {
+    return reinterpret_cast<PFN_vkVoidFunction>(CachedCreatePipelineCache);
+  }
+  if (std::strcmp(name, "vkDestroyPipelineCache") == 0) {
+    return reinterpret_cast<PFN_vkVoidFunction>(CachedDestroyPipelineCache);
+  }
+  if (mocktail::graphics::ActiveProfileTrace() == nullptr) {
     return nullptr;
   }
   if (std::strcmp(name, "vkCreateGraphicsPipelines") == 0) {
@@ -1295,13 +1401,65 @@ PFN_vkVoidFunction ProfileAdapterProc(const char* name) {
   if (std::strcmp(name, "vkCreateShaderModule") == 0) {
     return reinterpret_cast<PFN_vkVoidFunction>(ProfiledCreateShaderModule);
   }
-  if (std::strcmp(name, "vkCreatePipelineCache") == 0) {
-    return reinterpret_cast<PFN_vkVoidFunction>(ProfiledCreatePipelineCache);
-  }
   if (std::strcmp(name, "vkAllocateMemory") == 0) {
     return reinterpret_cast<PFN_vkVoidFunction>(ProfiledAllocateMemory);
   }
   return nullptr;
+}
+
+std::string EnvOr(const char* name, const char* fallback) {
+  const char* value = std::getenv(name);
+  return (value != nullptr && value[0] != '\0') ? std::string(value)
+                                                : std::string(fallback);
+}
+
+// A stored pipeline blob is only meaningful to the driver build and the Roblox
+// build that produced it, so the cache is keyed on both. A Roblox update or a
+// driver upgrade lands on a different key and simply misses, which costs the
+// same as having no cache and never yields a wrong one.
+void ConfigurePipelineCache(VkDevice device,
+                            const VkPhysicalDeviceProperties& properties) {
+  const mocktail::graphics::PipelineCacheMode mode =
+      mocktail::graphics::PipelineCacheRegistry::ConfiguredMode();
+  mocktail::graphics::PipelineCacheKey key;
+  key.device_name = properties.deviceName;
+  key.vendor_id = properties.vendorID;
+  key.device_id = properties.deviceID;
+  key.driver_version = properties.driverVersion;
+  key.driver_info = EnvOr("MOCKTAIL_VULKAN_DRIVER_INFO", "");
+  key.api_version = properties.apiVersion;
+  key.payload_version = EnvOr("MOCKTAIL_ROBLOX_VERSION_CODE", "unknown");
+
+  const std::string directory = EnvOr("MOCKTAIL_PIPELINE_CACHE_DIR", "");
+  const std::uintptr_t device_key = reinterpret_cast<std::uintptr_t>(device);
+  AdapterState& state = State();
+  std::lock_guard<std::mutex> lock(state.pipeline_cache_mutex);
+  if (mode == mocktail::graphics::PipelineCacheMode::kClear) {
+    state.pipeline_caches.ConfigureDevice(device_key, directory, key, mode);
+    std::fprintf(stderr, "  [vulkan] pipeline cache cleared; this session "
+                         "runs uncached\n");
+    return;
+  }
+  if (directory.empty() ||
+      !state.pipeline_caches.ConfigureDevice(device_key, directory, key, mode)) {
+    std::fprintf(stderr, "  [vulkan] pipeline cache %s "
+                         "(MOCKTAIL_PIPELINE_CACHE_MODE=%s)\n",
+                 directory.empty() ? "unavailable: no cache directory"
+                                   : "unavailable",
+                 mocktail::graphics::PipelineCacheModeName(mode));
+    return;
+  }
+  const mocktail::graphics::PipelineCacheStore* store =
+      state.pipeline_caches.StoreFor(device_key);
+  if (store == nullptr) {
+    return;
+  }
+  std::fprintf(stderr, "  [vulkan] pipeline cache %s: %s", 
+               store->has_seed() ? "reusing" : "building", store->file().c_str());
+  if (store->has_seed()) {
+    std::fprintf(stderr, " (%zu bytes)", store->seed_size());
+  }
+  std::fprintf(stderr, "\n");
 }
 
 template <typename Function>
@@ -1813,6 +1971,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
   }
   RegisterHostDeviceDispatch(*device, physical_device,
                              host_get_device_proc_addr);
+  ConfigurePipelineCache(*device, properties);
   VkPhysicalDeviceMemoryProperties memory_properties{};
   if (const auto host_memory_properties =
           reinterpret_cast<PFN_vkGetPhysicalDeviceMemoryProperties>(
@@ -1882,6 +2041,12 @@ vkDestroyDevice(VkDevice device, const VkAllocationCallbacks* allocator) {
       HostDeviceProc(device, "vkDestroyDevice"));
   State().text_overlay.DestroyDevice(device);
   State().etc2.DestroyDevice(device);
+  {
+    AdapterState& state = State();
+    std::lock_guard<std::mutex> lock(state.pipeline_cache_mutex);
+    state.pipeline_caches.RemoveDevice(
+        reinterpret_cast<std::uintptr_t>(device));
+  }
   if (host_destroy != nullptr) {
     host_destroy(device, allocator);
   }

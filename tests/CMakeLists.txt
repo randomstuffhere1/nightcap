@@ -564,6 +564,17 @@ target_link_libraries(vulkan_etc2_emulation_test PRIVATE GTest::gtest_main
   Threads::Threads PkgConfig::LIBPNG)
 mocktail_apply_compile_options(vulkan_etc2_emulation_test)
 
+add_executable(vulkan_pipeline_cache_test
+  vulkan_pipeline_cache_test.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/vulkan_pipeline_cache.cc
+)
+target_include_directories(vulkan_pipeline_cache_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(vulkan_pipeline_cache_test PRIVATE GTest::gtest_main
+  Threads::Threads)
+mocktail_apply_compile_options(vulkan_pipeline_cache_test)
+
 add_executable(video_driver_policy_test
   video_driver_policy_test.cc
 )
@@ -1032,6 +1043,7 @@ gtest_discover_tests(vulkan_text_overlay_compositor_test)
 gtest_discover_tests(etc2_decoder_test)
 gtest_discover_tests(chrome_trace_writer_test)
 gtest_discover_tests(vulkan_etc2_emulation_test)
+gtest_discover_tests(vulkan_pipeline_cache_test)
 gtest_discover_tests(video_driver_policy_test)
 gtest_discover_tests(window_surface_lifecycle_test)
 gtest_discover_tests(window_creation_policy_test)

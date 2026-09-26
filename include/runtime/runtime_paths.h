@@ -62,6 +62,10 @@ class RuntimePaths {
   const std::filesystem::path& vulkan_shader_cache_file() const {
     return vulkan_shader_cache_file_;
   }
+  // Where the Vulkan adapter keeps the driver pipeline cache blob.
+  const std::filesystem::path& pipeline_cache_dir() const {
+    return pipeline_cache_dir_;
+  }
   const std::filesystem::path& config_file() const { return config_file_; }
   const std::filesystem::path& active_payload_manifest() const {
     return active_payload_manifest_;
@@ -96,6 +100,7 @@ class RuntimePaths {
   std::filesystem::path android_data_root_;
   std::filesystem::path android_cache_root_;
   std::filesystem::path vulkan_shader_cache_file_;
+  std::filesystem::path pipeline_cache_dir_;
   std::filesystem::path config_file_;
   std::filesystem::path active_payload_manifest_;
   std::filesystem::path cookie_file_;

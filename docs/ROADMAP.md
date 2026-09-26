@@ -38,17 +38,23 @@ Done when a plugged-in pad shows its own buttons.
 
 ## 3. First-load stutter
 
-The `--profile` trace now shows shader compiles and pipeline creation, so
-the stutter on first entering an experience can be measured.
+The pipeline cache shipped and removed the recompile. What is left is the part
+a cache cannot cover: a place that streams new materials in while you are
+already in it still compiles on the frame that needs them.
 
-- Cut the stutter the trace shows, and prove it with a before and after
-  trace per [BENCHMARKING.md](BENCHMARKING.md).
+- Record a before and after trace per [BENCHMARKING.md](BENCHMARKING.md) for the
+  cache change, and confirm how much of the original hitch it accounted for.
+- Look at what the remaining trace shows for mid-session material streaming.
 
 Done when entering a fresh experience no longer drops frames on shader
 compiles.
 
 ## Shipped
 
+- The driver's compiled-pipeline cache is reused between launches, which
+  removes most of the shader-compile stutter on the first visit to an
+  experience. `graphics.pipeline_cache` turns it off, or clears it for one
+  session. See [PERFORMANCE.md](PERFORMANCE.md).
 - Lower input latency: frames are presented as soon as they are ready.
 - Controllers hot-plug without a restart, and a pad that is unplugged mid-game
   releases its held buttons and sticks instead of leaving them stuck.

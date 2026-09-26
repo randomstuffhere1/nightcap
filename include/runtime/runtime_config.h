@@ -122,6 +122,14 @@ class RuntimeConfig {
   }
   const FrameRatePolicy& frame_rate() const { return frame_rate_; }
   const std::string& vsync_mode() const { return vsync_mode_; }
+  // on, off, or clear. Read by the Vulkan adapter through the environment.
+  const std::string& pipeline_cache_mode() const {
+    return pipeline_cache_mode_;
+  }
+  bool pipeline_cache_mode_valid() const {
+    return pipeline_cache_mode_ == "on" || pipeline_cache_mode_ == "off" ||
+           pipeline_cache_mode_ == "clear";
+  }
   const PerformancePolicy& performance() const { return performance_; }
   const std::string& audio_output_device() const {
     return audio_output_device_;
@@ -172,6 +180,7 @@ class RuntimeConfig {
   std::optional<std::string> roblox_http_user_agent_;
   FrameRatePolicy frame_rate_;
   std::string vsync_mode_ = "auto";
+  std::string pipeline_cache_mode_ = "on";
   PerformancePolicy performance_;
   std::string audio_output_device_ = "default";
   bool audio_output_device_valid_ = true;
