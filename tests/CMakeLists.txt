@@ -29,6 +29,21 @@ if(MOCKTAIL_TEST_PYTHON AND MOCKTAIL_TEST_OPENSSL)
   set_tests_properties(FleasionIntegrationTest.ProxyAndTrust PROPERTIES TIMEOUT 45)
 endif()
 
+add_executable(ui_config_overrides_test
+  ui_config_overrides_test.cc
+  ${PROJECT_SOURCE_DIR}/src/runtime/ui_config_overrides.cc
+)
+target_include_directories(ui_config_overrides_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(ui_config_overrides_test PRIVATE
+  GTest::gtest_main
+  Threads::Threads
+  PkgConfig::LIBYAML
+)
+mocktail_apply_compile_options(ui_config_overrides_test)
+gtest_discover_tests(ui_config_overrides_test)
+
 add_executable(runtime_config_file_test runtime_config_file_test.cc)
 target_link_libraries(runtime_config_file_test PRIVATE
   Mocktail::Runtime

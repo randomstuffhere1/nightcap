@@ -1,5 +1,7 @@
 #include "runtime/runtime_config_file.h"
 
+#include "runtime/ui_config_overrides.h"
+
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -822,8 +824,26 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
   if (!LoadYaml(config_file, &yaml, &result.file_loaded, &result.error)) {
     return result;
   }
+  // The settings window writes its own file next to config.yaml. It is merged
+  // into the same map of dotted keys and validated by the same pass, so it
+  // cannot introduce a key config.yaml could not have contained, and a value
+  // it sets outranks a hand-edited one because setting it in the window is the
+  // more deliberate of the two. config.yaml itself is never rewritten.
+  const std::filesystem::path ui_config =
+      config_file.parent_path() / kUiConfigFileName;
+  UiConfigOverrides ui_overrides;
+  bool ui_loaded = false;
+  if (!LoadUiConfigOverrides(ui_config, &ui_overrides, &ui_loaded,
+                             &result.error)) {
+    result.ui_config_loaded = false;
+    return result;
+  }
+  result.ui_config_loaded = ui_loaded;
+  for (const auto& [key, value] : ui_overrides.values) {
+    yaml[key] = value;
+  }
   ValueMap fallback;
-  if (result.file_loaded && !ValidateAndMap(yaml, &fallback, &result.error)) {
+  if (!yaml.empty() && !ValidateAndMap(yaml, &fallback, &result.error)) {
     return result;
   }
   const LayeredEnvironment layered(environment, std::move(fallback));
