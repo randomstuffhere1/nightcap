@@ -4,6 +4,12 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#if defined(MOCKTAIL_HAVE_X11)
+#include <gdk/x11/gdkx.h>
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#endif
+
 #include <cerrno>
 #include <cstdlib>
 #include <string>
@@ -35,10 +41,6 @@ window.dialog-window.alert {
   border: none;
   outline: none;
   box-shadow: none;
-}
-
-window.mocktail-confirmation-host {
-  background-color: rgba(0, 0, 0, 0.42);
 }
 
 .alert .message-area {
@@ -225,6 +227,9 @@ void SetConfirmationBody(ConfirmationState* state, std::string_view message) {
   adw_alert_dialog_set_body(state->alert, body.c_str());
 }
 
+void CenterStandaloneDialog(AdwDialog* dialog);
+gboolean CenterStandaloneDialogIdle(gpointer data);
+
 gboolean OnConfirmationReadyPacket(gint descriptor, GIOCondition condition,
                                   gpointer user_data) {
   auto* state = static_cast<ConfirmationState*>(user_data);
@@ -265,8 +270,14 @@ gboolean OnConfirmationReadyPacket(gint descriptor, GIOCondition condition,
     adw_alert_dialog_set_response_enabled(state->alert, "yes", TRUE);
     adw_alert_dialog_set_default_response(state->alert, "yes");
     state->ready = true;
+    CenterStandaloneDialog(ADW_DIALOG(state->alert));
+    g_timeout_add(1, CenterStandaloneDialogIdle,
+                  g_object_ref(ADW_DIALOG(state->alert)));
   } else {
     SetConfirmationBody(state, message);
+    CenterStandaloneDialog(ADW_DIALOG(state->alert));
+    g_timeout_add(1, CenterStandaloneDialogIdle,
+                  g_object_ref(ADW_DIALOG(state->alert)));
   }
   state->ready_source_id = 0;
   return G_SOURCE_REMOVE;
@@ -291,35 +302,86 @@ void OnConfirmationResponse(AdwDialog*, gchar* response, gpointer user_data) {
   }
 }
 
-GtkWidget* CreateConfirmationHost() {
-  GtkWidget* host = adw_window_new();
-  g_object_ref_sink(host);
-  AdwWindow* window = ADW_WINDOW(host);
-  gtk_window_set_title(GTK_WINDOW(window), "Nightcap");
-  gtk_widget_add_css_class(host, "mocktail-confirmation-host");
-  gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
-  gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
-  gtk_window_set_modal(GTK_WINDOW(window), TRUE);
-  gtk_window_fullscreen(GTK_WINDOW(window));
+GtkWidget* CreateDialogParent() {
+  // AdwDialog creates a non-resizable top-level window when its parent is a
+  // plain GtkWindow. A transparent full-screen parent gives that window a
+  // transient parent for window-manager centering without adding a backdrop.
+  GtkWidget* parent = gtk_window_new();
+  g_object_ref_sink(parent);
+  GtkWindow* window = GTK_WINDOW(parent);
+  gtk_window_set_title(window, "Nightcap");
+  gtk_window_set_decorated(window, FALSE);
+  gtk_window_set_resizable(window, FALSE);
+  gtk_window_set_modal(window, TRUE);
+  gtk_widget_set_opacity(parent, 0.0);
 
-  GtkWidget* background = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-  gtk_widget_set_hexpand(background, TRUE);
-  gtk_widget_set_vexpand(background, TRUE);
-  gtk_widget_add_css_class(background, "mocktail-confirmation-host");
-  adw_window_set_content(window, background);
-  gtk_window_present(GTK_WINDOW(window));
-  return host;
+  GtkWidget* content = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_size_request(content, 1, 1);
+  gtk_window_set_child(window, content);
+  gtk_window_fullscreen(window);
+  gtk_window_present(window);
+  return parent;
 }
 
-void DestroyDialogHost(GtkWidget* host) {
-  if (host == nullptr) return;
-  gtk_window_destroy(GTK_WINDOW(host));
-  g_object_unref(host);
+void DestroyDialogParent(GtkWidget* parent) {
+  if (parent == nullptr) return;
+  gtk_window_destroy(GTK_WINDOW(parent));
+  g_object_unref(parent);
 }
 
-void PresentDialog(AdwDialog* dialog, GtkWidget* host) {
+void PresentDialog(AdwDialog* dialog, GtkWidget* parent) {
   adw_dialog_set_presentation_mode(dialog, ADW_DIALOG_FLOATING);
-  adw_dialog_present(dialog, host);
+  adw_dialog_present(dialog, parent);
+}
+
+void CenterStandaloneDialog(AdwDialog* dialog) {
+  if (dialog == nullptr) return;
+  GtkRoot* root = gtk_widget_get_root(GTK_WIDGET(dialog));
+  if (!GTK_IS_WINDOW(root)) return;
+  GtkWindow* window = GTK_WINDOW(root);
+  // AdwDialog already uses a non-resizable window, but enforce it after
+  // presentation as well so WM move/resize gestures cannot shrink its content.
+  gtk_window_set_resizable(window, FALSE);
+
+#if defined(MOCKTAIL_HAVE_X11)
+  GdkDisplay* display = gtk_widget_get_display(GTK_WIDGET(window));
+  if (display == nullptr || !GDK_IS_X11_DISPLAY(display)) return;
+  GtkNative* native = gtk_widget_get_native(GTK_WIDGET(window));
+  if (native == nullptr) return;
+  GdkSurface* surface = gtk_native_get_surface(native);
+  if (surface == nullptr || !GDK_IS_X11_SURFACE(surface)) return;
+  Display* xdisplay = GDK_DISPLAY_XDISPLAY(display);
+  if (xdisplay == nullptr) return;
+
+  XWindowAttributes attributes{};
+  if (!XGetWindowAttributes(xdisplay, GDK_SURFACE_XID(surface), &attributes) ||
+      attributes.width <= 0 || attributes.height <= 0) {
+    return;
+  }
+
+  GdkRectangle bounds{};
+  GdkMonitor* monitor = gdk_display_get_monitor_at_surface(display, surface);
+  if (monitor != nullptr) {
+    gdk_monitor_get_geometry(monitor, &bounds);
+  }
+  if (bounds.width <= 0 || bounds.height <= 0) {
+    const int screen = DefaultScreen(xdisplay);
+    bounds.x = 0;
+    bounds.y = 0;
+    bounds.width = DisplayWidth(xdisplay, screen);
+    bounds.height = DisplayHeight(xdisplay, screen);
+  }
+  const int x = bounds.x + (bounds.width - attributes.width) / 2;
+  const int y = bounds.y + (bounds.height - attributes.height) / 2;
+  XMoveWindow(xdisplay, GDK_SURFACE_XID(surface), x, y);
+  XFlush(xdisplay);
+#endif
+}
+
+gboolean CenterStandaloneDialogIdle(gpointer data) {
+  CenterStandaloneDialog(static_cast<AdwDialog*>(data));
+  g_object_unref(data);
+  return G_SOURCE_REMOVE;
 }
 
 int ShowConfirmation(std::string_view requested_message,
@@ -361,14 +423,16 @@ int ShowConfirmation(std::string_view requested_message,
       return EXIT_FAILURE;
     }
   }
-  GtkWidget* host = CreateConfirmationHost();
-  PresentDialog(dialog, host);
+  GtkWidget* parent = CreateDialogParent();
+  PresentDialog(dialog, parent);
+  CenterStandaloneDialog(dialog);
+  g_idle_add(CenterStandaloneDialogIdle, g_object_ref(dialog));
   g_main_loop_run(loop);
   if (state.ready_source_id != 0) {
     g_source_remove(state.ready_source_id);
     state.ready_source_id = 0;
   }
-  DestroyDialogHost(host);
+  DestroyDialogParent(parent);
   g_object_unref(dialog);
   g_main_loop_unref(loop);
   return state.confirmed ? EXIT_SUCCESS : 2;

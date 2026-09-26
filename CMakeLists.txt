@@ -291,6 +291,9 @@ pkg_check_modules(CAPSTONE REQUIRED IMPORTED_TARGET capstone)
 pkg_check_modules(GIO REQUIRED IMPORTED_TARGET gio-2.0)
 pkg_check_modules(GTK4 REQUIRED IMPORTED_TARGET gtk4)
 pkg_check_modules(LIBADWAITA REQUIRED IMPORTED_TARGET "libadwaita-1>=1.6")
+if(UNIX AND NOT APPLE)
+  pkg_check_modules(X11 QUIET IMPORTED_TARGET x11)
+endif()
 pkg_check_modules(WEBKITGTK6 REQUIRED IMPORTED_TARGET webkitgtk-6.0)
 
 add_library(mocktail_update STATIC
@@ -442,6 +445,10 @@ add_executable(mocktail_failure_dialog
   src/ui/mocktail_failure_dialog.cc
 )
 target_link_libraries(mocktail_failure_dialog PRIVATE PkgConfig::LIBADWAITA)
+if(TARGET PkgConfig::X11)
+  target_compile_definitions(mocktail_failure_dialog PRIVATE MOCKTAIL_HAVE_X11=1)
+  target_link_libraries(mocktail_failure_dialog PRIVATE PkgConfig::X11)
+endif()
 mocktail_apply_compile_options(mocktail_failure_dialog)
 
 add_library(mocktail_services STATIC
