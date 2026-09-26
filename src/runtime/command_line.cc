@@ -61,6 +61,10 @@ CommandLineParseResult ParseCommandLine(int argc, const char* const argv[]) {
       result.options.mode = CommandMode::kHelp;
       return result;
     }
+    if (argument == "--settings") {
+      result.options.mode = CommandMode::kSettings;
+      return result;
+    }
     if (argument == "--roblox-lib") {
       if (!ReadOptionValue(argc, argv, &index, argument,
                            &result.options.roblox_library_path,
@@ -281,6 +285,7 @@ std::string CommandLineUsage(const std::string& program_name) {
          "website link\n"
       << "  --profile <file>         Write a Chrome trace of Vulkan adapter "
          "work for ui.perfetto.dev\n"
+      << "  --settings               Open the settings window and exit\n"
       << "  --help, -h               Show this help\n\n"
       << "Auth:\n"
       << "  When no saved Roblox session is found, Roblox's welcome screen "

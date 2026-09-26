@@ -299,10 +299,104 @@ TEST(UiConfigFieldsTest, RenderGroupsKeysUnderTheirSection) {
   // Both graphics keys land under one heading rather than repeating it.
   EXPECT_NE(document.find("vsync: off"), std::string::npos);
   EXPECT_EQ(document.find("graphics:"), document.rfind("graphics:"));
+  // Keys sit under their heading, indented, not at the top level.
+  EXPECT_LT(graphics, document.find("backend: vulkan"));
+  EXPECT_LT(input, document.find("raw_mouse:"));
+  EXPECT_NE(document.find("\n  backend: vulkan"), std::string::npos)
+      << document;
 }
 
 // Toggling one setting must not reshuffle the file, so it does not produce a
 // confusing diff for anyone who keeps it under version control.
+// The window's controls write through the same validated path a real save
+// takes, so this covers what the window does rather than the writer alone.
+TEST_F(UiConfigOverridesTest, SimulatesWhatTheWindowDoes) {
+  UiConfigOverrides overrides;
+  overrides.Set("graphics.vsync", "off");
+  overrides.Set("graphics.quality", "3");
+  overrides.Set("input.raw_mouse", "true");
+  std::string error;
+  ASSERT_TRUE(SaveUiConfigOverrides(file_, overrides, &error)) << error;
+
+  // Back through the loader, which is what the next launch does.
+  UiConfigOverrides reloaded;
+  bool loaded = false;
+  ASSERT_TRUE(LoadUiConfigOverrides(file_, &reloaded, &loaded, &error)) << error;
+  EXPECT_TRUE(loaded);
+  EXPECT_EQ(reloaded.values.size(), 3U);
+
+  // Toggling one setting must not disturb the others.
+  reloaded.Set("graphics.vsync", "on");
+  ASSERT_TRUE(SaveUiConfigOverrides(file_, reloaded, &error)) << error;
+  UiConfigOverrides again;
+  ASSERT_TRUE(LoadUiConfigOverrides(file_, &again, &loaded, &error)) << error;
+  ASSERT_NE(again.Find("graphics.vsync"), nullptr);
+  EXPECT_EQ(*again.Find("graphics.vsync"), "on");
+  ASSERT_NE(again.Find("graphics.quality"), nullptr);
+  EXPECT_EQ(*again.Find("graphics.quality"), "3");
+
+  // Resetting one setting clears only that one.
+  again.Clear("graphics.vsync");
+  ASSERT_TRUE(SaveUiConfigOverrides(file_, again, &error)) << error;
+  UiConfigOverrides third;
+  ASSERT_TRUE(LoadUiConfigOverrides(file_, &third, &loaded, &error)) << error;
+  EXPECT_EQ(third.Find("graphics.vsync"), nullptr);
+  EXPECT_EQ(third.values.size(), 2U);
+}
+
+// The window's own keys go three levels deep. A reader that assumed two would
+// reject the natural hand-written form of its own output, and rejecting it
+// discards every setting in the file.
+TEST_F(UiConfigOverridesTest, AThreeLevelKeyRoundTrips) {
+  UiConfigOverrides written;
+  written.Set("integrations.discord_rpc.enabled", "false");
+  written.Set("integrations.discord_rpc.show_place_name", "false");
+  written.Set("graphics.vsync", "off");
+  std::string error;
+  ASSERT_TRUE(SaveUiConfigOverrides(file_, written, &error)) << error;
+
+  // The file nests the way config.yaml nests, not as a flat dotted key.
+  const std::string contents = Read(file_);
+  EXPECT_NE(contents.find("discord_rpc:"), std::string::npos) << contents;
+  EXPECT_EQ(contents.find("discord_rpc.enabled"), std::string::npos)
+      << contents;
+
+  UiConfigOverrides read;
+  bool loaded = false;
+  ASSERT_TRUE(LoadUiConfigOverrides(file_, &read, &loaded, &error)) << error;
+  EXPECT_TRUE(loaded);
+  ASSERT_EQ(read.values.size(), 3U);
+  ASSERT_NE(read.Find("integrations.discord_rpc.enabled"), nullptr);
+  EXPECT_EQ(*read.Find("integrations.discord_rpc.enabled"), "false");
+  ASSERT_NE(read.Find("graphics.vsync"), nullptr);
+  EXPECT_EQ(*read.Find("graphics.vsync"), "off");
+}
+
+// The hand-written nested form has to work, because that is what a user
+// editing the file by hand would write.
+TEST_F(UiConfigOverridesTest, AHandWrittenNestedFileIsAccepted) {
+  Write(file_, R"yaml(integrations:
+  discord_rpc:
+    enabled: false
+    join:
+      public_servers_only: true
+graphics:
+  vsync: "off"
+)yaml");
+  UiConfigOverrides overrides;
+  bool loaded = false;
+  std::string error;
+  ASSERT_TRUE(LoadUiConfigOverrides(file_, &overrides, &loaded, &error))
+      << error;
+  EXPECT_TRUE(loaded);
+  ASSERT_EQ(overrides.values.size(), 3U);
+  ASSERT_NE(overrides.Find("integrations.discord_rpc.join.public_servers_only"),
+            nullptr);
+  EXPECT_EQ(
+      *overrides.Find("integrations.discord_rpc.join.public_servers_only"),
+      "true");
+}
+
 TEST(UiConfigFieldsTest, OutputIsStableRegardlessOfInsertionOrder) {
   UiConfigOverrides first;
   first.Set("graphics.vsync", "off");

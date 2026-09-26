@@ -12,6 +12,8 @@
 #include <charconv>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <map>
 #include <system_error>
 #include <unordered_map>
 #include <unordered_set>
@@ -306,33 +308,58 @@ bool ValidateUiConfigValue(std::string_view key, std::string_view value,
   return true;
 }
 
+// A node of the settings tree: either a value or a group of children. Built
+// from the flat dotted keys and emitted nested, so the file mirrors the shape
+// of config.yaml rather than inventing a flat convention of its own.
+struct YamlNode {
+  std::map<std::string, std::string> values;
+  std::map<std::string, YamlNode> children;
+};
+
+YamlNode BuildTree(const UiConfigOverrides& overrides) {
+  YamlNode root;
+  for (const auto& [key, value] : overrides.values) {
+    const std::vector<std::string> parts = SplitKey(key);
+    if (parts.empty()) {
+      continue;
+    }
+    YamlNode* node = &root;
+    for (std::size_t index = 0; index + 1 < parts.size(); ++index) {
+      node = &node->children[parts[index]];
+    }
+    node->values[parts.back()] = value;
+  }
+  return root;
+}
+
+void EmitNode(const YamlNode& node, std::size_t depth,
+              std::string* document) {
+  const std::string pad(depth * 2, ' ');
+  // Children first so a group never appears after a scalar that would swallow
+  // it, and both maps are ordered so the file is stable.
+  for (const auto& [name, child] : node.children) {
+    *document += "\n" + pad + name + ":\n";
+    EmitNode(child, depth + 1, document);
+  }
+  for (const auto& [name, value] : node.values) {
+    *document += pad + name + ": " + value + "\n";
+  }
+}
+
 std::string RenderUiConfigYaml(const UiConfigOverrides& overrides) {
-  // Only the keys the user set are written, grouped by section, so the file
-  // stays short enough to read at a glance. It carries no comments by design:
-  // the documentation lives in config.yaml and in the window itself.
+  // Only the keys the user set are written, nested the same way config.yaml
+  // nests them, so the file reads as a small subset of it. It carries no
+  // comments by design: the documentation lives in config.yaml and in the
+  // window itself.
   //
-  // Sorted rather than written in insertion order, so toggling one setting does
-  // not reshuffle the file and produce a confusing diff if it is ever kept
-  // under version control.
-  std::vector<std::pair<std::string, std::string>> sorted = overrides.values;
-  std::sort(sorted.begin(), sorted.end());
+  // Ordered rather than written in insertion order, so toggling one setting
+  // does not reshuffle the file and produce a confusing diff if it is ever
+  // kept under version control.
   std::string document =
       "# Written by the Nightcap settings window. Edits here override\n"
       "# config.yaml, and both are overridden by the environment.\n"
       "# Clear a setting in the window to fall back to config.yaml.\n";
-  std::string section;
-  for (const auto& [key, value] : sorted) {
-    const std::vector<std::string> parts = SplitKey(key);
-    if (parts.size() < 2) {
-      continue;
-    }
-    if (parts[0] != section) {
-      section = parts[0];
-      document += "\n" + section + ":\n";
-    }
-    const std::string leaf = parts.back();
-    document += "  " + leaf + ": " + value + "\n";
-  }
+  EmitNode(BuildTree(overrides), 0, &document);
   return document;
 }
 
@@ -421,40 +448,51 @@ bool LoadUiConfigOverrides(const std::filesystem::path& file,
     }
     valid = false;
   }
-  for (yaml_node_pair_t* pair =
-       valid ? root->data.mapping.pairs.start : nullptr;
-       valid && pair != root->data.mapping.pairs.top; ++pair) {
-    const std::string section =
-        Scalar(yaml_document_get_node(&document, pair->key));
-    const yaml_node_t* body = yaml_document_get_node(&document, pair->value);
-    if (section.empty() || body == nullptr ||
-        body->type != YAML_MAPPING_NODE) {
+  // Walks the document to any depth, so a key nested as deeply as config.yaml
+  // nests it round-trips. The window's keys go three levels deep
+  // (integrations.discord_rpc.enabled), and a reader that assumed two would
+  // reject the natural hand-written form of its own output.
+  const std::function<bool(const yaml_node_t*, const std::string&, int)> walk =
+      [&](const yaml_node_t* mapping, const std::string& prefix,
+          int depth) -> bool {
+    // A cycle is impossible in a parsed document, but the depth cap is what
+    // stops a pathologically deep file from exhausting the stack.
+    if (depth > 8) {
       if (error != nullptr) {
-        *error = file.string() + " has a section that is not a mapping";
+        *error = file.string() + " nests settings too deeply";
       }
-      valid = false;
-      break;
+      return false;
     }
-    for (yaml_node_pair_t* entry = body->data.mapping.pairs.start;
-         entry != body->data.mapping.pairs.top; ++entry) {
-      const std::string leaf =
-          Scalar(yaml_document_get_node(&document, entry->key));
-      const std::string value =
-          Scalar(yaml_document_get_node(&document, entry->value));
-      const std::string key = section + "." + leaf;
-      if (key.empty() || leaf.empty()) {
+    for (yaml_node_pair_t* pair = mapping->data.mapping.pairs.start;
+         pair != mapping->data.mapping.pairs.top; ++pair) {
+      const std::string name =
+          Scalar(yaml_document_get_node(&document, pair->key));
+      const yaml_node_t* body = yaml_document_get_node(&document, pair->value);
+      if (name.empty() || body == nullptr) {
         if (error != nullptr) {
           *error = file.string() + " has an empty key";
         }
-        valid = false;
-        break;
+        return false;
       }
+      const std::string key = prefix.empty() ? name : prefix + "." + name;
+      if (body->type == YAML_MAPPING_NODE) {
+        if (!walk(body, key, depth + 1)) {
+          return false;
+        }
+        continue;
+      }
+      const std::string value = Scalar(body);
       if (!ValidateUiConfigValue(key, value, error)) {
-        valid = false;
-        break;
+        // The message names the window because that is who writes the file;
+        // a hand-edit that reaches here is reported rather than guessed at.
+        return false;
       }
       overrides->Set(key, value);
     }
+    return true;
+  };
+  if (valid) {
+    valid = walk(root, std::string(), 0);
   }
   yaml_document_delete(&document);
   yaml_parser_delete(&parser);

@@ -136,6 +136,17 @@ Edit `~/.config/mocktail/config.yaml`. Useful options:
 - `graphics.pipeline_cache: clear` to drop the fallback pipeline cache and run
   the next session uncached.
 
+Most of these are easier to set from the settings window than by editing YAML:
+
+```sh
+mocktail --settings
+```
+
+It is also in the app menu as **Nightcap Settings**. The window saves to
+`config.ui.yaml` and never rewrites `config.yaml`, so your own file and its
+comments are left alone. A value set in the window takes priority over the same
+key in `config.yaml`; clear it in the window to go back to your own value.
+
 `config/mocktail.example.yaml` documents every option, and
 [PERFORMANCE.md](docs/PERFORMANCE.md) explains what the ones that trade CPU for
 latency actually do.

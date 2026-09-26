@@ -453,6 +453,19 @@ if(TARGET PkgConfig::X11)
 endif()
 mocktail_apply_compile_options(mocktail_failure_dialog)
 
+# The settings window. A separate binary rather than a window inside the app so
+# it can be opened without a session running, and so a crash in it cannot take
+# a game down with it. It shares the config writer with the app, not its
+# process, and never writes config.yaml.
+add_executable(mocktail_settings
+  src/ui/mocktail_settings.cc
+)
+target_link_libraries(mocktail_settings PRIVATE
+  PkgConfig::LIBADWAITA
+  mocktail_runtime
+)
+mocktail_apply_compile_options(mocktail_settings)
+
 add_library(mocktail_services STATIC
   src/services/http_client.cc
   src/services/auth_service.cc
@@ -798,6 +811,11 @@ set(MOCKTAIL_INSTALL_DATA_DIR "${CMAKE_INSTALL_DATADIR}/mocktail")
 install(TARGETS mocktail
   RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+# Beside mocktail, because `mocktail --settings` looks for it in the same
+# directory as its own executable.
+install(TARGETS mocktail_settings
+  RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
+)
 install(TARGETS
     mocktail
     mocktail_updater
@@ -843,6 +861,19 @@ install(CODE "
   file(WRITE \"${CMAKE_BINARY_DIR}/io.github.CoderDayton.nightcap.desktop\"
        \"\${MOCKTAIL_DESKTOP_ENTRY}\")
   file(INSTALL \"${CMAKE_BINARY_DIR}/io.github.CoderDayton.nightcap.desktop\"
+       DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/applications\")
+
+  # The settings window gets its own entry so it is reachable from the app menu
+  # without a terminal. A desktop file holds one [Desktop Entry] group, so it
+  # cannot be a second group in the file above.
+  file(READ \"${CMAKE_SOURCE_DIR}/packaging/io.github.CoderDayton.nightcap-settings.desktop\"
+       MOCKTAIL_SETTINGS_DESKTOP_ENTRY)
+  string(REPLACE \"Exec=env SDL_VIDEODRIVER=wayland,x11 mocktail --settings\"
+         \"Exec=env SDL_VIDEODRIVER=wayland,x11 \${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/mocktail --settings\"
+         MOCKTAIL_SETTINGS_DESKTOP_ENTRY \"\${MOCKTAIL_SETTINGS_DESKTOP_ENTRY}\")
+  file(WRITE \"${CMAKE_BINARY_DIR}/io.github.CoderDayton.nightcap-settings.desktop\"
+       \"\${MOCKTAIL_SETTINGS_DESKTOP_ENTRY}\")
+  file(INSTALL \"${CMAKE_BINARY_DIR}/io.github.CoderDayton.nightcap-settings.desktop\"
        DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/applications\")
 ")
 install(FILES packaging/io.github.CoderDayton.nightcap.metainfo.xml

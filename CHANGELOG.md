@@ -8,6 +8,26 @@ GitHub are taken from the matching section here.
 
 ### Added
 
+- A settings window: `mocktail --settings`, or the Nightcap Settings entry in
+  the app menu. It covers 25 settings across Graphics, Input, Audio,
+  Integrations, and Advanced, each with its key, a plain description of what it
+  does, and a control that only accepts values the setting accepts, so a bad
+  value is refused where it is typed rather than at the next launch. Restart
+  applies the changes, and only after saving them and only after you agree to
+  it. It is a separate process, so it opens without a payload and a crash in it
+  cannot take a running session down.
+- The window writes `config.ui.yaml` beside `config.yaml` rather than
+  `config.yaml` itself. `config.yaml` is created once, mode 0600, and states
+  that Nightcap never replaces your edits; 154 of its 208 lines are comments
+  that are its only documentation. The two layer, environment above both, and
+  `config.ui.yaml` above `config.yaml` — so a value set in the window outranks
+  a later hand-edit of the same key, which the window says in a banner. Clearing
+  a setting goes back to your own value, and clearing every setting removes the
+  file. `config.yaml` is never rewritten; a test rereads it and asserts it is
+  byte-for-byte unchanged.
+- A `Nightcap Settings` desktop entry, so the window is reachable without a
+  terminal.
+
 - A plugged-in pad now shows its own button glyphs. The pad family is taken
   from the hardware's real type rather than the type SDL reports, which
   returned a generic value for anything it could not place: a Switch Pro, a

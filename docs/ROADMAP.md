@@ -6,21 +6,43 @@ change to this list.
 
 ## 1. Settings UI
 
-Nightcap is configured by editing `~/.config/mocktail/config.yaml`. Most
-people never open it, so they never find the FPS unlock or the vsync switch.
+Shipped, with one thing deliberately not done.
 
-Goal: a small GTK4 settings window, reachable from the app menu and from a
-`--settings` flag, that reads and writes the same `config.yaml`.
+`mocktail --settings`, or the Nightcap Settings entry in the app menu, opens a
+GTK4 window covering 25 settings across five tabs: Graphics, Input, Audio,
+Integrations, Advanced. Each row shows the setting's key, what it does, and a
+control that only accepts values the setting accepts, so a bad value is refused
+where it is typed instead of at the next launch. Restart applies the changes,
+and only after saving them and only after you agree to it.
 
-- Graphics tab: backend, frame rate limit, vsync, small texture upscale.
-- Input tab: the `input.raw_mouse` toggle and controller options.
-- Advanced tab: FFlag overrides with a plain text editor for `fflags.json`.
-- Discord tab: every field in the `discord_rpc` block, so a friend can see
-  what you are playing and you can switch it all off in one click.
-- Changes apply on next launch. A restart button restarts Nightcap.
+**It writes `config.ui.yaml`, not `config.yaml`.** `config.yaml` is created
+once with mode 0600, the bootstrap refuses to follow a symlink at it, and it
+says that Nightcap never replaces your edits. 154 of its 208 lines are comments
+that are its only documentation. Rewriting it from a window would break that
+promise and throw the documentation away, and preserving comments through a
+rewrite is a large job for a file that is mostly comments. So the window keeps
+its own small file of only the keys you set, and the two layer:
 
-Done when every option in `config/mocktail.example.yaml` that a player would
-touch can be set without a text editor.
+```
+environment > config.ui.yaml > config.yaml > built-in defaults
+```
+
+The consequence is worth knowing: **a value set in the window outranks a later
+hand-edit of the same key** in `config.yaml`, because setting it in the window
+is the more deliberate of the two. Clearing it in the window goes back to your
+own value. The window says this in a banner, and a button opens
+`config.yaml` for you. Clearing every setting removes the file, so "did I clear
+everything" is answerable from the filesystem.
+
+What is not done: **FFlag overrides.** `fflags.json` is a flat JSON of engine
+flags with no schema this window could validate against, and a dropdown of
+several hundred flags would be a worse experience than the text editor it
+replaces. Editing it stays a text editor job.
+
+Not verified: the window was checked by running it, confirming it opens,
+renders, and leaves `config.yaml` byte-identical. Saving was exercised through
+the writer's own tests rather than by clicking, so the button wiring itself has
+not been driven by hand.
 
 ## 2. Controller button glyphs
 
