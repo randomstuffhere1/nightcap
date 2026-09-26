@@ -29,9 +29,10 @@ side by side.
   `MOCKTAIL_SMALL_TEXTURE_UPSCALE=1` to turn the upscale off.
 - **ETC2 textures on any GPU.** Games that use compressed mobile textures now
   render correctly on desktop GPUs, without stutter.
-- **No first-visit stutter.** The driver's compiled-pipeline cache is reused
-  between launches, so entering an experience no longer pays for a full
-  shader compile. Set `graphics.pipeline_cache: off` to turn it off.
+- **A pipeline cache that is already warm.** The client keeps its own
+  `shadercachevk.bin` and hands it to the driver, so shaders are not
+  recompiled on every launch. Nightcap also keeps a fallback copy for clients
+  that do not do this; set `graphics.pipeline_cache: off` to turn it off.
 - **No more error 319 kicks.** Servers no longer drop you shortly after
   joining.
 - **Correct device info.** Roblox sees your real RAM and screen size.
@@ -126,8 +127,8 @@ Edit `~/.config/mocktail/config.yaml`. Useful options:
 - `graphics.frame_rate_limit: display` to unlock FPS to your monitor's rate.
 - `graphics.vsync: off` for the lowest lag, at the cost of tearing.
 - `graphics.backend: opengl` if Vulkan does not work on your GPU.
-- `graphics.pipeline_cache: off` to stop reusing the driver's compiled-pipeline
-  cache, or `clear` to drop it and run the next session uncached.
+- `graphics.pipeline_cache: clear` to drop the fallback pipeline cache and run
+  the next session uncached.
 
 ## Building
 

@@ -70,12 +70,12 @@ graphics:
   # presents through the lowest-latency synchronized mode the driver offers
   # unless frame_rate_limit is unlimited.
   # vsync: off
-  # String (default: on): reuse the driver's compiled-pipeline cache between
-  # launches, which removes most of the shader-compile stutter on the first
-  # visit to an experience. The cache is keyed on the GPU, the driver, and the
-  # Roblox version, so a driver or Roblox update starts a fresh one. Set to
-  # clear to discard the stored cache and run the next session uncached, or to
-  # off to never read or write one.
+  # String (default: on): keep a fallback copy of the driver's pipeline cache.
+  # The Roblox client already persists its own shadercachevk.bin and passes it
+  # to the driver, so on a stock client this does nothing and the setting only
+  # matters for a client that stops doing that. Set to clear to discard the
+  # stored copy and run the next session uncached, or to off to never read or
+  # write one. See docs/PERFORMANCE.md before blaming shaders for a stutter.
   # pipeline_cache: on
 
 performance:

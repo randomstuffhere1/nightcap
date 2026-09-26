@@ -8,17 +8,23 @@ GitHub are taken from the matching section here.
 
 ### Added
 
-- The driver's compiled-pipeline cache is now kept and reused between
-  launches, so the first visit to an experience no longer pays for a full
-  shader compile. This is most of the stutter the `--profile` trace showed on
-  shader and pipeline creation. The blob is keyed on the GPU, the driver, and
-  the Roblox version, so a driver or Roblox update starts a fresh one instead
-  of handing the driver something it cannot use; it is capped at 64 MiB and
-  checksummed, and one that fails either check is discarded rather than
-  retried every launch. Startup prints `building` or `reusing` with the file it
-  used. `graphics.pipeline_cache: off` turns it off, and `clear` drops the
-  stored blob and runs one session uncached, which is the repair to reach for
-  if a place ever comes up wrong. See `docs/PERFORMANCE.md`.
+- A pipeline cache fallback for clients that do not seed one themselves. The
+  Android client already persists `shadercachevk.bin` and passes it to
+  `vkCreatePipelineCache`, so on a stock client this changes nothing: the
+  adapter sees the engine's own `initialData` and steps aside. It is here for
+  a client that stops doing that, not as a stutter fix. Where it does apply,
+  the blob is keyed on the GPU, the driver, and the Roblox version, so a
+  driver or Roblox update starts a fresh one instead of handing the driver
+  something it cannot use; it is capped at 64 MiB and checksummed, and one
+  that fails either check is discarded rather than retried every launch.
+  Startup prints `building`, `reusing`, or `skipped`. `graphics.pipeline_cache:
+  off` turns it off, and `clear` drops the stored blob and runs one session
+  uncached. See `docs/PERFORMANCE.md`.
+- A recorded trace corrected the roadmap's "first-load stutter" item. Shader
+  compilation is not the cause: all pipeline and texture work in the adapter
+  totalled 40 ms across a 78 s session, with every pipeline create already
+  passing a cache. The freezes are elsewhere, and the roadmap now says where
+  to look.
 - Pasting a Roblox private-server game link into a main-app text box now asks
   for confirmation before joining the server; text boxes inside experiences
   keep their normal paste behavior.

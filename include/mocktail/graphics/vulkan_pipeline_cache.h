@@ -89,8 +89,6 @@ class PipelineCacheStore {
 
   const std::filesystem::path &file() const { return file_; }
   const std::string &key() const { return key_; }
-  // The blob loaded at Configure time, for the startup log line.
-  std::size_t seed_size() const { return seed_.size(); }
 
  private:
   std::filesystem::path file_;

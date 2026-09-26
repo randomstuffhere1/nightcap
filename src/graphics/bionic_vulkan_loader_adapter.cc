@@ -1256,6 +1256,14 @@ VkResult VKAPI_CALL CachedCreatePipelineCache(
   mocktail::graphics::TraceScope scope(mocktail::graphics::ActiveProfileTrace(),
                                        "vkCreatePipelineCache", "pipeline");
 
+  // A caller that brought its own initial data owns those bytes, so the
+  // stored blob is not injected over them and the cache is not adopted. This
+  // is the normal case: the client keeps its own shadercachevk.bin and reads
+  // it back, so the store is a fallback rather than the primary path.
+  const bool caller_seeded = create_info != nullptr &&
+                             create_info->pInitialData != nullptr &&
+                             create_info->initialDataSize != 0;
+
   const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(device);
   AdapterState& state = State();
   std::vector<std::uint8_t> seed;
@@ -1263,16 +1271,12 @@ VkResult VKAPI_CALL CachedCreatePipelineCache(
     std::lock_guard<std::mutex> lock(state.pipeline_cache_mutex);
     mocktail::graphics::PipelineCacheStore* store =
         state.pipeline_caches.StoreFor(key);
-    if (store != nullptr && store->enabled() && store->has_seed()) {
+    if (store != nullptr && store->enabled() && !caller_seeded &&
+        store->has_seed()) {
       seed = store->seed();
     }
   }
 
-  // A caller that brought its own initial data owns those bytes, so the
-  // stored blob is not injected over them and the cache is not adopted.
-  const bool caller_seeded = create_info != nullptr &&
-                             create_info->pInitialData != nullptr &&
-                             create_info->initialDataSize != 0;
   VkPipelineCacheCreateInfo seeded_info{};
   const VkPipelineCacheCreateInfo* host_info = create_info;
   if (!caller_seeded && !seed.empty() && create_info != nullptr) {
@@ -1297,6 +1301,9 @@ VkResult VKAPI_CALL CachedCreatePipelineCache(
             create_info != nullptr
                 ? static_cast<std::int64_t>(create_info->initialDataSize)
                 : 0);
+  // Which path supplied the cache data, so a trace says whether the store ran
+  // or the client seeded the driver itself: 0 none, 1 caller, 2 store.
+  scope.Arg("source", caller_seeded ? 1 : (seed.empty() ? 0 : 2));
   scope.Arg("result", result);
   return result;
 }
@@ -1442,24 +1449,19 @@ void ConfigurePipelineCache(VkDevice device,
   }
   if (directory.empty() ||
       !state.pipeline_caches.ConfigureDevice(device_key, directory, key, mode)) {
-    std::fprintf(stderr, "  [vulkan] pipeline cache %s "
+    std::fprintf(stderr, "  [vulkan] pipeline cache fallback %s "
                          "(MOCKTAIL_PIPELINE_CACHE_MODE=%s)\n",
                  directory.empty() ? "unavailable: no cache directory"
                                    : "unavailable",
                  mocktail::graphics::PipelineCacheModeName(mode));
     return;
   }
-  const mocktail::graphics::PipelineCacheStore* store =
-      state.pipeline_caches.StoreFor(device_key);
-  if (store == nullptr) {
-    return;
-  }
-  std::fprintf(stderr, "  [vulkan] pipeline cache %s: %s", 
-               store->has_seed() ? "reusing" : "building", store->file().c_str());
-  if (store->has_seed()) {
-    std::fprintf(stderr, " (%zu bytes)", store->seed_size());
-  }
-  std::fprintf(stderr, "\n");
+  // The client normally seeds its own shadercachevk.bin, in which case this
+  // store sits idle. Say so, rather than implying it is doing the work.
+  std::fprintf(stderr,
+               "  [vulkan] pipeline cache fallback armed: %s "
+               "(unused while the client seeds its own cache)\n",
+               state.pipeline_caches.StoreFor(device_key)->file().c_str());
 }
 
 template <typename Function>

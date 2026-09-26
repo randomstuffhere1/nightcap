@@ -153,33 +153,61 @@ MOCKTAIL_SMALL_TEXTURE_UPSCALE=1 mocktail
 
 ## The pipeline cache
 
-The first visit to an experience compiles every pipeline the place uses. That
-shows up in the trace as `vkCreateShaderModule` and `vkCreateGraphicsPipelines`
-slices, and it is most of the hitch on entering a place you have not been in.
+**Read this before assuming shaders are your problem.** They usually are not.
 
-The Vulkan adapter now keeps the driver's own pipeline cache blob under
-`~/.cache/mocktail/graphics/pipelinecache` and feeds it back the next time the
-same engine creates its cache, so the second visit skips the compile. Startup
-prints which way it went:
+The client keeps its own pipeline cache at
+`~/.cache/mocktail/graphics/shadercachevk.bin` and passes the contents to
+`vkCreatePipelineCache` as `initialData`. The libc shim maps the guest's
+`/data/user/0/com.roblox.client/shadercachevk.bin` onto that host path, so the
+blob survives between launches on its own. A recorded trace of a 78 s session
+in an experience showed:
+
+| slice | count | total |
+| --- | --- | --- |
+| `vkCreateShaderModule` | 2271 | 21.79 ms |
+| `vkCreatePipelineCache` | 2 | 14.66 ms |
+| `vkCreateGraphicsPipelines` | 130 | 3.54 ms |
+| `vkCreateComputePipelines` | 2 | 0.06 ms |
+
+That is 40 ms of pipeline and texture work in total, 0.05% of the session, and
+every one of the 132 pipeline creates already passed a cache handle. The two
+`vkCreatePipelineCache` calls each report `initial_bytes` around 7.2 MB, which
+is the engine reading that file back.
+
+If you are chasing a hitch, check those numbers in your own trace before
+working on graphics. In the run above, frame interval p50 was 16.7 ms and p99
+was 89.6 ms; 33 frames of 3490 exceeded 100 ms, and those cost 15.5 s of the
+77.5 s session. The worst clustered near exact second multiples, and inside
+the largest 1825 ms gap the adapter did almost nothing — presents stopped and
+resumed, with only the engine's own 347 ms main-thread step in between. A
+freeze with no adapter work in it is not a graphics problem.
+
+### The fallback store
+
+Because the client seeds its own cache, the adapter's own store normally has
+nothing to do. It exists for a client that does not seed one. When the engine
+passes its own `pInitialData`, the adapter leaves it alone and does not adopt
+the cache, so it never overwrites data it did not produce. Startup says which
+case you are in:
 
 ```
-  [vulkan] pipeline cache building: /home/you/.cache/mocktail/graphics/pipelinecache/NVIDIA_GeForce_RTX_4090-version-1234-8f2a1c….vkpipelinecache
-  [vulkan] pipeline cache reusing: …/pipelinecache/NVIDIA_GeForce_RTX_4090-version-1234-8f2a1c….vkpipelinecache (3145728 bytes)
+  [vulkan] pipeline cache skipped: caller-supplied initial data
 ```
 
-`building` means there was nothing stored yet, so that session compiles and
-writes a blob on the way out. `reusing` means the stored blob was handed to the
-driver as initial data.
+`building` or `reusing` means the store is in charge: `building` is a first
+session with nothing stored, and `reusing` means its blob was handed to the
+driver.
 
-The file name is keyed on the GPU, the driver version, and the Roblox version,
-so a driver update or a Roblox update lands on a new key and starts fresh
-rather than handing the driver a blob it cannot use. Blobs are capped at 64 MiB
-and carry a checksum; one that fails either check is discarded rather than
-retried on every launch.
+Where the store does apply, the file name is keyed on the GPU, the driver
+version, and the Roblox version, so a driver or Roblox update lands on a new
+key and starts fresh rather than handing the driver a blob it cannot use.
+Blobs are capped at 64 MiB and carry a checksum; one that fails either check
+is discarded rather than retried on every launch.
 
 Three settings, all in `config.yaml` under `graphics`:
 
-- `pipeline_cache: on` (default) reads and writes the cache.
+- `pipeline_cache: on` (default) reads and writes the store when the client
+  does not seed a cache itself.
 - `pipeline_cache: clear` deletes the stored blob and runs that one session
   uncached, which is the repair to reach for if a place ever comes up wrong.
 - `pipeline_cache: off` never reads or writes one.

@@ -36,25 +36,55 @@ is left.
 
 Done when a plugged-in pad shows its own buttons.
 
-## 3. First-load stutter
+## 3. Load and join freezes
 
-The pipeline cache shipped and removed the recompile. What is left is the part
-a cache cannot cover: a place that streams new materials in while you are
-already in it still compiles on the frame that needs them.
+This item was written as "first-load stutter" and assumed shader compilation
+was the cause. A recorded trace says otherwise. Over a 78 s session in an
+experience, all pipeline and texture work in the adapter together came to
+40 ms, which is 0.05% of wall time:
 
-- Record a before and after trace per [BENCHMARKING.md](BENCHMARKING.md) for the
-  cache change, and confirm how much of the original hitch it accounted for.
-- Look at what the remaining trace shows for mid-session material streaming.
+| slice | count | total |
+| --- | --- | --- |
+| `vkCreateShaderModule` | 2271 | 21.79 ms |
+| `vkCreatePipelineCache` | 2 | 14.66 ms |
+| `vkCreateGraphicsPipelines` | 130 | 3.54 ms |
 
-Done when entering a fresh experience no longer drops frames on shader
-compiles.
+All 132 pipeline creates already passed a cache handle, and the two
+`vkCreatePipelineCache` calls report `initial_bytes` of about 7.2 MB: the
+client loads its own `shadercachevk.bin` and passes it to the driver. The
+shader cache was working. Compiling shaders is not the stutter.
+
+The stutter is elsewhere. Frame interval p50 was 16.7 ms and p99 89.6 ms, and
+33 frames of 3490 ran over 100 ms — 0.9% of frames but 15.5 s of lost time
+out of 77.5 s. The worst of them cluster near exact multiples of a second:
+
+```
+1824.6ms   1415.1ms   1354.0ms   1001.4ms   1000.0ms
+ 999.9ms    998.6ms    994.0ms    945.5ms
+```
+
+Inside the largest 1825 ms gap the adapter did almost nothing: presents stop
+and resume, and the only large slice is the engine's own main-thread step at
+347 ms. Whatever blocks is off the adapter's thread entirely, which points at
+the engine's join and load path rather than at graphics.
+
+- Find what the engine is waiting on across those gaps. The main-thread step's
+  own `cpu_us` against its `dur` should say whether it is busy or blocked.
+- The near-1000ms spacing suggests a timeout or a poll interval rather than
+  work. A blocked read on the socket, a server-side join wait, and a retry
+  backoff are all still candidates.
+- Three runs per scenario before claiming anything, per
+  [BENCHMARKING.md](BENCHMARKING.md). One run is not a result.
+
+Done when a fresh experience no longer freezes for a second at a time.
 
 ## Shipped
 
-- The driver's compiled-pipeline cache is reused between launches, which
-  removes most of the shader-compile stutter on the first visit to an
-  experience. `graphics.pipeline_cache` turns it off, or clears it for one
-  session. See [PERFORMANCE.md](PERFORMANCE.md).
+- A pipeline cache fallback. The client already persists its own
+  `shadercachevk.bin` and hands it to `vkCreatePipelineCache`, so this does
+  nothing on a stock client; it only engages if a future client stops seeding
+  the cache itself. `graphics.pipeline_cache` turns it off, or clears it for
+  one session. See [PERFORMANCE.md](PERFORMANCE.md).
 - Lower input latency: frames are presented as soon as they are ready.
 - Controllers hot-plug without a restart, and a pad that is unplugged mid-game
   releases its held buttons and sticks instead of leaving them stuck.

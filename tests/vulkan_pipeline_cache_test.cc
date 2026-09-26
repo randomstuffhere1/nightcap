@@ -188,7 +188,6 @@ TEST_F(VulkanPipelineCacheTest, PersistsAndSeedsAcrossConfigure) {
   EXPECT_TRUE(reader.enabled());
   EXPECT_TRUE(reader.has_seed());
   EXPECT_EQ(reader.seed(), payload);
-  EXPECT_EQ(reader.seed_size(), payload.size());
 }
 
 TEST_F(VulkanPipelineCacheTest, OffNeitherReadsNorWrites) {
