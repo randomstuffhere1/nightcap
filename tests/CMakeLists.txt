@@ -575,6 +575,18 @@ target_link_libraries(vulkan_pipeline_cache_test PRIVATE GTest::gtest_main
   Threads::Threads)
 mocktail_apply_compile_options(vulkan_pipeline_cache_test)
 
+add_executable(pump_stall_diagnostics_test
+  pump_stall_diagnostics_test.cc
+  ${PROJECT_SOURCE_DIR}/src/runtime/pump_stall_diagnostics.cc
+)
+target_include_directories(pump_stall_diagnostics_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(pump_stall_diagnostics_test PRIVATE GTest::gtest_main
+  Threads::Threads)
+mocktail_apply_compile_options(pump_stall_diagnostics_test)
+gtest_discover_tests(pump_stall_diagnostics_test)
+
 add_executable(video_driver_policy_test
   video_driver_policy_test.cc
 )

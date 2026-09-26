@@ -38,6 +38,29 @@ Done when a plugged-in pad shows its own buttons.
 
 ## 3. Load and join freezes
 
+The cause is now known: the engine's main thread blocks rather than computes.
+Over a 78 s session, 22.09 s was spent inside
+`nativeCallMessagesFromMainThread` and 0.38 s of that was CPU. The ten longest
+steps were all at 0% CPU, the worst at 347 ms.
+
+What it blocks on is still open, and that is the work. `MOCKTAIL_TRACE_PUMP_STALLS=1`
+prints the stack underneath a wait, which is the only way to tell a guest mutex
+from a socket read from a condition variable. The near-exact second multiples
+in the freeze times point at a timeout or a poll interval rather than work, so
+the candidates are a blocked socket read, a server-side join wait, and a retry
+backoff in the engine's join path.
+
+- Run the same scenario with `MOCKTAIL_TRACE_PUMP_STALLS=1` and read the stack.
+  This is the first thing to do and it may end the item.
+- Three runs per scenario before claiming anything, per
+  [BENCHMARKING.md](BENCHMARKING.md). One run is not a result.
+- Whatever it turns out to be, it is upstream engine behaviour reached through
+  the guest, so a fix may be a workaround rather than a change.
+
+Done when a fresh experience no longer freezes for a second at a time.
+
+## Why item 3 was rewritten
+
 This item was written as "first-load stutter" and assumed shader compilation
 was the cause. A recorded trace says otherwise. Over a 78 s session in an
 experience, all pipeline and texture work in the adapter together came to
@@ -65,18 +88,8 @@ out of 77.5 s. The worst of them cluster near exact multiples of a second:
 
 Inside the largest 1825 ms gap the adapter did almost nothing: presents stop
 and resume, and the only large slice is the engine's own main-thread step at
-347 ms. Whatever blocks is off the adapter's thread entirely, which points at
-the engine's join and load path rather than at graphics.
-
-- Find what the engine is waiting on across those gaps. The main-thread step's
-  own `cpu_us` against its `dur` should say whether it is busy or blocked.
-- The near-1000ms spacing suggests a timeout or a poll interval rather than
-  work. A blocked read on the socket, a server-side join wait, and a retry
-  backoff are all still candidates.
-- Three runs per scenario before claiming anything, per
-  [BENCHMARKING.md](BENCHMARKING.md). One run is not a result.
-
-Done when a fresh experience no longer freezes for a second at a time.
+347 ms. Comparing that step's `cpu_us` against its duration showed it was
+blocked, not busy, which is what the item above now says.
 
 ## Shipped
 

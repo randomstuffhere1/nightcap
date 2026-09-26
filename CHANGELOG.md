@@ -32,6 +32,17 @@ GitHub are taken from the matching section here.
   exposes no way to set a device buffer size, so the value is advisory and
   Nightcap says so at startup rather than pretending to apply it, pointing at
   `SDL_AUDIO_BUFFER_SAMPLES` as the supported way to change it.
+- `MOCKTAIL_TRACE_PUMP_STALLS=1` reports the stack underneath the engine's
+  main-thread waits. A recorded trace showed the source of the multi-second
+  freezes: 22.09 s of `nativeCallMessagesFromMainThread` across a 78 s session
+  used 0.38 s of CPU, and the ten longest steps were all at 0%. The engine
+  blocks rather than computes, but a guest mutex, a socket read, and a
+  condition variable look identical from outside a trace. The stall report
+  prints the wait, how many times that shape has been seen, and the stack, so
+  the three can be told apart. Only the top frames identify a wait, so
+  repeating shapes are counted rather than reprinted. Off unless enabled;
+  `MOCKTAIL_PUMP_STALL_MIN_MS` and `MOCKTAIL_PUMP_STALL_COOLDOWN_MS` tune the
+  threshold and the capture rate.
 - A pipeline cache fallback for clients that do not seed one themselves. The
   Android client already persists `shadercachevk.bin` and passes it to
   `vkCreatePipelineCache`, so on a stock client this changes nothing: the

@@ -68,6 +68,7 @@
 #include "runtime/environment.h"
 #include "runtime/discord_rpc.h"
 #include "runtime/jnivm_platform_web_callbacks.h"
+#include "runtime/pump_stall_diagnostics.h"
 #include "runtime/owned_pthread.h"
 #include "runtime/platform_cache_migration.h"
 #include "runtime/roblox_app_lifecycle.h"
@@ -962,6 +963,62 @@ struct PumpTraceHooks {
   SliceFn slice = nullptr;
 };
 
+// The pump's own clock, independent of the trace hooks: a stall has to be
+// detectable when no trace is running, which is the normal case.
+std::uint64_t MonotonicNowNs() {
+  timespec now{};
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  return static_cast<std::uint64_t>(now.tv_sec) * 1'000'000'000ULL +
+         static_cast<std::uint64_t>(now.tv_nsec);
+}
+
+std::uint64_t MonotonicThreadCpuNs() {
+  timespec now{};
+  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+  return static_cast<std::uint64_t>(now.tv_sec) * 1'000'000'000ULL +
+         static_cast<std::uint64_t>(now.tv_nsec);
+}
+
+// The frames the pump itself adds are the same on every sample, so they are
+// dropped: what identifies a stall is the guest code underneath.
+constexpr std::size_t kPumpStallFrames = 24;
+constexpr std::size_t kPumpStallDropFrames = 3;
+
+// Samples the calling thread's stack and hands it to the recorder. Skips the
+// frames belonging to this function and the pump, so the top of the list is
+// guest code.
+void ReportEnginePumpStall(std::uint64_t start_ns, std::uint64_t end_ns) {
+  const std::uint64_t duration_ns = end_ns - start_ns;
+  mocktail::runtime::PumpStallRecorder& recorder =
+      mocktail::runtime::SharedPumpStallRecorder();
+  if (!recorder.ShouldSample(duration_ns)) {
+    return;
+  }
+  void* frames[kPumpStallFrames];
+  const int count = ::backtrace(frames, static_cast<int>(kPumpStallFrames));
+  if (count <= static_cast<int>(kPumpStallDropFrames)) {
+    return;
+  }
+  char** symbols = ::backtrace_symbols(
+      frames + kPumpStallDropFrames, count - static_cast<int>(kPumpStallDropFrames));
+  if (symbols == nullptr) {
+    return;
+  }
+  mocktail::runtime::PumpStallFrames captured;
+  captured.reserve(static_cast<std::size_t>(count - kPumpStallDropFrames));
+  for (int index = kPumpStallDropFrames; index < count; ++index) {
+    captured.emplace_back(symbols[index - kPumpStallDropFrames] != nullptr
+                              ? symbols[index - kPumpStallDropFrames]
+                              : "?");
+  }
+  free(symbols);
+  const std::string line = recorder.Record(captured, duration_ns);
+  if (!line.empty()) {
+    std::fputs(line.c_str(), stderr);
+    std::fflush(stderr);
+  }
+}
+
 const PumpTraceHooks& PumpTrace() {
   static PumpTraceHooks hooks;
   // The adapter loads during startup, so a few hundred ticks cover it. After
@@ -994,6 +1051,27 @@ void PumpRobloxMainThreadMessagesOnce() {
       IsEnabled("MOCKTAIL_TRACE_MAIN_THREAD_PUMP");
   static const int pump_limit =
       GetEnvInt("MOCKTAIL_MAIN_THREAD_MESSAGE_PUMP_LIMIT", 0);
+  // Off by default: capturing a stack costs a symbol lookup, and a session
+  // that never stalls should not pay for a diagnostic nobody reads. The pump
+  // runs at kilohertz rates, so the threshold matters more than the toggle.
+  static const bool stall_enabled =
+      IsEnabled("MOCKTAIL_TRACE_PUMP_STALLS") ||
+      IsEnabled("MOCKTAIL_TRACE_MAIN_THREAD_PUMP");
+  if (stall_enabled) {
+    static const bool configured = [] {
+      mocktail::runtime::PumpStallPolicy policy;
+      policy.minimum_stall_ns = static_cast<std::uint64_t>(
+          std::max(1, GetEnvInt("MOCKTAIL_PUMP_STALL_MIN_MS", 50))) *
+          1'000'000ULL;
+      policy.minimum_sample_interval_ns =
+          static_cast<std::uint64_t>(
+              std::max(0, GetEnvInt("MOCKTAIL_PUMP_STALL_COOLDOWN_MS", 1000))) *
+          1'000'000ULL;
+      mocktail::runtime::SharedPumpStallRecorder().Configure(policy);
+      return true;
+    }();
+    (void)configured;
+  }
   if (g_main_thread_message_pump_ready.load() == 0 && !force_early) {
     static bool logged_not_ready = false;
     if (!logged_not_ready && trace_pump) {
@@ -1059,8 +1137,15 @@ void PumpRobloxMainThreadMessagesOnce() {
   };
   const std::uint64_t pump_start_cpu_ns =
       trace != nullptr ? thread_cpu_ns() : 0;
+  const std::uint64_t pump_call_start_ns = MonotonicNowNs();
   g_native_call_messages_from_main_thread(
       env, g_native_gl_class_for_main_thread);
+  // A step that blocks with no CPU is the commonest source of the multi-second
+  // freezes a trace shows, and the duration alone cannot say what the thread is
+  // waiting for. The stack can, so it is captured when one happens.
+  if (stall_enabled) {
+    ReportEnginePumpStall(pump_call_start_ns, MonotonicNowNs());
+  }
   if (trace != nullptr) {
     // Empty polls run at kilohertz rates and would swamp the trace, so only
     // calls that ran a message are recorded.

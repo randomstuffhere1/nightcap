@@ -57,6 +57,13 @@ Each slice is named after the call it times, on the thread that made it.
 | `pipeline` | `vkCreatePipelineCache` | `initial_bytes`, `result` |
 | `pump` | `nativeCallMessagesFromMainThread`: the engine's main-thread step, on the host main thread. Only calls of 20 µs or more are recorded; the empty polls between them are not. | `cpu_us`: CPU time the main thread used during the call. Far below the slice's duration means the step spent it waiting |
 
+`cpu_us` is the fastest way to tell a freeze's cause apart. A long
+`nativeCallMessagesFromMainThread` slice whose `cpu_us` is a fraction of its
+duration is the engine blocked on something, not computing. See
+[PERFORMANCE.md](PERFORMANCE.md#when-the-engines-main-thread-blocks) for what to
+do about that, including `MOCKTAIL_TRACE_PUMP_STALLS=1`, which prints the stack
+underneath the wait.
+
 The `frame interval (ms)` counter is the time between successive adapter
 presents. `vkQueuePresentKHR` time minus `host present` time is the adapter's
 own cost per frame.

@@ -367,6 +367,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/memory_limit.cc
   src/runtime/owned_pthread.cc
   src/runtime/performance_policy.cc
+  src/runtime/pump_stall_diagnostics.cc
   src/runtime/platform_cache_migration.cc
   src/runtime/roblox_desktop_app_policy.cc
   src/runtime/roblox_app_lifecycle.cc

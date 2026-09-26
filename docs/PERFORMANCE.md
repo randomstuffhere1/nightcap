@@ -127,6 +127,69 @@ chosen mode:
 `MOCKTAIL_ENGINE_PUMP_REST` forces a mode. `sleep` without the governor's help
 runs cooler for a few frames per second less; measure before keeping it.
 
+## When the engine's main thread blocks
+
+A trace shows freezes with nothing in them. That is the engine's main-thread
+step, `nativeCallMessagesFromMainThread`, and it blocks rather than computes.
+From a 78 s session:
+
+```
+all pump steps: 22.09 s wall, 0.38 s CPU  ->  2% CPU
+```
+
+Every one of the ten longest steps was at 0% CPU:
+
+| at | duration | CPU |
+| --- | --- | --- |
+| t+22.10s | 347.78 ms | 0.03 ms |
+| t+0.97s | 216.40 ms | 0.02 ms |
+| t+16.68s | 199.80 ms | 0.02 ms |
+| t+23.42s | 195.69 ms | 0.02 ms |
+
+The `--profile` trace already carries this as the `cpu_us` argument on each
+`nativeCallMessagesFromMainThread` slice, so you do not need anything extra to
+see it. A long slice with `cpu_us` far below its `dur` is a wait, not work.
+
+What the trace cannot say is *what* the thread waits on. A guest mutex, a
+socket read, and a condition variable all look identical from the outside, and
+they need different fixes. For that, capture the stack:
+
+```sh
+MOCKTAIL_TRACE_PUMP_STALLS=1 mocktail
+```
+
+Each stall over the threshold prints the wait, how many times that shape has
+been seen, and the stack underneath it:
+
+```
+  [stall] engine main-thread step blocked 347 ms with no CPU (3 times)
+        #0 __pthread_mutex_lock_full
+        #1 ...
+```
+
+The top frames are what identify the wait, so only those are compared. Two
+stalls with the same top frames are counted as one shape and the stack is
+printed once rather than every time, because a stall that fires every frame
+would otherwise bury anything new. A new shape is always printed, even inside
+another shape's window.
+
+Two knobs, both optional:
+
+- `MOCKTAIL_PUMP_STALL_MIN_MS` (default 50) is the threshold at which a step
+  counts as a stall. The pump runs at kilohertz rates, so this matters more
+  than the toggle.
+- `MOCKTAIL_PUMP_STALL_COOLDOWN_MS` (default 1000) is the shortest gap between
+  two captures. Capturing a stack costs a symbol lookup, and a session that
+  never stalls should not pay for a diagnostic nobody reads.
+
+Stall reporting is off unless one of these is set. `MOCKTAIL_TRACE_MAIN_THREAD_PUMP`
+turns it on as well, since that already means someone is diagnosing this.
+
+The near-exact second multiples in the freeze times are the other clue. A wait
+that clears on a round number of milliseconds is usually a timeout or a poll
+interval rather than work, which narrows the candidates to a blocked socket
+read, a server-side join wait, and a retry backoff in the join path.
+
 ## Settings that ask for more work
 
 Three settings forward a level or a budget rather than changing how Nightcap
