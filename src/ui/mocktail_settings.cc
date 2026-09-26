@@ -32,6 +32,12 @@ struct FieldRow {
   // Exactly one of these is set, depending on the field's kind.
   GtkWidget* control = nullptr;
   GtkWidget* reset_button = nullptr;
+  // The list behind a drop-down, held explicitly so it cannot be collected
+  // while the drop-down still asks it questions. Relying on the drop-down's own
+  // reference turned out not to be enough: the model was already gone by the
+  // time the initial value was set, and every drop-down raised a list-model
+  // assertion on open.
+  GtkStringList* option_model = nullptr;
   // The value the field had when the window opened, so Cancel can put it back.
   std::string original;
   // Whether the window is the reason this key is set, as opposed to
@@ -49,6 +55,12 @@ struct Window {
   // True while the controls are being given their initial values. Their change
   // signals then mean nothing, because the user has not touched anything yet.
   bool initializing = false;
+  // True once the window is closing. GTK emits property notifications while it
+  // tears widgets down, so a control's change signal can arrive after the
+  // widget it names is already being destroyed. Following the pointer then
+  // reads freed memory, which GTK catches as a list-model assertion and which
+  // turns into a crash.
+  bool tearing_down = false;
   std::vector<FieldRow*> rows;
   // Owns the field descriptions the rows point at. UiConfigFields() returns by
   // value, so a row holding a pointer into that temporary would dangle the
@@ -68,6 +80,11 @@ Window* g_window = nullptr;
 // states the order instead, and a key the environment does supply simply wins.
 
 std::string CurrentValue(FieldRow* row) {
+  // A control's change signal can arrive while the window is being destroyed,
+  // and reading the control then is a use-after-free rather than a value.
+  if (g_window != nullptr && g_window->tearing_down) {
+    return row->field->default_value;
+  }
   if (row->field->boolean) {
     return gtk_switch_get_active(GTK_SWITCH(row->control)) ? "true" : "false";
   }
@@ -174,6 +191,11 @@ void OnFieldChanged(GtkWidget* control, gpointer user_data) {
   // as an edit would leave the window claiming unsaved changes before the user
   // has touched it, and would mark a field as set when the user never chose it.
   if (g_window->initializing) {
+    return;
+  }
+  // The same signal arrives while the window is being torn down, when the
+  // control may already be destroyed. Reading it then is a use-after-free.
+  if (g_window->tearing_down) {
     return;
   }
   const std::string value = CurrentValue(row);
@@ -368,14 +390,42 @@ void OnRestartClicked(GtkWidget* button, gpointer user_data) {
   adw_dialog_present(ADW_DIALOG(dialog), GTK_WIDGET(g_window->window));
 }
 
-void OnCloseRequested(GtkWindow* window, gpointer user_data) {
+// Returns gboolean because close-request does: returning anything non-zero
+// stops the close. A void handler here left whatever was in the return
+// register to decide, which blocked the window from closing at all.
+gboolean OnCloseRequested(GtkWindow* window, gpointer user_data) {
   (void)window;
   (void)user_data;
-  // Closing without saving must not silently keep a half-applied change in
-  // memory that the next open would then show as saved.
   if (g_window != nullptr) {
+    // Marked before anything else, because everything after this runs while GTK
+    // is about to destroy the controls.
+    g_window->tearing_down = true;
+    // Every row's control and reset button, disconnected by the row pointer
+    // they were connected with. GTK emits property notifications while tearing
+    // widgets down, so a change signal can arrive after the widget it names is
+    // already being freed; reading it then is a use-after-free. Disconnecting
+    // stops the callback rather than relying on the flag alone to ignore it.
+    for (FieldRow* row : g_window->rows) {
+      if (row->control != nullptr) {
+        g_signal_handlers_disconnect_by_data(row->control, row);
+      }
+      if (row->reset_button != nullptr) {
+        g_signal_handlers_disconnect_by_data(row->reset_button, row);
+      }
+    }
+    // Closing without saving must not leave a half-applied change in memory
+    // that the next open would then show as saved. Anything the user did not
+    // save is simply not written, which is what closing without saving means.
     g_window->overrides = UiConfigOverrides{};
+    // The drop-down models are deliberately NOT released here. GTK is about to
+    // destroy the drop-downs, and it asks its model for an item count while
+    // doing so; freeing the model first leaves it reading a dangling pointer,
+    // which is a list-model assertion and then an abort. The window is the
+    // whole process and exits immediately, so the reference is left to go with
+    // it rather than released at a moment when it cannot be released safely.
   }
+  // FALSE allows the close to proceed.
+  return FALSE;
 }
 
 GtkWidget* BuildFieldRow(FieldRow* row) {
@@ -444,9 +494,10 @@ GtkWidget* BuildFieldRow(FieldRow* row) {
     }
     strings.push_back(nullptr);
     GtkStringList* options = gtk_string_list_new(strings.data());
+    // Kept on the row: see option_model above.
+    row->option_model = options;
     row->control = gtk_drop_down_new(G_LIST_MODEL(options), nullptr);
     gtk_widget_set_valign(row->control, GTK_ALIGN_CENTER);
-    g_object_unref(options);
     g_signal_connect(row->control, "notify::selected",
                      G_CALLBACK(+[](GObject* source, GParamSpec* spec,
                                     gpointer data) -> void {
