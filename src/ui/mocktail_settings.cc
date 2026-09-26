@@ -7,6 +7,14 @@
 
 #include <adwaita.h>
 
+#include <fcntl.h>
+#include <sys/types.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -14,6 +22,7 @@
 
 #include "runtime/environment.h"
 #include "runtime/runtime_paths.h"
+#include "runtime/sibling_executable.h"
 #include "runtime/ui_config_overrides.h"
 
 namespace {
@@ -329,6 +338,66 @@ void OnResetAllClicked(GtkWidget* button, gpointer user_data) {
 // Relaunching drops whatever the user is in, so it is always asked for and
 // never done without an answer. The environment is passed on so the relaunched
 // process behaves identically.
+// Closes this window shortly after a successful restart, so the new process
+// can claim the display before this one lets go. A named function rather than a
+// lambda inside G_CALLBACK, whose macro argument cannot contain a top-level
+// comma.
+gboolean CloseWindowAfterRestart(gpointer) {
+  if (g_window != nullptr && g_window->window != nullptr) {
+    gtk_window_close(GTK_WINDOW(g_window->window));
+  }
+  return G_SOURCE_REMOVE;
+}
+
+// Relaunches Nightcap, leaving the window open with the reason on screen if it
+// cannot. Returns whether the app was started.
+bool RestartNightcap(AdwDialog* source) {
+  // The app, not this window: the two are installed into the same directory.
+  //
+  // Going through a shell was the original approach and it was wrong twice
+  // over: the command line said /proc/self/exe, which inside a spawned shell is
+  // the shell's own executable, so it started a shell instead of the app. fork
+  // and exec avoids the shell entirely, and setsid detaches the new session so
+  // closing this process does not take the app with it.
+  const std::filesystem::path app =
+      mocktail::runtime::SiblingExecutable("mocktail");
+  if (app.empty()) {
+    ShowToast("Cannot find Nightcap next to this window");
+    adw_dialog_close(ADW_DIALOG(source));
+    return false;
+  }
+  const pid_t child = fork();
+  if (child < 0) {
+    ShowToast(std::string("Could not restart: ") + std::strerror(errno));
+    adw_dialog_close(ADW_DIALOG(source));
+    return false;
+  }
+  if (child == 0) {
+    setsid();
+    // The app outlives this command, so it must not keep the caller's terminal
+    // attached. A failure here is not worth reporting: the app has its own
+    // logging and this window is about to close either way.
+    const int null_device = ::open("/dev/null", O_RDWR);
+    if (null_device >= 0) {
+      ::dup2(null_device, STDIN_FILENO);
+      ::dup2(null_device, STDOUT_FILENO);
+      ::dup2(null_device, STDERR_FILENO);
+      if (null_device > STDERR_FILENO) {
+        ::close(null_device);
+      }
+    }
+    const std::string path = app.string();
+    const char* arguments[] = {path.c_str(), nullptr};
+    execv(path.c_str(), const_cast<char* const*>(arguments));
+    _exit(EXIT_FAILURE);
+  }
+  // The app is its own process now, so this window can go -- but only on this
+  // path, so a failed spawn leaves the window up with the reason on screen
+  // rather than closing and looking as though it worked.
+  g_timeout_add(600, CloseWindowAfterRestart, nullptr);
+  return true;
+}
+
 void OnRestartClicked(GtkWidget* button, gpointer user_data) {
   (void)button;
   (void)user_data;
@@ -363,28 +432,7 @@ void OnRestartClicked(GtkWidget* button, gpointer user_data) {
                        adw_dialog_close(ADW_DIALOG(source));
                        return;
                      }
-                     // Relaunch this same executable with no arguments, which
-                     // is how Nightcap is normally started. setsid detaches it
-                     // so it does not become a child of this process, and the
-                     // new process claims the display before this one lets go.
-                     const std::string launcher =
-                         "setsid -f /proc/self/exe >/dev/null 2>&1 &";
-                     GError* spawn_error = nullptr;
-                     if (!g_spawn_command_line_async(launcher.c_str(),
-                                                    &spawn_error)) {
-                       if (spawn_error != nullptr) {
-                         ShowToast(std::string("Could not restart: ") +
-                                   spawn_error->message);
-                         g_error_free(spawn_error);
-                         return;
-                       }
-                     }
-                     g_timeout_add(400, [](gpointer) -> gboolean {
-                       if (g_window != nullptr && g_window->window != nullptr) {
-                         gtk_window_close(GTK_WINDOW(g_window->window));
-                       }
-                       return G_SOURCE_REMOVE;
-                     }, nullptr);
+                     RestartNightcap(ADW_DIALOG(source));
                    }),
                    nullptr);
   adw_dialog_present(ADW_DIALOG(dialog), GTK_WIDGET(g_window->window));

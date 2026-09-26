@@ -972,13 +972,6 @@ std::uint64_t MonotonicNowNs() {
          static_cast<std::uint64_t>(now.tv_nsec);
 }
 
-std::uint64_t MonotonicThreadCpuNs() {
-  timespec now{};
-  clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
-  return static_cast<std::uint64_t>(now.tv_sec) * 1'000'000'000ULL +
-         static_cast<std::uint64_t>(now.tv_nsec);
-}
-
 constexpr std::size_t kPumpStallFrames = 32;
 
 // Labels one frame with the image it falls in. A Release build has no symbols

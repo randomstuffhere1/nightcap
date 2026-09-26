@@ -34,6 +34,7 @@
 #include "runtime/command_line.h"
 #include "runtime/crash_report_policy.h"
 #include "runtime/environment.h"
+#include "runtime/sibling_executable.h"
 #include "runtime/external_launch_broker.h"
 #include "runtime/failure_dialog.h"
 #include "runtime/fleasion.h"
@@ -271,12 +272,11 @@ int main(int argc, char* argv[]) {
     // payload, and so a crash in it cannot take a running session down. It sits
     // beside this one; the desktop entry and this flag both reach it the same
     // way.
-    const std::filesystem::path self =
-        std::filesystem::read_symlink("/proc/self/exe");
-    const std::filesystem::path settings = self.parent_path() / "mocktail_settings";
-    if (!std::filesystem::exists(settings)) {
-      std::cerr << "[FATAL] Cannot find the settings window at " << settings
-                << "\n";
+    const std::filesystem::path settings =
+        mocktail::runtime::SiblingExecutable("mocktail_settings");
+    if (settings.empty()) {
+      std::cerr << "[FATAL] Cannot find mocktail_settings beside "
+                << std::filesystem::read_symlink("/proc/self/exe") << "\n";
       return EXIT_FAILURE;
     }
     // Replaced rather than forked-and-waited, so this process is gone before
