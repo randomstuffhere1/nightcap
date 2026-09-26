@@ -183,3 +183,9 @@ lsan.log*
 
 # AI Agents
 AGENTS.md
+
+# Local --profile traces and strace output from performance investigation
+/freeze*.json
+/AA_profile.log
+/pump_stalls_*.log
+/freeze_strace.log

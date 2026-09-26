@@ -32,19 +32,25 @@ GitHub are taken from the matching section here.
   exposes no way to set a device buffer size, so the value is advisory and
   Nightcap says so at startup rather than pretending to apply it, pointing at
   `SDL_AUDIO_BUFFER_SAMPLES` as the supported way to change it.
-- `MOCKTAIL_TRACE_PUMP_STALLS=1` reports the stack underneath the engine's
-  main-thread waits. A recorded trace showed the source of the multi-second
-  freezes: 22.09 s of `nativeCallMessagesFromMainThread` across a 78 s session
-  used 0.38 s of CPU, and the ten longest steps were all at 0%. The engine
-  blocks rather than computes, but a guest mutex, a socket read, and a
-  condition variable look identical from outside a trace, so the report names
-  the wait by the image each frame falls in, read from `/proc/self/maps`, and
-  says which call site drove the pump. Only the top frames identify a wait, so
-  repeating shapes are counted rather than reprinted. A Release build has no
-  guest symbols, so a frame is named by its module and offset rather than by
-  function; use a Debug build when the function matters. Off unless enabled;
-  `MOCKTAIL_PUMP_STALL_MIN_MS` and `MOCKTAIL_PUMP_STALL_COOLDOWN_MS` tune the
-  threshold and the capture rate.
+- `MOCKTAIL_TRACE_PUMP_STALLS=1` reports the stack underneath a long engine
+  main-thread call, naming each frame by the image it falls in (read from
+  `/proc/self/maps`) and saying which call site drove the pump. Only the top
+  frames identify a wait, so repeating shapes are counted rather than reprinted.
+  A Release build has no guest symbols, so a frame is named by its module and
+  offset rather than by function; use a Debug build when the function matters.
+  Off unless enabled; `MOCKTAIL_PUMP_STALL_MIN_MS` and
+  `MOCKTAIL_PUMP_STALL_COOLDOWN_MS` tune the threshold and the capture rate.
+- A documented answer for the multi-second freezes a trace sometimes shows. The
+  engine is not blocked: the main thread pumps at a constant 4.17 ms through a
+  freeze, the same as when frames flow, the render thread drops to 0.2% busy,
+  and under `strace` a 141 s session produced three network reads over 50 ms,
+  all at startup, alongside 21,616 `EAGAIN` returns from non-blocking reads.
+  The engine is polling, finding no work, and not rendering, so this is most
+  likely engine or server-side behavior with no host-side fix. `PERFORMANCE.md`
+  records the numbers, the two causes already disproved, and the one reading
+  that sends people down the wrong path: a low `cpu_us` on a pump slice means
+  idle or blocked only once you have also checked that the call cadence did not
+  stretch.
 - A pump call made as a thread-join poll callback is no longer reported as an
   engine stall. It is idle by construction there, so a 178 ms call while
   joining the startup thread was the join working, not the engine freezing.

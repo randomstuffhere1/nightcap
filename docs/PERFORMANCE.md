@@ -127,39 +127,85 @@ chosen mode:
 `MOCKTAIL_ENGINE_PUMP_REST` forces a mode. `sleep` without the governor's help
 runs cooler for a few frames per second less; measure before keeping it.
 
-## When the engine's main thread blocks
+## When the engine stops rendering
 
-A trace shows freezes with nothing in them. That is the engine's main-thread
-step, `nativeCallMessagesFromMainThread`, and it blocks rather than computes.
-From a 78 s session:
+A trace sometimes shows freezes with nothing in them: the main thread calls the
+engine, the render thread goes quiet, and no frames come out. The obvious
+reading is that something is blocked. **It is not.** This section records what
+was measured, because the obvious reading is wrong and it is easy to waste time
+on it.
 
-```
-all pump steps: 22.09 s wall, 0.38 s CPU  ->  2% CPU
-```
+A `--profile` trace carries `cpu_us` on every `nativeCallMessagesFromMainThread`
+slice, so you can see this without any extra tooling. Compare the *cadence*, not
+just the CPU:
 
-Every one of the ten longest steps was at 0% CPU:
-
-| at | duration | CPU |
+| | inside a 1.4 s freeze | healthy stretch |
 | --- | --- | --- |
-| t+22.10s | 347.78 ms | 0.03 ms |
-| t+0.97s | 216.40 ms | 0.02 ms |
-| t+16.68s | 199.80 ms | 0.02 ms |
-| t+23.42s | 195.69 ms | 0.02 ms |
+| pump interval, median | 4.17 ms | 4.17 ms |
+| main thread busy | 7.5% | 9.0% |
+| render thread busy | **0.2%** | 3.2% |
 
-The `--profile` trace already carries this as the `cpu_us` argument on each
-`nativeCallMessagesFromMainThread` slice, so you do not need anything extra to
-see it. A long slice with `cpu_us` far below its `dur` is a wait, not work.
+The main thread is calling the engine at exactly the normal rate and returning
+immediately. The render thread has nothing to do. The engine is polling, finding
+no work, and choosing not to render — which is a different problem from blocking,
+and one that is usually not on this side of the bridge.
 
-What the trace cannot say is *what* the thread waits on. A guest mutex, a
-socket read, and a condition variable all look identical from the outside, and
-they need different fixes. For that, capture the stack:
+`cpu_us` far below `dur` on its own does **not** mean blocked. An idle thread
+that polls on a timer looks identical to a blocked one. The cadence is what
+tells them apart: a blocked thread's pump interval stretches, an idle one's does
+not. A long `dur` with a low `cpu_us` at startup is usually the engine's own
+initialisation phase, not a stall.
+
+`strace` settles what the host is doing. Across a 141 s session containing
+multi-second freezes, the blocking-call totals were:
+
+| syscall | total blocked | count |
+| --- | --- | --- |
+| futex | 6,655 ms | 2,139 |
+| poll | 2,729 ms | 752 |
+| ppoll | 751 ms | 83 |
+| epoll_wait | 386 ms | 250 |
+| `recvfrom`/`recvmsg` | 141 ms | 3 |
+
+Three network reads over 50 ms in the whole session, all at startup. Nothing
+waits for anything close to the freeze durations, and there were 21,616
+`EAGAIN` returns from non-blocking reads — the guest polling descriptors that
+have nothing on them, which is the signature of polling rather than waiting.
+
+Beware what strace does to the numbers. It adds overhead per syscall, and the
+session above had its worst frame stretched to 28.9 s under it, against 1.4 s
+untraced. Use it to rule causes out, not to measure.
+
+### The freeze pattern
+
+Gap durations cluster near exact second multiples, which reads like a retry or a
+poll interval:
+
+```
+999.3  999.6  999.9  999.9  1062.6  930.5     mean 998.7 ms
+```
+
+One tempting explanation is a DNS or asset-resolution storm: a trace under
+strace showed `inet_addr` called 12,408 times for a single address, 808 times in
+one second, during the largest gap. Checked against the gaps rather than the
+seconds, it does not hold. Fourteen of the ~1 s gaps contain essentially zero
+such calls, and the correlation over the whole session is r = −0.07. It explains
+one large gap and nothing else. If you chase this, check per-gap coverage
+before believing a per-second correlation.
+
+**No host-side cause has been found.** Every layer instrumented so far says the
+engine is idling, not blocked, and the most likely explanation is engine or
+server-side behavior reached through the guest. If you are looking for
+something to fix here, this section is the honest answer: there may not be one.
+
+### If you still want the stack
+
+For a session where a *single* pump call really is long, this names the frames
+underneath it:
 
 ```sh
 MOCKTAIL_TRACE_PUMP_STALLS=1 mocktail
 ```
-
-Each stall over the threshold prints the wait, which call site drove the pump,
-and the frames underneath it:
 
 ```
   [stall] engine main-thread step blocked 347 ms with no CPU, driven from main
@@ -167,46 +213,39 @@ and the frames underneath it:
         #1 libc.so.6+0x111 [read]
 ```
 
-**Know what this can and cannot tell you.** A Release build carries no symbols
-for the guest, so each frame is named by the image it falls in, read from
-`/proc/self/maps`, with a real symbol appended when one exists. That is enough
-to separate the cases that matter — a frame in `libroblox.so` means the engine
-is blocking, one inside a system library's `read` or `connect` means it is the
-network — but it will not name a function inside the guest. Build with
-`-DCMAKE_BUILD_TYPE=Debug` if you need that.
+It reports per-call duration, which is the wrong axis for the freeze pattern
+above — the pump calls during a freeze are *shorter* than normal. It is still
+the right tool for a genuinely long individual call.
 
-Two more limits worth knowing:
+A Release build carries no symbols for the guest, so each frame is named by the
+image it falls in, read from `/proc/self/maps`, with a real symbol appended when
+one exists. That separates a frame in `libroblox.so` from one in a system
+library's `read`, but it will not name a function inside the guest; build with
+`-DCMAKE_BUILD_TYPE=Debug` when the function matters.
 
-- A stall is only reported when the pump is called from the main loop. When it
-  is driven as a thread-join poll callback the step is idle by construction,
-  so a long call there is the join working rather than the engine freezing,
-  and it is skipped.
+Two more limits:
+
+- A call driven as a thread-join poll callback is not reported. The step is idle
+  by construction there, so a long call while joining the startup thread is the
+  join working.
 - If the unwind carries nothing below the pump, the log says so rather than
   implying a cause was found:
   `blocked in host code; no frame below the pump`.
 
-The top frames are what identify the wait, so only those are compared. Two
-stalls with the same top frames are counted as one shape, and the stack is
-printed once rather than every time, because a stall that fires every frame
-would otherwise bury anything new. A new shape is always printed, even inside
-another shape's window.
+Only the top frames identify a wait, so repeats are counted as one shape and the
+stack is printed once rather than every time. A new shape is always printed,
+even inside another shape's window.
 
 Two knobs, both optional:
 
 - `MOCKTAIL_PUMP_STALL_MIN_MS` (default 50) is the threshold at which a step
-  counts as a stall. The pump runs at kilohertz rates, so this matters more
-  than the toggle.
+  counts. The pump runs at kilohertz rates, so this matters more than the toggle.
 - `MOCKTAIL_PUMP_STALL_COOLDOWN_MS` (default 1000) is the shortest gap between
-  two captures. Capturing a stack costs a symbol lookup, and a session that
-  never stalls should not pay for a diagnostic nobody reads.
+  two captures. Capturing a stack costs a symbol lookup, and a session that never
+  stalls should not pay for a diagnostic nobody reads.
 
-Stall reporting is off unless one of these is set. `MOCKTAIL_TRACE_MAIN_THREAD_PUMP`
-turns it on as well, since that already means someone is diagnosing this.
-
-The near-exact second multiples in the freeze times are the other clue. A wait
-that clears on a round number of milliseconds is usually a timeout or a poll
-interval rather than work, which narrows the candidates to a blocked socket
-read, a server-side join wait, and a retry backoff in the join path.
+Off unless one of these is set. `MOCKTAIL_TRACE_MAIN_THREAD_PUMP` turns it on
+as well, since that already means someone is diagnosing this.
 
 ## Settings that ask for more work
 

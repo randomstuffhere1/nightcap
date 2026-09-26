@@ -55,14 +55,17 @@ Each slice is named after the call it times, on the thread that made it.
 | `pipeline` | `vkCreateGraphicsPipelines`, `vkCreateComputePipelines` | `count`, `cache` (1 when a pipeline cache was passed), `result` |
 | `pipeline` | `vkCreateShaderModule` | `bytes`, `result` |
 | `pipeline` | `vkCreatePipelineCache` | `initial_bytes`, `result` |
-| `pump` | `nativeCallMessagesFromMainThread`: the engine's main-thread step, on the host main thread. Only calls of 20 µs or more are recorded; the empty polls between them are not. | `cpu_us`: CPU time the main thread used during the call. Far below the slice's duration means the step spent it waiting |
+| `pump` | `nativeCallMessagesFromMainThread`: the engine's main-thread step, on the host main thread. Only calls of 20 µs or more are recorded; the empty polls between them are not. | `cpu_us`: CPU time the main thread used during the call. Far below the slice's duration means the step was not computing, but see below before calling it a wait |
 
-`cpu_us` is the fastest way to tell a freeze's cause apart. A long
-`nativeCallMessagesFromMainThread` slice whose `cpu_us` is a fraction of its
-duration is the engine blocked on something, not computing. See
-[PERFORMANCE.md](PERFORMANCE.md#when-the-engines-main-thread-blocks) for what to
-do about that, including `MOCKTAIL_TRACE_PUMP_STALLS=1`, which prints the stack
-underneath the wait.
+`cpu_us` low against a long `dur` does **not** by itself mean the thread is
+blocked. An idle thread polling on a timer looks identical to a blocked one on
+CPU time alone. The thing that separates them is the interval *between* pump
+slices: a blocked main thread's interval stretches, an idling one's stays
+constant. A freeze where the interval is unchanged and the render thread has
+dropped to near-zero busy is the engine idling, not waiting, and there is
+usually nothing to fix on this side. See
+[PERFORMANCE.md](PERFORMANCE.md#when-the-engine-stops-rendering) for the
+measured numbers and the two causes already ruled out.
 
 The `frame interval (ms)` counter is the time between successive adapter
 presents. `vkQueuePresentKHR` time minus `host present` time is the adapter's

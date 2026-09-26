@@ -38,35 +38,45 @@ Done when a plugged-in pad shows its own buttons.
 
 ## 3. Load and join freezes
 
-The cause is now known: the engine's main thread blocks rather than computes.
-Over a 78 s session, 22.09 s was spent inside
-`nativeCallMessagesFromMainThread` and 0.38 s of that was CPU. The ten longest
-steps were all at 0% CPU, the worst at 347 ms.
+**Investigated. No host-side cause found; probably not actionable from here.**
 
-What it blocks on is still open, and that is the work. `MOCKTAIL_TRACE_PUMP_STALLS=1`
-captures the stack underneath a wait, which is the only way to tell a guest mutex
-from a socket read from a condition variable. The near-exact second multiples
-in the freeze times point at a timeout or a poll interval rather than work, so
-the candidates are a blocked socket read, a server-side join wait, and a retry
-backoff in the engine's join path.
+The freezes are real — a 78 s session lost 15.5 s across 33 frames, and a 35 s
+one lost 13.4 s across 32 — but every layer instrumented says the engine is
+*idling*, not blocked. Full numbers in
+[PERFORMANCE.md](PERFORMANCE.md#when-the-engine-stops-rendering); the short
+version:
 
-A first run of the stall report did not settle it, and said something useful
-anyway. Across a 41 s session it found two stalls, both during startup, and
-none at all during 20 s of gameplay — the freezes did not reproduce, and frame
-pacing stayed near 53 fps throughout. So the freezes are intermittent, or
-specific to the place and session that produced the first trace. One session
-without a freeze is not evidence they are gone.
+- The main thread pumps at a constant 4.17 ms through a freeze, the same as
+  when frames are flowing, at 7.5% busy against 9.0%.
+- The render thread drops to 0.2% busy, from 3.2%. It has nothing to do.
+- Under `strace`, 141 s containing multi-second freezes produced three network
+  reads over 50 ms, all at startup. Nothing waits for anything close to a
+  freeze duration. There were 21,616 `EAGAIN` returns from non-blocking reads:
+  polling, not waiting.
+- Gap durations cluster near exact second multiples, mean 998.7 ms, which reads
+  like a retry or poll interval.
 
-- Reproduce first. The freezes need to happen in the same session that gets
-  traced, and a Debug build if the guest function matters, since a Release
-  build names a frame by its module and offset only.
-- Three runs per scenario before claiming anything, per
-  [BENCHMARKING.md](BENCHMARKING.md). One run is not a result, and one run here
-  already produced a misleading one.
-- Whatever it turns out to be, it is upstream engine behaviour reached through
-  the guest, so a fix may be a workaround rather than a change.
+The engine is calling into itself on schedule, finding no work, and not
+rendering. That is most likely engine or server-side behavior reached through
+the guest.
 
-Done when a fresh experience no longer freezes for a second at a time.
+Two things were chased and disproved, recorded so they are not chased again. A
+shader-compilation cause was ruled out first: all pipeline and texture work
+totalled 40 ms in a 78 s session. Then a DNS storm looked conclusive —
+`inet_addr` called 12,408 times for one address, 808 times in a second during
+the largest gap — but per-gap coverage showed fourteen of the ~1 s gaps contain
+essentially none of it, and the session-wide correlation is r = −0.07. It
+explains one gap and nothing else.
+
+- Not a Nightcap-side fix, on the evidence so far. If someone wants to pursue it
+  further, the remaining lead is engine-internal, and `perf record -g` is the
+  only tool left that has not been tried: it samples every thread, so unlike
+  `--profile` it can see a spin that emits no Vulkan or pump slices, and unlike
+  `strace` it does not perturb per-syscall cost.
+- Do not read a low `cpu_us` on a pump slice as a blocked thread without also
+  checking the cadence. An idle polling thread and a blocked one look the same
+  on CPU time alone, and that misreading is what sent this investigation down
+  two wrong paths.
 
 ## Why item 3 was rewritten
 
