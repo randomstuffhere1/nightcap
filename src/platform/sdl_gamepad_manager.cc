@@ -9,13 +9,11 @@
 
 namespace mocktail {
 namespace platform {
-namespace {
 
-static_assert(SDL_GAMEPAD_BUTTON_COUNT <= 32);
-static_assert(SDL_GAMEPAD_AXIS_COUNT <= 32);
-
-GamepadFamily Family(SDL_Gamepad* gamepad) {
-  switch (SDL_GetGamepadType(gamepad)) {
+// One SDL type to one family. Split out of Family() so the mapping is a pure
+// function of the type, testable without a pad plugged in.
+GamepadFamily FamilyForType(SDL_GamepadType type) {
+  switch (type) {
     case SDL_GAMEPAD_TYPE_XBOX360:
     case SDL_GAMEPAD_TYPE_XBOXONE:
       return GamepadFamily::kXbox;
@@ -24,9 +22,40 @@ GamepadFamily Family(SDL_Gamepad* gamepad) {
       return GamepadFamily::kPlayStation4;
     case SDL_GAMEPAD_TYPE_PS5:
       return GamepadFamily::kPlayStation5;
+    // The Switch Pro and both Joy-Cons share one face-button layout, and
+    // splitting them here would only mean mapping all of them the same way
+    // further down.
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_LEFT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_RIGHT:
+    case SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_JOYCON_PAIR:
+      return GamepadFamily::kNintendo;
+    case SDL_GAMEPAD_TYPE_GAMECUBE:
+      return GamepadFamily::kGameCube;
     default:
       return GamepadFamily::kUnknown;
   }
+}
+
+namespace {
+
+static_assert(SDL_GAMEPAD_BUTTON_COUNT <= 32);
+static_assert(SDL_GAMEPAD_AXIS_COUNT <= 32);
+
+GamepadFamily Family(SDL_Gamepad* gamepad) {
+  // The real type is the hardware's, and unlike the reported type it is not
+  // affected by a remapping. SDL_GetGamepadType returns
+  // SDL_GAMEPAD_TYPE_STANDARD for anything it cannot place, which is how a
+  // Switch Pro or a GameCube pad used to arrive here as unknown and drew
+  // generic glyphs.
+  const GamepadFamily real = FamilyForType(SDL_GetRealGamepadType(gamepad));
+  if (real != GamepadFamily::kUnknown) {
+    return real;
+  }
+  // A pad SDL cannot identify by hardware may still be placed by its mapping,
+  // so the reported type is worth consulting before giving up. This is what
+  // keeps an Xbox or PlayStation pad working when a mapping claims it.
+  return FamilyForType(SDL_GetGamepadType(gamepad));
 }
 
 bool ValidId(std::int64_t id) {

@@ -10,6 +10,11 @@
 namespace mocktail {
 namespace platform {
 
+// The family an SDL gamepad type corresponds to. Exposed so the mapping can be
+// tested without an attached pad, which is the only way to cover the Switch Pro
+// and GameCube cases at all.
+GamepadFamily FamilyForType(SDL_GamepadType type);
+
 // Main-thread owner. Consumes events from the existing SDL pump; it never
 // creates another event loop or consumes keyboard/window events.
 class SdlGamepadManager final {

@@ -141,6 +141,38 @@ TEST_F(RobloxGamepadInputTest, FamilyTypesAndButtonsUseTheAndroidAbi) {
   EXPECT_EQ(MapSdlGamepadButtonToAndroid(255), -1);
 }
 
+// SDL reports a Switch Pro and a GameCube pad as distinct hardware. The client
+// has no glyph set for either, so they arrive as the nearest type it knows.
+TEST_F(RobloxGamepadInputTest, UnfamiliarsPadsMapToTheNearestKnownType) {
+  using platform::GamepadFamily;
+  EXPECT_EQ(RobloxGamepadType(GamepadFamily::kNintendo), 3);
+  EXPECT_EQ(RobloxGamepadType(GamepadFamily::kGameCube), 3);
+  // The approximation is reported, so a Switch pad showing Xbox art is not
+  // silently wrong.
+  EXPECT_TRUE(RobloxGamepadTypeIsApproximate(GamepadFamily::kNintendo));
+  EXPECT_TRUE(RobloxGamepadTypeIsApproximate(GamepadFamily::kGameCube));
+  // A family the client does know is never called an approximation.
+  EXPECT_FALSE(RobloxGamepadTypeIsApproximate(GamepadFamily::kXbox));
+  EXPECT_FALSE(RobloxGamepadTypeIsApproximate(GamepadFamily::kPlayStation4));
+  EXPECT_FALSE(RobloxGamepadTypeIsApproximate(GamepadFamily::kPlayStation5));
+  EXPECT_FALSE(RobloxGamepadTypeIsApproximate(GamepadFamily::kUnknown));
+}
+
+// An unrecognised pad must not reach the client as an invented type. Only 0
+// through 3 are known to be understood, and a value outside that set could
+// leave the client with no art to draw at all.
+TEST_F(RobloxGamepadInputTest, NoFamilyEverProducesAnUnknownTypeValue) {
+  for (const auto family :
+       {platform::GamepadFamily::kUnknown, platform::GamepadFamily::kXbox,
+        platform::GamepadFamily::kPlayStation4,
+        platform::GamepadFamily::kPlayStation5,
+        platform::GamepadFamily::kNintendo, platform::GamepadFamily::kGameCube}) {
+    const int32_t type = RobloxGamepadType(family);
+    EXPECT_GE(type, 0);
+    EXPECT_LE(type, 3) << "family " << static_cast<int>(family);
+  }
+}
+
 TEST_F(RobloxGamepadInputTest,
        NeutralAxesAndRepeatedButtonsDoNotGenerateInput) {
   Add(10);

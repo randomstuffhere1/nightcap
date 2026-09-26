@@ -44,6 +44,18 @@ target_compile_features(mocktail_input_runtime PUBLIC cxx_std_17)
 mocktail_apply_compile_options(mocktail_input_runtime)
 
 if(BUILD_TESTING AND TARGET GTest::gtest_main)
+  # The SDL type to family mapping, which is the whole of the glyph fix and the
+  # only part testable without a pad plugged in.
+  add_executable(sdl_gamepad_manager_test
+    ${MOCKTAIL_PLATFORM_GRAPHICS_ROOT}/tests/sdl_gamepad_manager_test.cc
+  )
+  target_link_libraries(sdl_gamepad_manager_test PRIVATE
+    Mocktail::PlatformSdl
+    GTest::gtest_main
+  )
+  mocktail_apply_compile_options(sdl_gamepad_manager_test)
+  gtest_discover_tests(sdl_gamepad_manager_test)
+
   add_executable(roblox_input_router_test
     ${MOCKTAIL_INPUT_ROOT}/tests/roblox_gamepad_input_test.cc
     ${MOCKTAIL_INPUT_ROOT}/tests/roblox_input_router_test.cc

@@ -45,7 +45,13 @@ AndroidKeyMapping MapSdlKeyToAndroid(uint32_t sdl_scancode, uint32_t sdl_key = 0
 int32_t MapSdlMouseButtonToAndroid(uint8_t sdl_button);
 
 int32_t MapSdlGamepadButtonToAndroid(uint8_t sdl_button);
+// The integer the client uses to pick button art. Only values the client is
+// known to understand are ever returned; see the definition for the reasoning.
 int32_t RobloxGamepadType(platform::GamepadFamily family);
+// True when RobloxGamepadType reported a family as a different one because the
+// client has no glyph set for it. Startup says so, since otherwise a Switch pad
+// arriving as an Xbox one is invisible.
+bool RobloxGamepadTypeIsApproximate(platform::GamepadFamily family);
 
 struct RobloxGamepadSink {
   using SupportedKeyFn = Status (*)(void*, int32_t, int32_t, bool, int32_t);

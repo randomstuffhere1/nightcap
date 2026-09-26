@@ -8,6 +8,16 @@ GitHub are taken from the matching section here.
 
 ### Added
 
+- A plugged-in pad now shows its own button glyphs. The pad family is taken
+  from the hardware's real type rather than the type SDL reports, which
+  returned a generic value for anything it could not place: a Switch Pro, a
+  Joy-Con or a GameCube pad reached the client as unknown and drew generic
+  glyphs. The client has art for PlayStation and Xbox pads only, so a Switch or
+  GameCube pad is reported as the nearest layout it knows, which is Xbox —
+  both use the same face-button diamond with A and B in the same places.
+  Startup says when it does this, so the approximation is visible. No invented
+  type value is ever sent to the client, since a value outside the set it
+  understands could leave it with no art to draw at all.
 - `graphics.quality` in `config.yaml` sets Roblox's graphics level, 1 to 6, or
   `auto` to leave it to the client. It matters in two places that each pick a
   level of their own: the multithreaded rendering path, and the Intel-only

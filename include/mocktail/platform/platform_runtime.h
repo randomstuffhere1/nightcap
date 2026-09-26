@@ -195,11 +195,17 @@ struct TouchEvent {
   float pressure = 0.0f;
 };
 
+// The physical pad, as far as it can be told apart. kNintendo and kGameCube
+// exist because SDL reports them as distinct hardware but the client has no
+// glyph set for either, so they are carried this far and mapped to the nearest
+// type the client does know. See RobloxGamepadType.
 enum class GamepadFamily {
   kUnknown,
   kXbox,
   kPlayStation4,
   kPlayStation5,
+  kNintendo,
+  kGameCube,
 };
 
 struct GamepadDescriptor {

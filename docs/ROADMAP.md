@@ -24,17 +24,29 @@ touch can be set without a text editor.
 
 ## 2. Controller button glyphs
 
-Upstream added Xbox and PlayStation gamepad support through SDL. Controllers
-already hot-plug and release their held inputs when unplugged. One rough edge
-is left.
+Shipped, with a limit worth knowing. The family is now taken from
+`SDL_GetRealGamepadType`, the hardware's own type, which is not affected by a
+remapping. SDL's reported type returned `SDL_GAMEPAD_TYPE_STANDARD` for
+anything it could not place, so a Switch Pro, a Joy-Con or a GameCube pad
+arrived as an unknown pad and drew generic glyphs.
 
-- Correct button glyphs for the connected pad. `SDL_GetGamepadType` is only
-  read for Xbox and PlayStation pads, so a Switch Pro, a GameCube pad, or any
-  generic pad SDL reports as `SDL_GAMEPAD_TYPE_STANDARD` reaches Roblox as
-  type 0 and draws generic glyphs. `SDL_GetRealGamepadType`, and the vendor
-  and product IDs, are available and unused.
+The client has glyph sets for PlayStation and Xbox pads and nothing else, so a
+Switch or GameCube pad is reported as the nearest layout the client does know,
+which is Xbox: both put their face buttons in the same diamond with A and B
+where Xbox puts them. Reporting them as PlayStation would put the art on the
+wrong physical buttons, since PlayStation has a diamond in a different place
+with A and B swapped. Startup prints `closest match: the client has no glyph
+set for this pad` when it does this, so the approximation is visible rather
+than looking like a bug.
 
-Done when a plugged-in pad shows its own buttons.
+No invented type value is ever sent. Only 0 to 3 are known to be understood by
+the client, and a value outside that set could leave it with no art to draw at
+all, which is worse than the wrong art. The mapping is a tested pure function
+of the SDL type, so a future SDL type that needs its own family fails a test
+rather than silently drawing generic glyphs.
+
+Glyph rendering can only be confirmed with a pad plugged in; there is no
+automated coverage of the client actually drawing them.
 
 ## 3. Load and join freezes
 

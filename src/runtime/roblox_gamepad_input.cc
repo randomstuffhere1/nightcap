@@ -105,6 +105,21 @@ int32_t MapSdlGamepadButtonToAndroid(uint8_t button) {
   }
 }
 
+// The client draws button art from the integer this returns, and only the
+// values below are known to be ones it understands. Passing a value outside
+// that set risks the client having no art to pick at all, which is worse than
+// the wrong art, so an unrecognised pad is reported as unknown rather than
+// guessed at.
+//
+// 0 unknown, 1 PlayStation 4, 2 PlayStation 5, 3 Xbox.
+//
+// The client has no glyph set for a Switch pad or a GameCube pad, so those are
+// reported as the layout they most resemble rather than as themselves. Both put
+// their face buttons in the diamond position to the right of the centre, and
+// label the bottom button A and the right one B, which is the Xbox arrangement.
+// Reporting them as PlayStation would put the glyphs on the wrong physical
+// buttons, since PlayStation has the same diamond in a different place with A
+// and B swapped relative to it.
 int32_t RobloxGamepadType(platform::GamepadFamily family) {
   // NativeInputInterface's Android gamepad types are not SDL_GamepadType.
   switch (family) {
@@ -113,10 +128,20 @@ int32_t RobloxGamepadType(platform::GamepadFamily family) {
     case platform::GamepadFamily::kPlayStation5:
       return 2;
     case platform::GamepadFamily::kXbox:
+    case platform::GamepadFamily::kNintendo:
+    case platform::GamepadFamily::kGameCube:
       return 3;
     default:
       return 0;
   }
+}
+
+// Whether RobloxGamepadType had to approximate the family. Startup says so when
+// it did, because a Switch pad reporting as an Xbox one is otherwise invisible
+// and looks like a bug.
+bool RobloxGamepadTypeIsApproximate(platform::GamepadFamily family) {
+  return family == platform::GamepadFamily::kNintendo ||
+         family == platform::GamepadFamily::kGameCube;
 }
 
 std::vector<RobloxInputRouter::ActiveGamepad>::iterator
@@ -167,11 +192,15 @@ RobloxInputDispatchResult RobloxInputRouter::HandleGamepadConnectionLocked(
     gamepads_.push_back(std::move(gamepad));
     snapshot_.detected_gamepads = gamepads_.size();
     std::fprintf(stderr,
-                 "  [gamepad] detected SDL device %lld: %.160s (type=%d); "
+                 "  [gamepad] detected SDL device %lld: %.160s (type=%d%s); "
                  "ready for input\n",
                  static_cast<long long>(event.instance_id),
                  event.descriptor.name.c_str(),
-                 RobloxGamepadType(event.descriptor.family));
+                 RobloxGamepadType(event.descriptor.family),
+                 RobloxGamepadTypeIsApproximate(event.descriptor.family)
+                     ? ", closest match: the client has no glyph set for this "
+                       "pad"
+                     : "");
   }
   return status.ok() ? State(kind)
                      : NativeResultLocked(std::move(status), kind);
