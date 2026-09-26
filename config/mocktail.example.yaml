@@ -58,6 +58,11 @@ graphics:
   # stored copy and run the next session uncached, or to off to never read or
   # write one. See docs/PERFORMANCE.md before blaming shaders for a stutter.
   # pipeline_cache: on
+  # String (default: auto): Roblox's own graphics quality level, 1 to 6. auto
+  # leaves the level to the client. A number overrides the value the
+  # multithreaded path would otherwise force, and is the only way to get a
+  # level other than that path's choice.
+  # quality: auto
 
 performance:
   # Boolean (default: false): size Roblox scheduler/render queues from every
@@ -74,6 +79,19 @@ performance:
   # String (default: auto): request Feral GameMode when its host daemon and
   # client library are available. Supported values: auto, on, off.
   gamemode: auto
+  # Integer MiB (default: 0): texture memory budget to tell Roblox, overriding
+  # the automatic eighth-of-host-RAM figure. 0 keeps the automatic value, which
+  # is capped at 1536 and is usually right. Raise it if a heavy place reuploads
+  # textures it should be keeping; lower it on a small GPU. The resolved budget
+  # is printed at startup. 2047 is the practical maximum, because the client
+  # reads the budget through a signed 32-bit setting.
+  # texture_memory_mb: 0
+  # Integer (default: 4): redraw ETC2 textures of 64px or smaller at N times
+  # their size, so small mobile textures are not blurry on a desktop display.
+  # 1 turns it off. Higher values cost GPU memory and sampling bandwidth on
+  # every frame that uses an affected texture. Only affects experiences that
+  # upload compressed textures at all.
+  # small_texture_upscale: 4
 
 audio:
   # String (default: default): `default` follows the host system output.
@@ -83,6 +101,16 @@ audio:
   # startup, or `disabled`. IDs disambiguate duplicate names but may change
   # between boots; prefer the exact device name when it is unique.
   input_device: default
+  # Integer frames (default: 0): intended playback buffer size. 0 accepts
+  # whatever the device uses, which is right in most cases; lower values cut
+  # audio latency and raise the chance of a dropout, higher values are steadier
+  # and laggier. SDL3 does not expose a way to set this per device, so the
+  # value is advisory: startup reports the size actually in use and explains
+  # that SDL_AUDIO_BUFFER_SAMPLES is the supported way to change it. Set this
+  # to a non-zero value to have Nightcap say so at startup. The session also
+  # logs a starved-refill count at exit, which is what tells you the size in
+  # use is too small.
+  # buffer_samples: 0
 
 input:
   # Boolean (default: false): send mouse look deltas in the host's own units.

@@ -127,11 +127,73 @@ chosen mode:
 `MOCKTAIL_ENGINE_PUMP_REST` forces a mode. `sleep` without the governor's help
 runs cooler for a few frames per second less; measure before keeping it.
 
+## Settings that ask for more work
+
+Three settings forward a level or a budget rather than changing how Nightcap
+behaves. None of them is a measured speedup, and the honest reason each exists
+is that the value the client or the launch policy would pick is not always the
+one you want.
+
+`graphics.quality` (`auto` by default, or 1 to 6) forwards Roblox's
+`FIntDebugFRMQualityLevelOverride`. `auto` leaves the level to the client. A
+number overrides it, which matters in two places: the multithreaded rendering
+path asks for a level of its own, and `graphics_launch_policy.cc` drops to
+level 1 on an Intel-only machine. Both use a default, so an explicit value in
+`config.yaml` wins over both.
+
+A higher level is not better output. It asks for more shadow and lighting work.
+On hardware that cannot afford it, that is a lower frame rate, not a sharper
+image. Lowering it is the direction that helps a struggling machine.
+
+`performance.texture_memory_mb` (0 by default) overrides the texture budget
+Roblox is told about. 0 keeps the automatic figure, which is an eighth of host
+RAM clamped to `[256, 1536]` MiB. An explicit value is used as given rather than
+clamped back to that range, because asking for more than the rule allows is the
+whole point of asking.
+
+**The ceiling is 2047 MiB, not 65536.** The client reads this through
+`FIntRenderForceVideoMemorySize`, a signed 32-bit setting, so a budget past
+`INT32_MAX` bytes cannot be represented and is refused rather than truncated.
+That is barely above the automatic 1536 MiB ceiling, so this setting is a way to
+*lower* the budget or to nudge it up by a few hundred MiB, not a way to give a
+large GPU many gigabytes. The resolved budget is printed at startup:
+
+```
+  [perf] texture memory budget: 1024 MiB (from host RAM)
+  [perf] texture memory budget: 4096 MiB (configured)
+```
+
+`performance.small_texture_upscale` (4 by default) is described under
+[Small texture upscaling](#small-texture-upscaling) below. 1 turns it off.
+
+`audio.buffer_samples` (0 by default) is advisory and mostly diagnostic. SDL3
+exposes no way to set a device buffer size, so the value cannot be pushed to
+the driver from here; `SDL_AUDIO_BUFFER_SAMPLES` is the supported way to
+influence it. What the setting does is make Nightcap say so at startup rather
+than leave you guessing:
+
+```
+  [audio] buffer: 1024 frames (audio.buffer_samples 512 requested; SDL3 sets this per device, so raise SDL_AUDIO_BUFFER_SAMPLES to change it)
+```
+
+The useful half is the starvation counter. SDL has no underrun callback, so
+starvation is counted where it is visible: a device refill that ended with less
+than the engine owed. The count is reported once at shutdown, and a large one
+means the buffer really is too small.
+
+```
+  [audio] starved refills: 2487 (audio.buffer_samples is likely too small)
+```
+
+That counter is worth having whatever you set. A device that starves
+constantly is a latency problem that no frame-time number will explain.
+
 ## Small texture upscaling
 
-`MOCKTAIL_SMALL_TEXTURE_UPSCALE` (default `4`) redraws ETC2 textures of 64px or
-smaller at N times their width and height. At the default that is 16 times the
-pixels per affected texture.
+`performance.small_texture_upscale` in `config.yaml` sets this;
+`MOCKTAIL_SMALL_TEXTURE_UPSCALE` does the same from the environment. The default
+is 4, which redraws ETC2 textures of 64px or smaller at N times their width and
+height. At the default that is 16 times the pixels per affected texture.
 
 The cost lands in two places. Decoding and resampling is CPU work on up to 8
 threads while textures load, which shows up as a burst rather than a steady
@@ -145,11 +207,15 @@ the render thread. In the trace this is the `etc2 decode` slice on its own
 thread, with only a negligible `etc2 gather` left on the submitting one. A
 device without that feature decodes inline as before.
 
-Set it to `1` to turn upscaling off:
+Set it to `1` to turn upscaling off, in `config.yaml` or the environment:
 
 ```bash
 MOCKTAIL_SMALL_TEXTURE_UPSCALE=1 mocktail
 ```
+
+Only experiences that upload compressed textures are affected. A trace of a
+session in a place that used none recorded no `etc2 decode` slices at all, so
+on such a place this setting cannot matter in either direction.
 
 ## The pipeline cache
 

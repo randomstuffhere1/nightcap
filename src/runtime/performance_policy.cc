@@ -7,16 +7,20 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
 #include "runtime/crash_report_policy.h"
 #include "runtime/http_client_policy.h"
+#include "runtime/runtime_config.h"
 #include "runtime/texture_memory_policy.h"
 
 namespace mocktail {
@@ -233,13 +237,22 @@ bool MergePerformanceClientSettingsOverrides(
     const std::string workers = std::to_string(render_worker_count);
     const std::string occlusion_workers =
         std::to_string(std::max(1, render_worker_count / 2));
+    // The environment is the single source both config.yaml and the Intel-only
+    // launch policy write, so reading it here keeps them from disagreeing. An
+    // explicit level is the user's choice and is forwarded as given; only
+    // `auto` leaves the level to the client. Note that this is not a measured
+    // quality setting: it forwards FIntDebugFRMQualityLevelOverride, so a
+    // higher level asks for more shadow and lighting work, not better output
+    // on hardware that cannot afford it.
     const char* custom_quality = std::getenv("MOCKTAIL_GRAPHICS_QUALITY");
     const std::string quality_str =
         (custom_quality != nullptr && custom_quality[0] != '\0')
             ? custom_quality
-            : "3";
+            : "auto";
     const bool manual_quality =
         quality_str == "auto" || quality_str == "0" || quality_str == "manual";
+    // Mip bias only distinguishes the lowest level; everything else shares 1.
+    const std::string mip_bias = quality_str == "1" ? "2" : "1";
 
     // ForceCacheSize settings are byte counts. Let Roblox size its mesh and
     // SLIM content caches; values like 256/128 would cap them to a few bytes.
@@ -248,7 +261,7 @@ bool MergePerformanceClientSettingsOverrides(
         {"FIntOcclusionWorkerThreadCount", occlusion_workers},
         {"FFlagMovePrerenderV2", "True"},
         {"FFlagGcInParallelWithRenderPrepare3", "True"},
-        {"FIntRenderTextureMipBias", quality_str == "1" ? "2" : "1"},
+        {"FIntRenderTextureMipBias", mip_bias},
         {"FFlagSimRuntimeContentTranscodeBlockingCall", "False"},
         {"FFlagRenderEnableLowEndLOD", "True"},
         {"FIntTerrainArraySliceSize", "4"},
@@ -324,6 +337,21 @@ bool MergePerformanceClientSettingsOverrides(
   return true;
 }
 
+std::uint64_t TextureMemoryMegabytesFromEnvironment() {
+  std::uint32_t parsed = 0;
+  if (!ParseBoundedUnsigned(
+          std::getenv("MOCKTAIL_TEXTURE_MEMORY_MB") != nullptr
+              ? std::string_view(std::getenv("MOCKTAIL_TEXTURE_MEMORY_MB"))
+              : std::string_view("0"),
+          0, static_cast<std::uint64_t>(kMaximumTextureMemoryMegabytes),
+          &parsed)) {
+    // An unparseable value falls back to the automatic path; the typed
+    // RuntimeConfig reports it as invalid at load.
+    return 0;
+  }
+  return parsed;
+}
+
 bool MergeRuntimeClientSettingsOverrides(
     const FrameRatePolicy& frame_rate, const PerformancePolicy& performance,
     std::string_view base_json, std::string* merged_json, std::string* error,
@@ -345,9 +373,28 @@ bool MergeRuntimeClientSettingsOverrides(
     return false;
   }
   std::string texture_memory_overrides;
+  // Read through RuntimeConfig so config.yaml and the environment agree, and
+  // log the resolved budget: whether a place is texture-limited depends on
+  // this number, and the automatic path hides it.
+  bool texture_memory_valid = true;
+  const std::uint64_t texture_memory_mb = TextureMemoryMegabytesFromEnvironment();
+  const std::uint64_t texture_memory_budget =
+      ResolveTextureMemoryBudgetBytes(DetectHostMemoryBytes(),
+                                      texture_memory_mb, &texture_memory_valid);
+  if (!texture_memory_valid) {
+    if (error != nullptr) {
+      *error = "texture memory budget is out of range";
+    }
+    return false;
+  }
+  if (texture_memory_budget != 0) {
+    std::fprintf(stderr, "  [perf] texture memory budget: %llu MiB%s\n",
+                 static_cast<unsigned long long>(texture_memory_budget >> 20),
+                 texture_memory_mb != 0 ? " (configured)" : " (from host RAM)");
+  }
   if (!MergeTextureMemoryClientSettingsOverrides(
-          CalculateTextureMemoryBudgetBytes(DetectHostMemoryBytes()),
-          http_client_overrides, &texture_memory_overrides, error)) {
+          texture_memory_budget, http_client_overrides,
+          &texture_memory_overrides, error)) {
     return false;
   }
   return MergeCrashReportClientSettingsOverrides(texture_memory_overrides,

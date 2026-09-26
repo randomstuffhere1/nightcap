@@ -51,6 +51,36 @@ std::uint64_t CalculateTextureMemoryBudgetBytes(
                     kMaximumBudgetBytes);
 }
 
+std::uint64_t ResolveTextureMemoryBudgetBytes(std::uint64_t host_memory_bytes,
+                                              std::uint64_t override_megabytes,
+                                              bool* valid) {
+  constexpr std::uint64_t kMebibyte = 1024U * 1024U;
+  if (valid != nullptr) {
+    *valid = true;
+  }
+  if (override_megabytes == 0) {
+    return CalculateTextureMemoryBudgetBytes(host_memory_bytes);
+  }
+  if (override_megabytes > kMaximumTextureMemoryMegabytes) {
+    if (valid != nullptr) {
+      *valid = false;
+    }
+    return 0;
+  }
+  const std::uint64_t requested = override_megabytes * kMebibyte;
+  // Below the automatic floor the client is told an even smaller budget, which
+  // is the point of asking for one. Above the automatic ceiling it is honoured
+  // too, up to what the FInt can carry, rather than silently clamped back.
+  if (requested > static_cast<std::uint64_t>(
+                      std::numeric_limits<std::int32_t>::max())) {
+    if (valid != nullptr) {
+      *valid = false;
+    }
+    return 0;
+  }
+  return requested;
+}
+
 bool MergeTextureMemoryClientSettingsOverrides(std::uint64_t budget_bytes,
                                                std::string_view base_json,
                                                std::string* merged_json,

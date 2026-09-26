@@ -173,6 +173,10 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       "graphics.frame_rate_limit",
       "graphics.vsync",
       "graphics.pipeline_cache",
+      "graphics.quality",
+      "performance.texture_memory_mb",
+      "performance.small_texture_upscale",
+      "audio.buffer_samples",
       "performance.multithreaded_rendering",
       "performance.physics_worker_mode",
       "performance.memory_limit_mb",
@@ -350,6 +354,41 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       return false;
     }
     (*environment)["MOCKTAIL_PIPELINE_CACHE_MODE"] = *pipeline_cache;
+  }
+  if (const auto quality = value("graphics.quality"); quality.has_value()) {
+    GraphicsQualityConfig parsed;
+    if (!ParseGraphicsQuality(*quality, &parsed)) {
+      *error = "graphics.quality must be auto or 1 to 6";
+      return false;
+    }
+    (*environment)["MOCKTAIL_GRAPHICS_QUALITY"] = parsed.value();
+  }
+  if (const auto texture_memory = value("performance.texture_memory_mb");
+      texture_memory.has_value()) {
+    std::uint32_t parsed = 0;
+    if (!ParseBoundedUnsigned(*texture_memory, 0, 65536, &parsed)) {
+      *error = "performance.texture_memory_mb must be 0 to 65536";
+      return false;
+    }
+    (*environment)["MOCKTAIL_TEXTURE_MEMORY_MB"] = *texture_memory;
+  }
+  if (const auto upscale = value("performance.small_texture_upscale");
+      upscale.has_value()) {
+    std::uint32_t parsed = 0;
+    if (!ParseBoundedUnsigned(*upscale, 1, 8, &parsed)) {
+      *error = "performance.small_texture_upscale must be 1 to 8";
+      return false;
+    }
+    (*environment)["MOCKTAIL_SMALL_TEXTURE_UPSCALE"] = *upscale;
+  }
+  if (const auto buffer = value("audio.buffer_samples");
+      buffer.has_value()) {
+    std::uint32_t parsed = 0;
+    if (!ParseBoundedUnsigned(*buffer, 0, 8192, &parsed)) {
+      *error = "audio.buffer_samples must be 0 to 8192";
+      return false;
+    }
+    (*environment)["MOCKTAIL_AUDIO_BUFFER_SAMPLES"] = *buffer;
   }
   if (const auto multithreaded_rendering =
           value("performance.multithreaded_rendering");
@@ -803,6 +842,14 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
     result.error = "theme mode is invalid";
   } else if (!result.config.pipeline_cache_mode_valid()) {
     result.error = "pipeline cache mode is invalid";
+  } else if (!result.config.graphics_quality().valid()) {
+    result.error = "graphics quality level is invalid";
+  } else if (!result.config.texture_memory_valid()) {
+    result.error = "texture memory budget is invalid";
+  } else if (!result.config.small_texture_upscale_valid()) {
+    result.error = "small texture upscale factor is invalid";
+  } else if (!result.config.audio_buffer_valid()) {
+    result.error = "audio buffer size is invalid";
   } else if (!result.config.window().high_dpi_valid) {
     result.error = "window high-DPI policy is invalid";
   } else if (result.config.vsync_mode() != "auto" &&
@@ -941,6 +988,17 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
       SetEnvironmentValue("MOCKTAIL_VSYNC", config.vsync_mode(), error) &&
       SetEnvironmentValue("MOCKTAIL_PIPELINE_CACHE_MODE",
                           config.pipeline_cache_mode(), error) &&
+      SetEnvironmentValue("MOCKTAIL_GRAPHICS_QUALITY",
+                          config.graphics_quality().value(), error) &&
+      SetEnvironmentValue("MOCKTAIL_TEXTURE_MEMORY_MB",
+                          std::to_string(config.texture_memory_mb()),
+                          error) &&
+      SetEnvironmentValue("MOCKTAIL_SMALL_TEXTURE_UPSCALE",
+                          std::to_string(config.small_texture_upscale()),
+                          error) &&
+      SetEnvironmentValue("MOCKTAIL_AUDIO_BUFFER_SAMPLES",
+                          std::to_string(config.audio_buffer_samples()),
+                          error) &&
       SetEnvironmentValue(
           "MOCKTAIL_MULTITHREADED_RENDERING",
           config.performance().multithreaded_rendering ? "1" : "0", error) &&

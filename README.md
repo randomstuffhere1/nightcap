@@ -127,8 +127,18 @@ Edit `~/.config/mocktail/config.yaml`. Useful options:
 - `graphics.frame_rate_limit: display` to unlock FPS to your monitor's rate.
 - `graphics.vsync: off` for the lowest lag, at the cost of tearing.
 - `graphics.backend: opengl` if Vulkan does not work on your GPU.
+- `graphics.quality: 1` to `6` to override Roblox's graphics level, or `auto`
+  to leave it to the client.
+- `performance.texture_memory_mb` to raise or lower the texture budget Roblox
+  is told about. 0 keeps the automatic figure.
+- `performance.multithreaded_rendering: true` to size Roblox's worker queues
+  from every physical core.
 - `graphics.pipeline_cache: clear` to drop the fallback pipeline cache and run
   the next session uncached.
+
+`config/mocktail.example.yaml` documents every option, and
+[PERFORMANCE.md](docs/PERFORMANCE.md) explains what the ones that trade CPU for
+latency actually do.
 
 ## Building
 

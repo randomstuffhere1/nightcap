@@ -5,13 +5,17 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <mutex>
 #include <new>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -32,9 +36,72 @@ struct SdlAudioSubsystemState {
   bool initialized = false;
 };
 
+// Counts starved refills for the session. The device asks for samples on a
+// fixed period; if the engine has not produced enough by then the device plays
+// whatever was left, which is audible as a click or a dropout. The count is
+// the only way to tell whether `audio.buffer_samples` is too small, so it is
+// worth having. SDL has no per-stream underrun callback, so this is measured
+// where the starvation is actually visible: a refill that ends with nothing
+// queued. Not printed per event, because a badly starved device raises
+// thousands of them a minute.
+class AudioStarvationMonitor {
+ public:
+  static AudioStarvationMonitor& Instance() {
+    static AudioStarvationMonitor monitor;
+    return monitor;
+  }
+
+  void NoteStarved() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++starved_;
+  }
+
+  // Silent when nothing starved, which is the normal case.
+  void Report() {
+    std::uint64_t starved = 0;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      starved = starved_;
+      starved_ = 0;
+    }
+    if (starved == 0) {
+      return;
+    }
+    std::fprintf(stderr, "  [audio] starved refills: %llu%s\n",
+                 static_cast<unsigned long long>(starved),
+                 starved > 1000
+                     ? " (audio.buffer_samples is likely too small)"
+                     : "");
+  }
+
+ private:
+  mutable std::mutex mutex_;
+  std::uint64_t starved_ = 0;
+};
+
 SdlAudioSubsystemState& AudioSubsystemState() {
   static SdlAudioSubsystemState state;
   return state;
+}
+
+// The requested device buffer, in frames, or 0 to let SDL choose. An
+// unparseable or out-of-range value is treated as 0 rather than rejected here:
+// the typed RuntimeConfig has already reported it as invalid at load, and
+// refusing to open audio over it would be worse than using the default.
+int AudioBufferSamplesFromEnvironment() {
+  const char* value = std::getenv("MOCKTAIL_AUDIO_BUFFER_SAMPLES");
+  if (value == nullptr || value[0] == '\0') {
+    return 0;
+  }
+  const std::string_view text(value);
+  unsigned long parsed = 0;
+  const auto result =
+      std::from_chars(text.data(), text.data() + text.size(), parsed);
+  if (result.ec != std::errc{} || result.ptr != text.data() + text.size() ||
+      parsed > 8192UL) {
+    return 0;
+  }
+  return static_cast<int>(parsed);
 }
 
 Status SdlError(const char* operation) {
@@ -351,6 +418,7 @@ class SdlAudioSink final : public AudioSink {
       if (logical_device_id != 0) {
         SDL_CloseAudioDevice(logical_device_id);
       }
+      AudioStarvationMonitor::Instance().Report();
       ReleaseSdlAudioSink(this);
     }
 
@@ -385,6 +453,12 @@ class SdlAudioSink final : public AudioSink {
         break;
       }
       supplied += size_bytes;
+    }
+    // The device asked for more than the engine could give, so it will play
+    // silence or repeat for the remainder. That is the audible dropout, and
+    // counting it is how `audio.buffer_samples` gets tuned.
+    if (supplied < static_cast<std::size_t>(additional_amount)) {
+      AudioStarvationMonitor::Instance().NoteStarved();
     }
   }
 
@@ -703,9 +777,31 @@ Status CreateSdlAudioSink(const SdlAudioSinkOptions& options,
       playback_device_id == 0
           ? SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK
           : static_cast<SDL_AudioDeviceID>(playback_device_id);
+  // SDL 3 has no buffer-size field on SDL_AudioSpec and no entry point to set
+  // one, so a requested size cannot be pushed to the driver from here. The
+  // size is a property of the device SDL opens, and SDL_AUDIO_BUFFER_SAMPLES is
+  // the supported way to influence it. The configuration value is still read
+  // and reported so the setting is not silently ignored, and the starvation
+  // counter below is what tells the user whether the resulting size works.
+  const int buffer_samples = AudioBufferSamplesFromEnvironment();
   const SDL_AudioDeviceID logical_device = SDL_OpenAudioDevice(device, nullptr);
   if (logical_device == 0) {
     return SdlError("SDL_OpenAudioDevice");
+  }
+  {
+    SDL_AudioSpec achieved{};
+    int achieved_frames = 0;
+    if (SDL_GetAudioDeviceFormat(logical_device, &achieved, &achieved_frames)) {
+      std::fprintf(stderr, "  [audio] buffer: %d frames", achieved_frames);
+      if (buffer_samples > 0) {
+        std::fprintf(stderr,
+                     " (audio.buffer_samples %d requested; SDL3 sets this "
+                     "per device, so raise SDL_AUDIO_BUFFER_SAMPLES to change "
+                     "it)",
+                     buffer_samples);
+      }
+      std::fprintf(stderr, "\n");
+    }
   }
   if (options.start_paused && !SDL_PauseAudioDevice(logical_device)) {
     status = SdlError("SDL_PauseAudioDevice");

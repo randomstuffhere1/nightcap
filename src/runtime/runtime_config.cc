@@ -16,6 +16,40 @@
 
 namespace mocktail {
 namespace runtime {
+
+// Strict decimal parse. Anything with a sign, space, or trailing character is
+// rejected, so a typo in a config value is reported rather than silently
+// treated as the default.
+bool ParseUnsignedValue(std::string_view value, std::uint64_t* out) {
+  if (out == nullptr || value.empty() || value.size() > 20) {
+    return false;
+  }
+  std::uint64_t parsed = 0;
+  for (const char character : value) {
+    if (character < '0' || character > '9') {
+      return false;
+    }
+    if (parsed >
+        (UINT64_MAX - static_cast<std::uint64_t>(character - '0')) / 10U) {
+      return false;
+    }
+    parsed = parsed * 10U + static_cast<std::uint64_t>(character - '0');
+  }
+  *out = parsed;
+  return true;
+}
+
+bool ParseBoundedUnsigned(std::string_view value, std::uint64_t minimum,
+                          std::uint64_t maximum, std::uint32_t* out) {
+  std::uint64_t parsed = 0;
+  if (out == nullptr || !ParseUnsignedValue(value, &parsed) ||
+      parsed < minimum || parsed > maximum) {
+    return false;
+  }
+  *out = static_cast<std::uint32_t>(parsed);
+  return true;
+}
+
 namespace {
 
 constexpr std::array<std::string_view, 7> kUnsafeDetachedThreadOverrides = {
@@ -289,6 +323,35 @@ RuntimeConfig RuntimeConfig::FromEnvironment(const Environment& environment) {
       environment.GetOr("MOCKTAIL_MEMORY_LIMIT_MB", "0"),
       environment.GetOr("MOCKTAIL_GAMEMODE", "auto"),
       environment.GetOr("MOCKTAIL_PHYSICS_WORKER_MODE", "throughput"));
+  // The shipped default is 4, matching the ETC2 path's own default, so an
+  // absent key keeps the current behaviour rather than silently changing it.
+  config.graphics_quality_.automatic = true;
+  ParseGraphicsQuality(environment.GetOr("MOCKTAIL_GRAPHICS_QUALITY", "auto"),
+                       &config.graphics_quality_);
+  config.texture_memory_valid_ =
+      ParseUnsignedValue(environment.GetOr("MOCKTAIL_TEXTURE_MEMORY_MB", "0"),
+                         &config.texture_memory_mb_);
+  if (!config.texture_memory_valid_) {
+    config.texture_memory_mb_ = 0;
+  }
+  {
+    std::uint32_t upscale = 0;
+    config.small_texture_upscale_valid_ = ParseBoundedUnsigned(
+        environment.GetOr("MOCKTAIL_SMALL_TEXTURE_UPSCALE", "4"), 1, 8,
+        &upscale);
+    config.small_texture_upscale_ =
+        config.small_texture_upscale_valid_ ? upscale : 4;
+  }
+  {
+    std::uint32_t samples = 0;
+    // A power of two keeps the buffer cheap for the device to refill. 0 is
+    // the only way to ask for SDL's own default.
+    config.audio_buffer_valid_ = ParseBoundedUnsigned(
+        environment.GetOr("MOCKTAIL_AUDIO_BUFFER_SAMPLES", "0"), 0, 8192,
+        &samples);
+    config.audio_buffer_samples_ =
+        config.audio_buffer_valid_ ? static_cast<int>(samples) : 0;
+  }
   config.audio_output_device_ = environment.GetOr(
       "MOCKTAIL_AUDIO_OUTPUT_DEVICE", config.audio_output_device_);
   config.audio_output_device_valid_ =
@@ -424,6 +487,28 @@ GraphicsBackend RuntimeConfig::ParseGraphicsBackend(std::string_view name) {
     return GraphicsBackend::kAngleSwiftShader;
   }
   return GraphicsBackend::kUnknown;
+}
+
+bool ParseGraphicsQuality(std::string_view value, GraphicsQualityConfig* out) {
+  if (out == nullptr) {
+    return false;
+  }
+  // Roblox's own setting uses "manual" for "the user picks a level". Accept it
+  // as a synonym for auto so a value copied out of the client still parses. An
+  // empty value is a key with nothing after it, which is a mistake rather than
+  // a choice, so it is rejected instead of quietly meaning auto.
+  if (value == "auto" || value == "manual" || value == "0") {
+    *out = GraphicsQualityConfig{};
+    return true;
+  }
+  std::uint32_t level = 0;
+  // Roblox exposes 1 to 6 in its own graphics menu.
+  if (!ParseBoundedUnsigned(value, 1, 6, &level)) {
+    return false;
+  }
+  out->automatic = false;
+  out->level = static_cast<int>(level);
+  return true;
 }
 
 }  // namespace runtime

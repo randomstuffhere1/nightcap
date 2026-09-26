@@ -35,6 +35,29 @@ struct WindowConfig {
   bool high_dpi_valid = true;
 };
 
+// Roblox's own graphics quality level, forwarded to the client settings.
+// `automatic` leaves the client to choose, which is what the shipped default
+// does; an explicit level overrides the automatic value the throughput path
+// would otherwise force.
+struct GraphicsQualityConfig {
+  bool automatic = true;
+  int level = 3;
+
+  bool valid() const { return automatic || (level >= 1 && level <= 6); }
+  std::string value() const {
+    return automatic ? std::string("auto") : std::to_string(level);
+  }
+};
+
+bool ParseGraphicsQuality(std::string_view value, GraphicsQualityConfig* out);
+
+// Strict decimal helpers shared by the numeric settings. Both reject a sign,
+// whitespace, or any trailing character so a typo is reported rather than
+// quietly becoming the default.
+bool ParseUnsignedValue(std::string_view value, std::uint64_t* out);
+bool ParseBoundedUnsigned(std::string_view value, std::uint64_t minimum,
+                          std::uint64_t maximum, std::uint32_t* out);
+
 struct InputCapabilityConfig {
   bool touch_enabled = false;
   bool mouse_enabled = true;
@@ -130,6 +153,22 @@ class RuntimeConfig {
     return pipeline_cache_mode_ == "on" || pipeline_cache_mode_ == "off" ||
            pipeline_cache_mode_ == "clear";
   }
+  const GraphicsQualityConfig& graphics_quality() const {
+    return graphics_quality_;
+  }
+  // 0 means "let the texture policy decide from host RAM".
+  std::uint64_t texture_memory_mb() const { return texture_memory_mb_; }
+  bool texture_memory_valid() const { return texture_memory_valid_; }
+  // The ETC2 small-texture upscale factor, 1 to 8. 1 disables it.
+  std::uint32_t small_texture_upscale() const {
+    return small_texture_upscale_;
+  }
+  bool small_texture_upscale_valid() const {
+    return small_texture_upscale_valid_;
+  }
+  // SDL audio device buffer size in frames, or 0 for the SDL default.
+  int audio_buffer_samples() const { return audio_buffer_samples_; }
+  bool audio_buffer_valid() const { return audio_buffer_valid_; }
   const PerformancePolicy& performance() const { return performance_; }
   const std::string& audio_output_device() const {
     return audio_output_device_;
@@ -181,6 +220,13 @@ class RuntimeConfig {
   FrameRatePolicy frame_rate_;
   std::string vsync_mode_ = "auto";
   std::string pipeline_cache_mode_ = "on";
+  GraphicsQualityConfig graphics_quality_;
+  std::uint64_t texture_memory_mb_ = 0;
+  bool texture_memory_valid_ = true;
+  std::uint32_t small_texture_upscale_ = 4;
+  bool small_texture_upscale_valid_ = true;
+  int audio_buffer_samples_ = 0;
+  bool audio_buffer_valid_ = true;
   PerformancePolicy performance_;
   std::string audio_output_device_ = "default";
   bool audio_output_device_valid_ = true;

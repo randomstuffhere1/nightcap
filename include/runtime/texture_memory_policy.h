@@ -19,6 +19,16 @@ std::uint64_t DetectHostMemoryBytes();
 // to a PC-class range.
 std::uint64_t CalculateTextureMemoryBudgetBytes(std::uint64_t host_memory_bytes);
 
+// The configured budget in bytes. `override_megabytes` of 0 means "decide from
+// host memory"; anything else is used as given, up to the same ceiling the
+// automatic path clamps to. A value the client cannot represent as an FInt is
+// rejected rather than truncated.
+inline constexpr std::uint64_t kMaximumTextureMemoryMegabytes = 65536;
+
+std::uint64_t ResolveTextureMemoryBudgetBytes(std::uint64_t host_memory_bytes,
+                                              std::uint64_t override_megabytes,
+                                              bool* valid);
+
 // A 0 budget, or a key already present, is preserved: an explicit fflags.json
 // or environment override wins.
 bool MergeTextureMemoryClientSettingsOverrides(std::uint64_t budget_bytes,

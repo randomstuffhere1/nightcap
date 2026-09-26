@@ -8,6 +8,30 @@ GitHub are taken from the matching section here.
 
 ### Added
 
+- `graphics.quality` in `config.yaml` sets Roblox's graphics level, 1 to 6, or
+  `auto` to leave it to the client. It matters in two places that each pick a
+  level of their own: the multithreaded rendering path, and the Intel-only
+  launch policy. Both use a default, so an explicit value now wins over both.
+  A higher level is not better output; it asks for more shadow and lighting
+  work, so it lowers the frame rate on hardware that cannot afford it.
+- `performance.texture_memory_mb` overrides the texture budget Roblox is told
+  about, instead of leaving it to the automatic eighth-of-host-RAM figure. An
+  explicit value is used as given rather than clamped back to the automatic
+  range. The ceiling is 2047 MiB, because the client reads the budget through a
+  signed 32-bit setting, so this lowers the budget or nudges it up rather than
+  handing a large GPU many gigabytes. The resolved budget is printed at
+  startup, which the automatic path did not do.
+- `performance.small_texture_upscale` promotes the existing
+  `MOCKTAIL_SMALL_TEXTURE_UPSCALE` environment variable to a documented setting,
+  with the range and the cost stated.
+- A starved-refill counter for audio, reported once at shutdown. SDL has no
+  underrun callback, so starvation is counted where it is visible: a device
+  refill that ended with less than the engine owed. A large count is a latency
+  problem that no frame-time number would explain.
+- `audio.buffer_samples` records the intended playback buffer size. SDL3
+  exposes no way to set a device buffer size, so the value is advisory and
+  Nightcap says so at startup rather than pretending to apply it, pointing at
+  `SDL_AUDIO_BUFFER_SAMPLES` as the supported way to change it.
 - A pipeline cache fallback for clients that do not seed one themselves. The
   Android client already persists `shadercachevk.bin` and passes it to
   `vkCreatePipelineCache`, so on a stock client this changes nothing: the

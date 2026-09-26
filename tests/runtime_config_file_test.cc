@@ -600,6 +600,96 @@ version: 1
   EXPECT_EQ(loaded.config.pipeline_cache_mode(), "on");
 }
 
+TEST(RuntimeConfigFileTest, ParsesGraphicsQuality) {
+  GraphicsQualityConfig quality;
+  ASSERT_TRUE(ParseGraphicsQuality("auto", &quality));
+  EXPECT_TRUE(quality.automatic);
+  EXPECT_EQ(quality.value(), "auto");
+  // Roblox's own menu uses "manual" for the same thing.
+  ASSERT_TRUE(ParseGraphicsQuality("manual", &quality));
+  EXPECT_TRUE(quality.automatic);
+  ASSERT_TRUE(ParseGraphicsQuality("0", &quality));
+  EXPECT_TRUE(quality.automatic);
+  for (int level = 1; level <= 6; ++level) {
+    ASSERT_TRUE(ParseGraphicsQuality(std::to_string(level), &quality))
+        << level;
+    EXPECT_FALSE(quality.automatic);
+    EXPECT_EQ(quality.level, level);
+    EXPECT_TRUE(quality.valid());
+  }
+  for (const char* bad : {"7", "-1", "high", "1.5", "", " 3", "3 "}) {
+    EXPECT_FALSE(ParseGraphicsQuality(bad, &quality)) << "'" << bad << "'";
+  }
+}
+
+TEST(RuntimeConfigFileTest, AcceptsEveryNewPerformanceSetting) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path file = temporary.Write(R"yaml(
+version: 1
+graphics:
+  quality: 2
+performance:
+  texture_memory_mb: 4096
+  small_texture_upscale: 2
+audio:
+  buffer_samples: 512
+)yaml");
+  const RuntimeConfigLoadResult loaded =
+      LoadRuntimeConfig(MapEnvironment(), file);
+  ASSERT_TRUE(loaded) << loaded.error;
+  EXPECT_FALSE(loaded.config.graphics_quality().automatic);
+  EXPECT_EQ(loaded.config.graphics_quality().level, 2);
+  EXPECT_EQ(loaded.config.texture_memory_mb(), 4096U);
+  EXPECT_EQ(loaded.config.small_texture_upscale(), 2U);
+  EXPECT_EQ(loaded.config.audio_buffer_samples(), 512);
+}
+
+TEST(RuntimeConfigFileTest, DefaultsForEveryNewPerformanceSetting) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path file = temporary.Write("version: 1\n");
+  const RuntimeConfigLoadResult loaded =
+      LoadRuntimeConfig(MapEnvironment(), file);
+  ASSERT_TRUE(loaded) << loaded.error;
+  // An absent key must keep the shipped behaviour, not change it.
+  EXPECT_TRUE(loaded.config.graphics_quality().automatic);
+  EXPECT_EQ(loaded.config.texture_memory_mb(), 0U);
+  EXPECT_EQ(loaded.config.small_texture_upscale(), 4U);
+  EXPECT_EQ(loaded.config.audio_buffer_samples(), 0);
+}
+
+TEST(RuntimeConfigFileTest, RejectsOutOfRangePerformanceSettings) {
+  TemporaryDirectory temporary;
+  struct Case {
+    const char* yaml;
+    const char* key;
+  };
+  // Each of these is a value a user could plausibly type, so each has to be
+  // reported rather than clamped to something that looks like it worked.
+  for (const Case& test_case : {
+           Case{"graphics:\n  quality: 9\n", "graphics.quality"},
+           Case{"performance:\n  texture_memory_mb: -5\n",
+                "performance.texture_memory_mb"},
+           Case{"performance:\n  texture_memory_mb: 999999\n",
+                "performance.texture_memory_mb"},
+           Case{"performance:\n  small_texture_upscale: 0\n",
+                "performance.small_texture_upscale"},
+           Case{"performance:\n  small_texture_upscale: 9\n",
+                "performance.small_texture_upscale"},
+           Case{"performance:\n  small_texture_upscale: 4x\n",
+                "performance.small_texture_upscale"},
+           Case{"audio:\n  buffer_samples: -1\n", "audio.buffer_samples"},
+           Case{"audio:\n  buffer_samples: 99999\n", "audio.buffer_samples"},
+       }) {
+    const std::filesystem::path file = temporary.Write(
+        std::string("version: 1\n") + test_case.yaml);
+    const RuntimeConfigLoadResult loaded =
+        LoadRuntimeConfig(MapEnvironment(), file);
+    EXPECT_FALSE(loaded) << test_case.yaml;
+    EXPECT_NE(loaded.error.find(test_case.key), std::string::npos)
+        << test_case.yaml << " -> " << loaded.error;
+  }
+}
+
 TEST(RuntimeConfigFileTest, RejectsAnUnknownPipelineCacheMode) {
   TemporaryDirectory temporary;
   const std::filesystem::path file = temporary.Write(R"yaml(

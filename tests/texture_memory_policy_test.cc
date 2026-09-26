@@ -29,6 +29,56 @@ TEST(TextureMemoryPolicyTest, SizesAClampedShareOfHostMemory) {
             1536U * kMebibyte);
 }
 
+TEST(TextureMemoryPolicyTest, AnExplicitBudgetOverridesTheAutomaticOne) {
+  bool valid = false;
+  // 0 means "decide from host memory", so it must reproduce the automatic
+  // figure exactly rather than becoming a zero budget.
+  EXPECT_EQ(ResolveTextureMemoryBudgetBytes(8192U * kMebibyte, 0, &valid),
+            1024U * kMebibyte);
+  EXPECT_TRUE(valid);
+
+  // Above the automatic ceiling, on purpose: a user asking for more than the
+  // eighth-of-host rule allows should get it, not the clamped value back.
+  // 2000 MiB is under the FInt's limit; see RejectsABudgetTheClientCannotCarry
+  // for why the setting cannot go much higher.
+  EXPECT_EQ(ResolveTextureMemoryBudgetBytes(8192U * kMebibyte, 2000, &valid),
+            2000U * kMebibyte);
+  EXPECT_TRUE(valid);
+  EXPECT_EQ(ResolveTextureMemoryBudgetBytes(4096U * kMebibyte, 1800, &valid),
+            1800U * kMebibyte);
+  EXPECT_TRUE(valid);
+
+  // Below the automatic floor too, which is the point of asking.
+  EXPECT_EQ(ResolveTextureMemoryBudgetBytes(65536U * kMebibyte, 512, &valid),
+            512U * kMebibyte);
+  EXPECT_TRUE(valid);
+}
+
+TEST(TextureMemoryPolicyTest, RejectsABudgetTheClientCannotCarry) {
+  bool valid = true;
+  EXPECT_EQ(ResolveTextureMemoryBudgetBytes(8192U * kMebibyte, 70000, &valid),
+            0U);
+  EXPECT_FALSE(valid);
+  // The client reads the budget through a signed 32-bit FInt, so the ceiling
+  // is INT32_MAX bytes: 2047 MiB. A budget past that is refused rather than
+  // truncated into something that looks honoured. This is why the setting
+  // cannot usefully exceed the automatic 1536 MiB ceiling by much.
+  valid = true;
+  EXPECT_EQ(ResolveTextureMemoryBudgetBytes(8192U * kMebibyte, 2048, &valid),
+            0U);
+  EXPECT_FALSE(valid);
+  valid = true;
+  EXPECT_EQ(
+      ResolveTextureMemoryBudgetBytes(8192U * kMebibyte, 2047, &valid),
+      2047U * kMebibyte);
+  EXPECT_TRUE(valid);
+  // The automatic path is unaffected by the override ceiling.
+  valid = false;
+  EXPECT_EQ(ResolveTextureMemoryBudgetBytes(8192U * kMebibyte, 0, &valid),
+            1024U * kMebibyte);
+  EXPECT_TRUE(valid);
+}
+
 TEST(TextureMemoryPolicyTest, PublishesTheBudgetWithoutDiscardingOverrides) {
   std::string merged;
   std::string error;

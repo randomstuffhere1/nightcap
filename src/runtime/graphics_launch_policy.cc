@@ -303,7 +303,9 @@ bool ApplyGraphicsLaunchPolicy(const RuntimeConfig& config,
       return false;
     }
     // Low FRM only on Intel-only machines. Hybrid NVIDIA/AMD laptops should
-    // keep the desktop quality default on the discrete GPU.
+    // keep the desktop quality default on the discrete GPU. SetDefault leaves
+    // an explicit graphics.quality from config.yaml in charge, so a user on an
+    // Intel-only machine who has chosen a level keeps it.
     if (gpus.intel && !gpus.nvidia && !gpus.amd &&
         !SetDefault("MOCKTAIL_GRAPHICS_QUALITY", "1", error)) {
       return false;
