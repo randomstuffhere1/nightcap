@@ -18,8 +18,9 @@ namespace runtime {
 // and JNI references, so no event can reach a torn-down Roblox runtime.
 class RobloxWindowInputRuntime final {
  public:
-  RobloxWindowInputRuntime(JniEnvironmentProvider environment,
-                           RobloxInputSymbols symbols);
+  RobloxWindowInputRuntime(
+      JniEnvironmentProvider environment, RobloxInputSymbols symbols,
+      RobloxTextPasteInterceptor paste_interceptor = {});
   ~RobloxWindowInputRuntime();
 
   RobloxWindowInputRuntime(const RobloxWindowInputRuntime&) = delete;

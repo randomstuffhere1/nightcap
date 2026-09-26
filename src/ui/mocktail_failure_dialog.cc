@@ -15,10 +15,15 @@ constexpr char kMessagePacket = 'M';
 constexpr char kFailurePacket = 'F';
 constexpr char kSuccessPacket = 'S';
 constexpr char kProgressPacket = 'P';
+constexpr char kConfirmationReadyPacket = 'R';
+constexpr char kConfirmationErrorPacket = 'E';
+constexpr int kConfirmationReadyFd = 3;
 constexpr std::size_t kMaximumPacketBytes = 4096;
 constexpr std::string_view kDefaultMessage =
     "Mocktail closed unexpectedly because of an internal error.";
 constexpr std::string_view kDefaultProgressMessage = "Installing Roblox...";
+constexpr std::string_view kConfirmationUnavailableMessage =
+    "Roblox could not verify this game. The private server was not joined.";
 // Keep AdwAlertDialog semantics while preventing host GTK themes such as
 // Breeze from replacing the compact dark crash-card appearance.
 constexpr char kDialogStyle[] = R"css(
@@ -30,6 +35,10 @@ window.dialog-window.alert {
   border: none;
   outline: none;
   box-shadow: none;
+}
+
+window.mocktail-confirmation-host {
+  background-color: rgba(0, 0, 0, 0.42);
 }
 
 .alert .message-area {
@@ -83,6 +92,11 @@ window.dialog-window.alert {
 
 .alert .response-area > button:active {
   background: #48494e;
+}
+
+.alert .response-area > button:disabled {
+  color: rgba(255, 255, 255, 0.42);
+  background: #3d3e42;
 }
 )css";
 
@@ -187,6 +201,179 @@ void OnDialogClosed(AdwDialog*, gpointer user_data) {
   g_main_loop_quit(static_cast<GMainLoop*>(user_data));
 }
 
+struct ConfirmationState {
+  bool confirmed = false;
+  bool ready = false;
+  bool closed = false;
+  guint ready_source_id = 0;
+  GMainLoop* loop = nullptr;
+  AdwAlertDialog* alert = nullptr;
+};
+
+std::string ValidConfirmationMessage(std::string_view message) {
+  if (message.empty() ||
+      !g_utf8_validate(message.data(), static_cast<gssize>(message.size()),
+                       nullptr)) {
+    return std::string(kConfirmationUnavailableMessage);
+  }
+  return std::string(message);
+}
+
+void SetConfirmationBody(ConfirmationState* state, std::string_view message) {
+  if (state == nullptr || state->alert == nullptr) return;
+  const std::string body = ValidConfirmationMessage(message);
+  adw_alert_dialog_set_body(state->alert, body.c_str());
+}
+
+gboolean OnConfirmationReadyPacket(gint descriptor, GIOCondition condition,
+                                  gpointer user_data) {
+  auto* state = static_cast<ConfirmationState*>(user_data);
+  if (state == nullptr || state->closed) return G_SOURCE_REMOVE;
+
+  char packet[kMaximumPacketBytes];
+  ssize_t received = 0;
+  if ((condition & G_IO_IN) != 0) {
+    do {
+      received = recv(descriptor, packet, sizeof(packet), 0);
+    } while (received < 0 && errno == EINTR);
+  }
+  if (received <= 0) {
+    if ((condition & (G_IO_HUP | G_IO_ERR | G_IO_NVAL)) != 0) {
+      state->ready_source_id = 0;
+      SetConfirmationBody(state, kConfirmationUnavailableMessage);
+      return G_SOURCE_REMOVE;
+    }
+    if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      return G_SOURCE_CONTINUE;
+    }
+    state->ready_source_id = 0;
+    SetConfirmationBody(state, kConfirmationUnavailableMessage);
+    return G_SOURCE_REMOVE;
+  }
+  if (static_cast<std::size_t>(received) > sizeof(packet) ||
+      (packet[0] != kConfirmationReadyPacket &&
+       packet[0] != kConfirmationErrorPacket)) {
+    state->ready_source_id = 0;
+    SetConfirmationBody(state, kConfirmationUnavailableMessage);
+    return G_SOURCE_REMOVE;
+  }
+
+  const std::string_view message(packet + 1,
+                                 static_cast<std::size_t>(received - 1));
+  if (packet[0] == kConfirmationReadyPacket) {
+    SetConfirmationBody(state, message);
+    adw_alert_dialog_set_response_enabled(state->alert, "yes", TRUE);
+    adw_alert_dialog_set_default_response(state->alert, "yes");
+    state->ready = true;
+  } else {
+    SetConfirmationBody(state, message);
+  }
+  state->ready_source_id = 0;
+  return G_SOURCE_REMOVE;
+}
+
+void OnConfirmationClosed(AdwDialog*, gpointer user_data) {
+  auto* state = static_cast<ConfirmationState*>(user_data);
+  if (state == nullptr) return;
+  state->closed = true;
+  if (state->ready_source_id != 0) {
+    g_source_remove(state->ready_source_id);
+    state->ready_source_id = 0;
+  }
+  g_main_loop_quit(state->loop);
+}
+
+void OnConfirmationResponse(AdwDialog*, gchar* response, gpointer user_data) {
+  auto* state = static_cast<ConfirmationState*>(user_data);
+  if (state != nullptr) {
+    state->confirmed = state->ready && response != nullptr &&
+                       std::string_view(response) == "yes";
+  }
+}
+
+GtkWidget* CreateConfirmationHost() {
+  GtkWidget* host = adw_window_new();
+  g_object_ref_sink(host);
+  AdwWindow* window = ADW_WINDOW(host);
+  gtk_window_set_title(GTK_WINDOW(window), "Nightcap");
+  gtk_widget_add_css_class(host, "mocktail-confirmation-host");
+  gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+  gtk_window_set_resizable(GTK_WINDOW(window), TRUE);
+  gtk_window_set_modal(GTK_WINDOW(window), TRUE);
+  gtk_window_fullscreen(GTK_WINDOW(window));
+
+  GtkWidget* background = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+  gtk_widget_set_hexpand(background, TRUE);
+  gtk_widget_set_vexpand(background, TRUE);
+  gtk_widget_add_css_class(background, "mocktail-confirmation-host");
+  adw_window_set_content(window, background);
+  gtk_window_present(GTK_WINDOW(window));
+  return host;
+}
+
+void DestroyDialogHost(GtkWidget* host) {
+  if (host == nullptr) return;
+  gtk_window_destroy(GTK_WINDOW(host));
+  g_object_unref(host);
+}
+
+void PresentDialog(AdwDialog* dialog, GtkWidget* host) {
+  adw_dialog_set_presentation_mode(dialog, ADW_DIALOG_FLOATING);
+  adw_dialog_present(dialog, host);
+}
+
+int ShowConfirmation(std::string_view requested_message,
+                     bool wait_for_ready) {
+  if (!InitializeUi(UiStyle::kDialog)) {
+    return EXIT_FAILURE;
+  }
+
+  const std::string message = ValidMessage(requested_message);
+  GMainLoop* loop = g_main_loop_new(nullptr, FALSE);
+  AdwDialog* dialog =
+      adw_alert_dialog_new("Join private server?", message.c_str());
+  g_object_ref_sink(dialog);
+  adw_dialog_set_content_width(dialog, 370);
+  AdwAlertDialog* alert = ADW_ALERT_DIALOG(dialog);
+  ConfirmationState state;
+  state.loop = loop;
+  state.alert = alert;
+  state.ready = !wait_for_ready;
+  adw_alert_dialog_add_response(alert, "no", "No");
+  adw_alert_dialog_add_response(alert, "yes", "Yes");
+  adw_alert_dialog_set_response_enabled(alert, "yes", !wait_for_ready);
+  adw_alert_dialog_set_response_appearance(alert, "yes",
+                                          ADW_RESPONSE_SUGGESTED);
+  // Window-manager close and Escape are cancellation, never approval.
+  adw_alert_dialog_set_close_response(alert, "no");
+  adw_alert_dialog_set_default_response(alert, "no");
+  g_signal_connect(dialog, "response", G_CALLBACK(OnConfirmationResponse),
+                   &state);
+  g_signal_connect(dialog, "closed", G_CALLBACK(OnConfirmationClosed), &state);
+  if (wait_for_ready) {
+    state.ready_source_id = g_unix_fd_add(
+        kConfirmationReadyFd,
+        static_cast<GIOCondition>(G_IO_IN | G_IO_HUP | G_IO_ERR | G_IO_NVAL),
+        OnConfirmationReadyPacket, &state);
+    if (state.ready_source_id == 0) {
+      g_object_unref(dialog);
+      g_main_loop_unref(loop);
+      return EXIT_FAILURE;
+    }
+  }
+  GtkWidget* host = CreateConfirmationHost();
+  PresentDialog(dialog, host);
+  g_main_loop_run(loop);
+  if (state.ready_source_id != 0) {
+    g_source_remove(state.ready_source_id);
+    state.ready_source_id = 0;
+  }
+  DestroyDialogHost(host);
+  g_object_unref(dialog);
+  g_main_loop_unref(loop);
+  return state.confirmed ? EXIT_SUCCESS : 2;
+}
+
 int ShowDialog(std::string_view requested_message,
                const char* heading = "Crash",
                const char* response_label = "Close") {
@@ -204,7 +391,7 @@ int ShowDialog(std::string_view requested_message,
   adw_alert_dialog_set_close_response(alert, "close");
   adw_alert_dialog_set_default_response(alert, "close");
   g_signal_connect(dialog, "closed", G_CALLBACK(OnDialogClosed), loop);
-  adw_dialog_present(dialog, nullptr);
+  PresentDialog(dialog, nullptr);
   g_main_loop_run(loop);
   g_object_unref(dialog);
   g_main_loop_unref(loop);
@@ -369,6 +556,12 @@ int main(int argc, char* argv[]) {
   }
   if (argc == 3 && std::string_view(argv[1]) == "--warning") {
     return ShowDialog(argv[2], "Signed out", "Continue");
+  }
+  if (argc == 3 && std::string_view(argv[1]) == "--confirm") {
+    return ShowConfirmation(argv[2], false);
+  }
+  if (argc == 3 && std::string_view(argv[1]) == "--confirm-ready") {
+    return ShowConfirmation(argv[2], true);
   }
   return EXIT_FAILURE;
 }

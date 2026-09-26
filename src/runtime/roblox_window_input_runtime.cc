@@ -13,10 +13,11 @@ namespace mocktail {
 namespace runtime {
 
 RobloxWindowInputRuntime::RobloxWindowInputRuntime(
-    JniEnvironmentProvider environment, RobloxInputSymbols symbols)
+    JniEnvironmentProvider environment, RobloxInputSymbols symbols,
+    RobloxTextPasteInterceptor paste_interceptor)
     : text_clipboard_(platform::CreateSdlTextClipboard()),
       runtime_(environment, symbols, text_surface_overlay_.sink(),
-               text_clipboard_.get()) {}
+               text_clipboard_.get(), paste_interceptor) {}
 
 RobloxWindowInputRuntime::~RobloxWindowInputRuntime() { Shutdown(); }
 

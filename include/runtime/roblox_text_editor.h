@@ -6,6 +6,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 #include "mocktail/platform/platform_runtime.h"
 #include "mocktail/platform/text_clipboard.h"
@@ -111,6 +112,23 @@ struct RobloxTextEditResult {
   Status status = Status::Ok();
 };
 
+struct RobloxTextPasteInterceptionResult {
+  // A handled paste is consumed even when it was not approved. This prevents
+  // an unconfirmed private-server URL from reaching Roblox's automatic join
+  // path after the host has already handled the user gesture.
+  bool handled = false;
+};
+
+struct RobloxTextPasteInterceptor {
+  using InterceptFn = RobloxTextPasteInterceptionResult (*)(void* context,
+                                                            std::string_view text);
+
+  void* context = nullptr;
+  InterceptFn intercept = nullptr;
+
+  bool valid() const { return intercept != nullptr; }
+};
+
 struct RobloxTextEditorSnapshot {
   bool focused = false;
   int64_t textbox_handle = 0;
@@ -127,9 +145,10 @@ struct RobloxTextEditorSnapshot {
 // Text content is intentionally exposed only as a byte count in snapshots.
 class RobloxTextEditor final {
  public:
-  explicit RobloxTextEditor(RobloxTextSink sink,
-                            RobloxTextDisplaySink display_sink = {},
-                            platform::TextClipboard* clipboard = nullptr);
+  explicit RobloxTextEditor(
+      RobloxTextSink sink, RobloxTextDisplaySink display_sink = {},
+      platform::TextClipboard* clipboard = nullptr,
+      RobloxTextPasteInterceptor paste_interceptor = {});
 
   RobloxTextEditor(const RobloxTextEditor&) = delete;
   RobloxTextEditor& operator=(const RobloxTextEditor&) = delete;
@@ -174,6 +193,7 @@ class RobloxTextEditor final {
   const RobloxTextSink sink_;
   const RobloxTextDisplaySink display_sink_;
   platform::TextClipboard* const clipboard_;
+  const RobloxTextPasteInterceptor paste_interceptor_;
   mutable std::mutex mutex_;
   RobloxTextFocusSession session_;
   std::string text_;

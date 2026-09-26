@@ -8,6 +8,9 @@ GitHub are taken from the matching section here.
 
 ### Added
 
+- Pasting a Roblox private-server game link into a main-app text box now asks
+  for confirmation before joining the server; text boxes inside experiences
+  keep their normal paste behavior.
 - Performance recordings made with `--profile` now show how busy the CPU was
   during each frame, which makes it easier to tell what caused a stutter.
 

@@ -560,12 +560,12 @@ Status RobloxInputNativeAdapter::AcquireReadyEnv(JNIEnv** env) const {
   return environment_.Acquire(env);
 }
 
-RobloxInputRuntime::RobloxInputRuntime(JniEnvironmentProvider environment,
-                                       RobloxInputSymbols symbols,
-                                       RobloxTextDisplaySink display_sink,
-                                       platform::TextClipboard* clipboard)
+RobloxInputRuntime::RobloxInputRuntime(
+    JniEnvironmentProvider environment, RobloxInputSymbols symbols,
+    RobloxTextDisplaySink display_sink, platform::TextClipboard* clipboard,
+    RobloxTextPasteInterceptor paste_interceptor)
     : adapter_(environment, symbols),
-      router_(adapter_.Sink(), display_sink, clipboard) {}
+      router_(adapter_.Sink(), display_sink, clipboard, paste_interceptor) {}
 
 RobloxInputRuntime::~RobloxInputRuntime() { Deactivate(); }
 

@@ -594,6 +594,7 @@ add_library(mocktail_experience_runtime STATIC
   src/runtime/roblox_experience_composition.cc
   src/runtime/roblox_fresh_game_launch_controller.cc
   src/runtime/roblox_platform_web_symbols.cc
+  src/runtime/roblox_private_server_paste.cc
 )
 add_library(Mocktail::ExperienceRuntime ALIAS mocktail_experience_runtime)
 target_include_directories(mocktail_experience_runtime PUBLIC include)
@@ -604,9 +605,12 @@ target_link_libraries(mocktail_experience_runtime PUBLIC
   PkgConfig::UTF8PROC
   PRIVATE
     Mocktail::AuthRuntimeComposition
+    Mocktail::FailureDialog
     Mocktail::LegacyJni
+    CURL::libcurl
     mocktail_linker
     mocktail_window
+    nlohmann_json::nlohmann_json
 )
 mocktail_apply_compile_options(mocktail_experience_runtime)
 

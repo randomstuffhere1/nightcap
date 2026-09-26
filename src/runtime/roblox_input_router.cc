@@ -291,10 +291,12 @@ int32_t MapSdlMouseButtonToAndroid(uint8_t sdl_button) {
   }
 }
 
-RobloxInputRouter::RobloxInputRouter(RobloxInputSink sink,
-                                     RobloxTextDisplaySink display_sink,
-                                     platform::TextClipboard* clipboard)
-    : sink_(sink), text_editor_(sink.text, display_sink, clipboard) {}
+RobloxInputRouter::RobloxInputRouter(
+    RobloxInputSink sink, RobloxTextDisplaySink display_sink,
+    platform::TextClipboard* clipboard,
+    RobloxTextPasteInterceptor paste_interceptor)
+    : sink_(sink),
+      text_editor_(sink.text, display_sink, clipboard, paste_interceptor) {}
 
 Status RobloxInputRouter::Activate(RobloxInputViewport viewport,
                                    bool initially_focused) {

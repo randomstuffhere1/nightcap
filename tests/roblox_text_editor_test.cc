@@ -103,6 +103,21 @@ class ClipboardProbe final : public platform::TextClipboard {
   bool fail_write = false;
 };
 
+struct PasteProbe {
+  bool handled = false;
+  int calls = 0;
+  std::string text;
+};
+
+RobloxTextPasteInterceptionResult InterceptPaste(void* context,
+                                                 std::string_view text) {
+  auto* probe = static_cast<PasteProbe*>(context);
+  if (probe == nullptr) return {};
+  ++probe->calls;
+  probe->text.assign(text);
+  return {probe->handled};
+}
+
 Status Record(Probe* probe, Call call) {
   std::lock_guard<std::mutex> lock(probe->mutex);
   probe->calls.push_back(std::move(call));
@@ -449,6 +464,45 @@ TEST(RobloxTextEditorTest, CtrlVReplacesSelectionWithUtf8ClipboardText) {
   const auto key_up = editor.HandleKey(Key(SDL_SCANCODE_V, false));
   EXPECT_TRUE(key_up.handled);
   EXPECT_FALSE(key_up.dispatched);
+}
+
+TEST(RobloxTextEditorTest, InterceptedPrivateServerPasteIsConsumed) {
+  Probe probe;
+  ClipboardProbe clipboard;
+  clipboard.read_text =
+      "https://www.roblox.com/games/1234567890/Game-Name?"
+      "privateServerLinkCode=12360805305284755354292583827456";
+  PasteProbe paste_probe;
+  paste_probe.handled = true;
+  RobloxTextEditor editor(Sink(&probe), {}, &clipboard,
+                          {&paste_probe, &InterceptPaste});
+  ASSERT_TRUE(editor.BeginFocusSession(Session(42, 7, "keep")).ok());
+
+  const auto paste = editor.HandleKey(Shortcut(SDL_SCANCODE_V));
+  EXPECT_TRUE(paste.handled);
+  EXPECT_TRUE(paste.status.ok());
+  EXPECT_FALSE(paste.dispatched);
+  EXPECT_EQ(paste_probe.calls, 1);
+  EXPECT_EQ(paste_probe.text, clipboard.read_text);
+  EXPECT_TRUE(probe.calls.empty());
+  EXPECT_EQ(editor.Snapshot().text_bytes, 4u);
+}
+
+TEST(RobloxTextEditorTest, UnhandledPasteInterceptorFallsThroughToEditor) {
+  Probe probe;
+  ClipboardProbe clipboard;
+  clipboard.read_text = "ordinary clipboard text";
+  PasteProbe paste_probe;
+  RobloxTextEditor editor(Sink(&probe), {}, &clipboard,
+                          {&paste_probe, &InterceptPaste});
+  ASSERT_TRUE(editor.BeginFocusSession(Session()).ok());
+
+  const auto paste = editor.HandleKey(Shortcut(SDL_SCANCODE_V));
+  EXPECT_TRUE(paste.handled);
+  EXPECT_TRUE(paste.dispatched);
+  EXPECT_EQ(paste_probe.calls, 1);
+  ASSERT_EQ(probe.calls.size(), 2u);
+  EXPECT_EQ(probe.calls.back().text, clipboard.read_text);
 }
 
 TEST(RobloxTextEditorTest,

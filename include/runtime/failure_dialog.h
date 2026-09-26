@@ -1,8 +1,10 @@
 #ifndef MOCKTAIL_RUNTIME_FAILURE_DIALOG_H_
 #define MOCKTAIL_RUNTIME_FAILURE_DIALOG_H_
 
+#include <string>
 #include <string_view>
 
+#include "mocktail/status.h"
 #include "runtime/environment.h"
 
 namespace mocktail {
@@ -15,6 +17,26 @@ bool ShowFailureDialog(const Environment& environment,
                        std::string_view message);
 bool ShowWarningDialog(const Environment& environment,
                        std::string_view message);
+
+enum class ConfirmationDialogResult {
+  kUnavailable,
+  kCancelled,
+  kConfirmed,
+};
+
+// Opens a modal Yes/No prompt. A closed window and the No button both cancel;
+// the caller must never interpret an unavailable prompt as approval.
+ConfirmationDialogResult ShowConfirmationDialog(
+    const Environment& environment, std::string_view message);
+
+// Called after the confirmation helper has been spawned. The returned message
+// is shown in the already-visible dialog. A non-OK status leaves Yes disabled.
+using ConfirmationReadyFn = Status (*)(void* context,
+                                        std::string* ready_message);
+
+ConfirmationDialogResult ShowConfirmationDialog(
+    const Environment& environment, std::string_view initial_message,
+    void* context, ConfirmationReadyFn ready);
 
 // The helper starts before guest threads, so it can report errors and fatal
 // exits even when the main process can no longer show a dialog.

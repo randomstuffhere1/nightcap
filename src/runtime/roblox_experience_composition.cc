@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <limits>
+#include <nlohmann/json.hpp>
 #include <utility>
 
 #include "jnivm/jnivm.h"
@@ -1341,9 +1342,57 @@ void RobloxExperienceComposition::NotifyLateLuaAppDidReturn(void* context) {
   }
 }
 
-Status RobloxExperienceComposition::Dispatch(
-    const RobloxExperienceLaunchRequest& request) {
+bool RobloxExperienceComposition::CanHandleMainTextPasteLocked() const {
+  return subscribed_ && controller_ != nullptr && objects_ != nullptr &&
+         !game_active_ && !launch_in_progress_ && active_launch_ == nullptr &&
+         pending_launch_requests_.empty() && !lua_app_return_pending_ &&
+         !lua_app_surface_recreation_pending_ &&
+         !controlled_switch_waiting_for_return_;
+}
+
+bool RobloxExperienceComposition::CanHandleMainTextPaste() const {
   std::lock_guard<std::mutex> lock(mutex_);
+  return CanHandleMainTextPasteLocked();
+}
+
+Status RobloxExperienceComposition::QueuePrivateServerLaunch(
+    int64_t place_id, std::string_view link_code) {
+  if (place_id <= 0 || link_code.empty() || link_code.size() > 128) {
+    return Invalid("private-server paste launch identity is invalid");
+  }
+  for (const unsigned char character : link_code) {
+    if (character < '0' || character > '9') {
+      return Invalid("private-server paste link code is invalid");
+    }
+  }
+
+  const std::string owned_link_code(link_code);
+  const nlohmann::json document = {
+      {"placeId", place_id},
+      {"linkCode", owned_link_code},
+      {"joinAttemptOrigin", "PrivateServerPaste"},
+  };
+  RobloxExperienceLaunchRequest request;
+  Status parse_status =
+      ParseRobloxExperienceLaunchJson(document.dump(), &request);
+  if (!parse_status.ok()) return parse_status;
+
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!CanHandleMainTextPasteLocked()) {
+    return FailedPrecondition(
+        "private-server paste launch requires the main LuaApp surface");
+  }
+  const Status status = QueueLaunchRequestLocked(request);
+  if (status.ok()) {
+    std::fprintf(stderr,
+                 "  [text] private-server paste confirmed; queued place_id=%lld\n",
+                 static_cast<long long>(place_id));
+  }
+  return status;
+}
+
+Status RobloxExperienceComposition::QueueLaunchRequestLocked(
+    const RobloxExperienceLaunchRequest& request) {
   if (!subscribed_ || controller_ == nullptr || objects_ == nullptr) {
     return FailedPrecondition("experience composition is not subscribed");
   }
@@ -1375,6 +1424,12 @@ Status RobloxExperienceComposition::Dispatch(
   }
   pending_launch_requests_.push_back(request);
   return Status::Ok();
+}
+
+Status RobloxExperienceComposition::Dispatch(
+    const RobloxExperienceLaunchRequest& request) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return QueueLaunchRequestLocked(request);
 }
 
 Status RobloxExperienceComposition::DrainExternalLaunchRequests() {

@@ -613,6 +613,11 @@ TEST(RobloxExperienceCompositionTest,
   EXPECT_TRUE(composition.LeaveGame().ok());
   EXPECT_EQ(probe.leaves, 1);
   EXPECT_EQ(probe.destroys, 0);
+  EXPECT_TRUE(composition.CanHandleMainTextPaste());
+  EXPECT_TRUE(composition.QueuePrivateServerLaunch(
+                  17580461965,
+                  "12360805305284755354292583827456")
+                  .ok());
   vm.ClearRobloxExperienceLifecycleCallbacks();
   EXPECT_TRUE(composition.Shutdown().ok());
   EXPECT_EQ(probe.disconnects, 4);

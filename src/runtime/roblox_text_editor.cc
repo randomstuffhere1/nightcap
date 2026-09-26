@@ -150,10 +150,14 @@ bool IsPasswordInputType(int32_t text_input_type) {
 
 }  // namespace
 
-RobloxTextEditor::RobloxTextEditor(RobloxTextSink sink,
-                                   RobloxTextDisplaySink display_sink,
-                                   platform::TextClipboard* clipboard)
-    : sink_(sink), display_sink_(display_sink), clipboard_(clipboard) {}
+RobloxTextEditor::RobloxTextEditor(
+    RobloxTextSink sink, RobloxTextDisplaySink display_sink,
+    platform::TextClipboard* clipboard,
+    RobloxTextPasteInterceptor paste_interceptor)
+    : sink_(sink),
+      display_sink_(display_sink),
+      clipboard_(clipboard),
+      paste_interceptor_(paste_interceptor) {}
 
 Status RobloxTextEditor::BeginFocusSession(RobloxTextFocusSession session) {
   std::lock_guard<std::mutex> lock(mutex_);
@@ -646,6 +650,18 @@ RobloxTextEditResult RobloxTextEditor::PasteLocked() {
   if (!valid) {
     SecureClear(&clipboard_text);
     return Result(true, false, false);
+  }
+  if (paste_interceptor_.valid()) {
+    // Keep the decision serialized with this paste event. The production
+    // callback performs its API lookup and opens a separate confirmation
+    // helper synchronously, so a declined URL cannot fall through afterward.
+    const RobloxTextPasteInterceptionResult interception =
+        paste_interceptor_.intercept(paste_interceptor_.context,
+                                     clipboard_text);
+    if (interception.handled) {
+      SecureClear(&clipboard_text);
+      return Result(true, false, false);
+    }
   }
   RobloxTextEditResult result = ReplaceLocked(begin, end, clipboard_text);
   SecureClear(&clipboard_text);

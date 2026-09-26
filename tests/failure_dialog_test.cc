@@ -34,7 +34,8 @@ class MapEnvironment final : public Environment {
 
 class FakeDialogHelper final {
  public:
-  FakeDialogHelper() {
+  explicit FakeDialogHelper(int one_shot_exit_code = 0)
+      : one_shot_exit_code_(one_shot_exit_code) {
     char pattern[] = "/tmp/mocktail_failure_dialog_XXXXXX";
     const char* created = mkdtemp(pattern);
     if (created == nullptr) {
@@ -50,13 +51,25 @@ class FakeDialogHelper final {
               "capture = '"
            << capture_.string()
            << "'\n"
-              "if len(sys.argv) == 3 and sys.argv[1] in "
-              "('--message', '--warning'):\n"
+              "if len(sys.argv) == 3 and sys.argv[1] == '--confirm-ready':\n"
+              "    with open(capture, 'a', encoding='utf-8') as stream:\n"
+              "        stream.write('--confirm-ready:' + sys.argv[2] + "
+              "'\\n')\n"
+              "    channel = socket.socket(fileno=3)\n"
+              "    packet = channel.recv(4096)\n"
+              "    with open(capture, 'a', encoding='utf-8') as stream:\n"
+              "        stream.write('ready:' + packet.decode('utf-8') + "
+              "'\\n')\n"
+              "    raise SystemExit("
+           << one_shot_exit_code_ << ")\n"
+           << "if len(sys.argv) == 3 and sys.argv[1] in "
+              "('--message', '--warning', '--confirm'):\n"
               "    with open(capture, 'a', encoding='utf-8') as stream:\n"
               "        stream.write(sys.argv[1] + ':' + sys.argv[2] + "
               "'\\n')\n"
-              "    raise SystemExit(0)\n"
-              "channel = socket.socket(fileno=0)\n"
+              "    raise SystemExit("
+           << one_shot_exit_code_ << ")\n"
+           << "channel = socket.socket(fileno=0)\n"
               "while True:\n"
               "    packet = channel.recv(4096)\n"
               "    if not packet:\n"
@@ -79,6 +92,7 @@ class FakeDialogHelper final {
   const std::filesystem::path& capture() const { return capture_; }
 
  private:
+  int one_shot_exit_code_ = 0;
   std::filesystem::path root_;
   std::filesystem::path helper_;
   std::filesystem::path capture_;
@@ -137,6 +151,40 @@ TEST(FailureDialogTest, OneShotPassesAUserFacingMessage) {
   EXPECT_EQ(ReadLines(helper.capture()),
             std::vector<std::string>({"--message:Already running.",
                                       "--warning:Sign in again."}));
+}
+
+TEST(FailureDialogTest, ConfirmationDistinguishesYesNoAndUnavailable) {
+  FakeDialogHelper confirmed_helper(0);
+  const MapEnvironment confirmed_environment =
+      DialogEnvironment(confirmed_helper);
+  EXPECT_EQ(ShowConfirmationDialog(confirmed_environment, "Join?"),
+            ConfirmationDialogResult::kConfirmed);
+
+  FakeDialogHelper cancelled_helper(2);
+  const MapEnvironment cancelled_environment =
+      DialogEnvironment(cancelled_helper);
+  EXPECT_EQ(ShowConfirmationDialog(cancelled_environment, "Join?"),
+            ConfirmationDialogResult::kCancelled);
+
+  const MapEnvironment no_display({{"MOCKTAIL_FAILURE_DIALOG_HELPER",
+                                   confirmed_helper.helper().string()}});
+  EXPECT_EQ(ShowConfirmationDialog(no_display, "Join?"),
+            ConfirmationDialogResult::kUnavailable);
+}
+
+TEST(FailureDialogTest, ReadyMessageUpdatesVisibleDialog) {
+  FakeDialogHelper helper;
+  const MapEnvironment environment = DialogEnvironment(helper);
+  const auto ready = [](void*, std::string* message) -> Status {
+    *message = "Ready";
+    return Status::Ok();
+  };
+
+  EXPECT_EQ(ShowConfirmationDialog(environment, "Checking", nullptr, ready),
+            ConfirmationDialogResult::kConfirmed);
+  EXPECT_EQ(ReadLines(helper.capture()),
+            (std::vector<std::string>{"--confirm-ready:Checking",
+                                      "ready:RReady"}));
 }
 
 TEST(FailureDialogTest, MonitorDismissesAfterSuccessfulShutdown) {

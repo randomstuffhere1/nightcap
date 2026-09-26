@@ -136,6 +136,12 @@ class RobloxExperienceComposition final {
   Status DrainPlatformEvents();
   Status DrainLaunchRequests();
   Status LeaveGame();
+  // Main Roblox text boxes may only intercept private-server paste while the
+  // LuaApp surface owns input. Once an experience is active (or a transition
+  // is already underway), ordinary in-experience text editing is untouched.
+  bool CanHandleMainTextPaste() const;
+  Status QueuePrivateServerLaunch(int64_t place_id,
+                                 std::string_view link_code);
   GameSessionUpdateResult SurfaceCreated(uint64_t generation);
   GameSessionUpdateResult SurfaceChanged(GameSurface surface);
   GameSessionUpdateResult SurfaceDestroyed(uint64_t generation);
@@ -228,6 +234,9 @@ class RobloxExperienceComposition final {
   // mutate the surface that the other one opened.
   Status CloseWebSurface();
   void HandleWebSurfaceExit(uint64_t process_generation);
+  bool CanHandleMainTextPasteLocked() const;
+  Status QueueLaunchRequestLocked(
+      const RobloxExperienceLaunchRequest& request);
   Status Dispatch(const RobloxExperienceLaunchRequest& request);
   Status PromoteAuthenticatedSession();
   Status RefreshLateSurface();

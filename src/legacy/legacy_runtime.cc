@@ -74,6 +74,7 @@
 #include "runtime/roblox_capability_resolver.h"
 #include "runtime/roblox_platform_web_symbols.h"
 #include "runtime/roblox_experience_composition.h"
+#include "runtime/roblox_private_server_paste.h"
 #include "runtime/roblox_game_session_native_adapter.h"
 #include "runtime/roblox_window_input_runtime.h"
 #include "runtime/roblox_text_input_jni_bridge.h"
@@ -1396,6 +1397,47 @@ void NotifyLuaAppDidReturn(void* context) {
   if (composition != nullptr) {
     composition->NotifyLuaAppDidReturn();
   }
+}
+
+struct PrivateServerPasteTarget {
+  std::shared_ptr<mocktail::runtime::RobloxExperienceComposition> composition;
+};
+
+bool IsMainTextPasteTarget(void* context) {
+  const auto* target = static_cast<PrivateServerPasteTarget*>(context);
+  return target != nullptr && target->composition != nullptr &&
+         target->composition->CanHandleMainTextPaste();
+}
+
+mocktail::Status LaunchPrivateServerPaste(void* context, int64_t place_id,
+                                          std::string_view link_code) {
+  const auto* target = static_cast<PrivateServerPasteTarget*>(context);
+  return target != nullptr && target->composition != nullptr
+             ? target->composition->QueuePrivateServerLaunch(place_id,
+                                                             link_code)
+             : mocktail::Status::Error(
+                   mocktail::StatusCode::kFailedPrecondition,
+                   "private-server paste target is unavailable");
+}
+
+mocktail::runtime::RobloxTextPasteInterceptionResult InterceptPrivateServerPaste(
+    void* context, std::string_view text) {
+  const mocktail::runtime::RobloxPrivateServerPasteActions actions{
+      context,
+      &IsMainTextPasteTarget,
+      nullptr,
+      nullptr,
+      &LaunchPrivateServerPaste,
+      &mocktail::runtime::ConfirmRobloxPrivateServerPasteLink,
+  };
+  const mocktail::runtime::RobloxPrivateServerPasteResult result =
+      mocktail::runtime::HandleRobloxPrivateServerPaste(text, actions);
+  if (result.handled && !result.status.ok()) {
+    std::fprintf(stderr,
+                 "  [text] private-server paste could not be joined: %s\n",
+                 result.status.message().c_str());
+  }
+  return {result.handled};
 }
 
 mocktail::runtime::GameSessionUpdateResult ExperienceSurfaceCreated(
@@ -6007,6 +6049,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   std::shared_ptr<mocktail::runtime::RobloxExperienceComposition>
       experience_composition;
   std::shared_ptr<ExperienceLifecycleTarget> experience_lifecycle_target;
+  std::shared_ptr<PrivateServerPasteTarget> private_server_paste_target;
   std::shared_ptr<mocktail::runtime::RobloxWindowInputRuntime>
       window_input_runtime;
   std::unique_ptr<mocktail::runtime::RobloxTextInputJniBridge>
@@ -6947,9 +6990,17 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     if (mocktail::window::IsInitialised()) {
       mocktail::runtime::JniEnvironmentProvider input_environment{
           raw_vm, jni_vm.get(), &RestoreGameSessionJniEnvironment};
+      mocktail::runtime::RobloxTextPasteInterceptor paste_interceptor;
+      if (experience_composition != nullptr) {
+        private_server_paste_target =
+            std::make_shared<PrivateServerPasteTarget>();
+        private_server_paste_target->composition = experience_composition;
+        paste_interceptor = {private_server_paste_target.get(),
+                             &InterceptPrivateServerPaste};
+      }
       window_input_runtime =
           std::make_shared<mocktail::runtime::RobloxWindowInputRuntime>(
-              input_environment, roblox_capabilities.input);
+              input_environment, roblox_capabilities.input, paste_interceptor);
       window_input_runtime->SetRawMouseEnabled(input_capabilities.raw_mouse);
       const mocktail::Status input_status = window_input_runtime->Initialize();
       if (!input_status.ok()) {

@@ -403,6 +403,15 @@ target_link_libraries(roblox_experience_composition_test PRIVATE
 )
 mocktail_apply_compile_options(roblox_experience_composition_test)
 
+add_executable(roblox_private_server_paste_test
+  roblox_private_server_paste_test.cc
+)
+target_link_libraries(roblox_private_server_paste_test PRIVATE
+  Mocktail::ExperienceRuntime
+  GTest::gtest_main
+)
+mocktail_apply_compile_options(roblox_private_server_paste_test)
+
 add_executable(jnivm_message_bus_test
   jnivm_message_bus_test.cc
 )
@@ -1009,6 +1018,7 @@ gtest_discover_tests(roblox_permissions_bridge_test)
 gtest_discover_tests(roblox_browser_service_bridge_test)
 gtest_discover_tests(roblox_fresh_game_launch_controller_test)
 gtest_discover_tests(roblox_experience_composition_test)
+gtest_discover_tests(roblox_private_server_paste_test)
 gtest_discover_tests(jnivm_message_bus_test)
 gtest_discover_tests(jnivm_experience_lifecycle_test)
 gtest_discover_tests(jnivm_native_text_box_info_test)

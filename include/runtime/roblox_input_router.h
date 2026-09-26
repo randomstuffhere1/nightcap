@@ -153,9 +153,10 @@ struct RobloxInputSnapshot {
 // Android/Roblox native input ABI. It owns no JNI or SDL objects.
 class RobloxInputRouter final {
  public:
-  explicit RobloxInputRouter(RobloxInputSink sink,
-                             RobloxTextDisplaySink display_sink = {},
-                             platform::TextClipboard* clipboard = nullptr);
+  explicit RobloxInputRouter(
+      RobloxInputSink sink, RobloxTextDisplaySink display_sink = {},
+      platform::TextClipboard* clipboard = nullptr,
+      RobloxTextPasteInterceptor paste_interceptor = {});
 
   RobloxInputRouter(const RobloxInputRouter&) = delete;
   RobloxInputRouter& operator=(const RobloxInputRouter&) = delete;

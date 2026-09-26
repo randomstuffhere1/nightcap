@@ -100,10 +100,11 @@ class RobloxInputNativeAdapter final {
 // focused TextBox handle required by nativePassText.
 class RobloxInputRuntime final {
  public:
-  RobloxInputRuntime(JniEnvironmentProvider environment,
-                     RobloxInputSymbols symbols,
-                     RobloxTextDisplaySink display_sink = {},
-                     platform::TextClipboard* clipboard = nullptr);
+  RobloxInputRuntime(
+      JniEnvironmentProvider environment, RobloxInputSymbols symbols,
+      RobloxTextDisplaySink display_sink = {},
+      platform::TextClipboard* clipboard = nullptr,
+      RobloxTextPasteInterceptor paste_interceptor = {});
   ~RobloxInputRuntime();
 
   RobloxInputRuntime(const RobloxInputRuntime&) = delete;
