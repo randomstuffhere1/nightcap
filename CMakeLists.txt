@@ -374,6 +374,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/roblox_browser_service_bridge.cc
   src/runtime/roblox_capability_resolver.cc
   src/runtime/roblox_experience_launch_bridge.cc
+  src/runtime/roblox_game_url.cc
   src/runtime/roblox_launch_uri.cc
   src/runtime/roblox_game_session_native_adapter.cc
   src/runtime/roblox_web_view_bridge.cc

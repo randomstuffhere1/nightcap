@@ -141,6 +141,7 @@ TEST(CommandLineTest, DoesNotEchoInvalidInternalLaunchDocument) {
   EXPECT_FALSE(result);
   EXPECT_EQ(result.error, "invalid controlled launch request");
   EXPECT_EQ(result.error.find(kSecret), std::string::npos);
+  EXPECT_TRUE(result.launch_parse_failed);
 }
 
 TEST(CommandLineTest, ScrubsInternalLaunchDocumentFromOwnedAndProcessArgv) {
@@ -207,17 +208,33 @@ TEST(CommandLineTest, RejectsUnsupportedPositionalArgument) {
       ParseCommandLine(arguments.size(), arguments.data());
 
   EXPECT_FALSE(result);
-  EXPECT_EQ(result.error, "unknown argument");
+  EXPECT_NE(result.error.find("invalid Roblox launch URI"), std::string::npos);
+  // The desktop entry has no terminal, so this class of failure must be
+  // reported in a dialog.
+  EXPECT_TRUE(result.launch_parse_failed);
 }
 
-TEST(CommandLineTest, RejectsUnknownOptionBeforeRuntimeWork) {
+TEST(CommandLineTest, RejectsUnknownOptionWithoutDialogRequest) {
   const std::array<const char*, 2> arguments = {"mocktail", "--unknown"};
 
   const CommandLineParseResult result =
       ParseCommandLine(arguments.size(), arguments.data());
 
   EXPECT_FALSE(result);
-  EXPECT_EQ(result.error, "unknown option: --unknown");
+  EXPECT_FALSE(result.launch_parse_failed);
+}
+
+TEST(CommandLineTest, AcceptsGamePageUrlFromBrowserHandOff) {
+  const std::array<const char*, 2> arguments = {
+      "mocktail", "https://www.roblox.com/games/1962086868/Tower-of-Hell"};
+
+  const CommandLineParseResult result =
+      ParseCommandLine(arguments.size(), arguments.data());
+
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_EQ(result.options.raw_launch_argument, arguments[1]);
+  EXPECT_FALSE(result.options.launch_request_json.empty());
+  EXPECT_EQ(result.options.launch_argument_index, 1);
 }
 
 TEST(CommandLineTest, RejectsEveryMissingValue) {
@@ -255,8 +272,10 @@ TEST(CommandLineTest, DoesNotEchoASecondRawLaunchTicket) {
       ParseCommandLine(arguments.size(), arguments.data());
 
   EXPECT_FALSE(result);
-  EXPECT_EQ(result.error, "unknown argument");
   EXPECT_EQ(result.error.find(kSecret), std::string::npos);
+  // A second positional argument is rejected as a duplicate launch rather than
+  // parsed, so this is not a link the caller should be told about in a dialog.
+  EXPECT_FALSE(result.launch_parse_failed);
 }
 
 TEST(CommandLineTest, RejectsInvalidLaunchUriBeforeRuntimeWork) {
@@ -270,6 +289,7 @@ TEST(CommandLineTest, RejectsInvalidLaunchUriBeforeRuntimeWork) {
   EXPECT_FALSE(result);
   EXPECT_TRUE(result.options.raw_launch_argument.empty());
   EXPECT_NE(result.error.find("invalid Roblox launch URI"), std::string::npos);
+  EXPECT_TRUE(result.launch_parse_failed);
 }
 
 TEST(CommandLineTest, RejectsRemovedStandaloneLoginOptions) {

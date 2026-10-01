@@ -9,11 +9,14 @@
 #include <cstdint>
 #include <limits>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "runtime/roblox_game_url.h"
 
 namespace mocktail {
 namespace runtime {
@@ -223,7 +226,11 @@ Status AssignField(std::string_view raw_key, std::string value,
   }
   const std::string key = AsciiLower(raw_key);
   std::string canonical_key;
-  if (key == "request") {
+  if (key == "request" || key == "requesttype") {
+    // The webview launchGame payload spells this "requestType" while the
+    // PlaceLauncher query spells it "request". Accept both so a modern
+    // roblox://experiences/start URI is not silently downgraded to an
+    // unvalidated public join.
     canonical_key = "request";
   } else if (key == "placeid") {
     canonical_key = "placeId";
@@ -331,7 +338,11 @@ Status ParseQuery(std::string_view query, bool decode_modern_launch_data,
         query.substr(begin, end == std::string_view::npos ? query.size() - begin
                                                           : end - begin);
     if (pair.empty()) {
-      return Invalid("Roblox launch URI contains an empty parameter");
+      // A trailing or doubled '&' is common in website-generated URIs. It
+      // cannot introduce a field, so skip it instead of rejecting the join.
+      if (end == std::string_view::npos) break;
+      begin = end + 1;
+      continue;
     }
     const std::size_t equals = pair.find('=');
     if (equals == std::string_view::npos || equals == 0) {
@@ -527,9 +538,16 @@ Status ValidateSelector(const LaunchFields& fields) {
                : Invalid("RequestGame contains a non-public join selector");
   }
   if (request == "requestgamejob") {
-    return !fields.game_instance_id.empty()
-               ? Status::Ok()
-               : Invalid("RequestGameJob requires a game instance");
+    // The website's Play button sends RequestGameJob with no game instance,
+    // because the client is expected to resolve a server itself. That is an
+    // ordinary public launch, not a malformed request. Conflicting selectors
+    // are still rejected by the selector_count > 1 check above, so no gate is
+    // lost by accepting the instance-less form.
+    //
+    // Note the request type is validated but never forwarded: MakeRequest only
+    // emits the join identity, so rejecting here could only ever refuse a join
+    // the pipeline was always prepared to make.
+    return Status::Ok();
   }
   if (request == "requestprivategame") {
     return private_join || !fields.reserved_server_access_code.empty()
@@ -600,11 +618,35 @@ Status ParseModern(std::string_view payload, LaunchFields* fields) {
   } else {
     return Invalid("Roblox launch path is unsupported");
   }
-  if (query.find('#') != std::string_view::npos ||
-      query.find('/') != std::string_view::npos) {
+  // Only the fragment is rejected here. A '/' cannot escape the query: the
+  // scheme, authority and path were already pinned by the literal prefix match
+  // above, and ParseQuery splits solely on '&' and '='. The website routinely
+  // sends an unencoded referralPage=https://www.roblox.com/games/... on
+  // public launches, so banning '/' rejected otherwise valid public joins.
+  if (query.find('#') != std::string_view::npos) {
     return Invalid("Roblox launch URI contains an unsupported fragment");
   }
   return ParseQuery(query, decode_launch_data_twice, fields);
+}
+
+// Accepts the roblox.com game page URL. The private-server paste path shares
+// ParseRobloxGameUrl so both entry points enforce one origin allow-list.
+Status ParseGamePageUrl(std::string_view url, LaunchFields* fields) {
+  const std::optional<RobloxGameUrlLink> link = ParseRobloxGameUrl(url);
+  if (!link.has_value()) return Invalid("Roblox game link is not recognized");
+  if (fields == nullptr || link->place_id <= 0) {
+    return Invalid("Roblox game link has no launchable place");
+  }
+  fields->place_id = link->place_id;
+  fields->link_code = std::move(link->link_code);
+  fields->access_code = std::move(link->access_code);
+  // A game page carries no request type of its own. Name the public/private
+  // intent explicitly so ValidateSelector still runs its conflict checks.
+  fields->request_type =
+      (fields->link_code.empty() && fields->access_code.empty())
+          ? "RequestGame"
+          : "RequestPrivateGame";
+  return Status::Ok();
 }
 
 }  // namespace
@@ -631,6 +673,11 @@ Status ParseRobloxLaunchUri(std::string_view uri,
     status = ParseClassic(payload, &fields);
   } else if (scheme == "roblox") {
     status = ParseModern(payload, &fields);
+  } else if (scheme == "http" || scheme == "https") {
+    // The browser hands over a roblox.com game page whenever the site cannot
+    // reach the app directly. ParseRobloxGameUrl enforces the same origin
+    // allow-list as the PlaceLauncher URL.
+    status = ParseGamePageUrl(uri, &fields);
   } else {
     return Invalid("Roblox launch URI scheme is unsupported");
   }

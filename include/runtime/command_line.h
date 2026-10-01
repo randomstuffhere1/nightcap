@@ -44,6 +44,12 @@ struct CommandLineOptions {
 struct CommandLineParseResult {
   CommandLineOptions options;
   std::string error;
+  // True when the invocation carried a Roblox launch URI or internal launch
+  // request that failed to parse. The desktop entry has no terminal, so the
+  // caller must surface this specific failure in a dialog rather than only on
+  // stderr, which is what made rejected public-server links look like a client
+  // that never started at all.
+  bool launch_parse_failed = false;
 
   explicit operator bool() const { return error.empty(); }
 };

@@ -106,6 +106,7 @@ CommandLineParseResult ParseCommandLine(int argc, const char* const argv[]) {
       if (!launch_status.ok()) {
         result.options.raw_launch_argument.clear();
         result.error = "invalid Roblox launch URI: " + launch_status.message();
+        result.launch_parse_failed = true;
         return result;
       }
       result.options.launch_request_json = launch_request.canonical_json;
@@ -125,6 +126,7 @@ CommandLineParseResult ParseCommandLine(int argc, const char* const argv[]) {
           ParseRobloxExperienceLaunchJson(document, &launch_request);
       if (!launch_status.ok()) {
         result.error = "invalid controlled launch request";
+        result.launch_parse_failed = true;
         return result;
       }
       result.options.raw_launch_argument = std::move(document);
@@ -136,7 +138,11 @@ CommandLineParseResult ParseCommandLine(int argc, const char* const argv[]) {
       const Status launch_status =
           ParseRobloxLaunchUri(argument, &launch_request);
       if (!launch_status.ok()) {
-        result.error = "unknown argument";
+        // A bare argument is always a browser hand-off. Report why it was
+        // refused instead of the opaque "unknown argument", so the failure is
+        // attributable when it reaches a dialog rather than a terminal.
+        result.error = "invalid Roblox launch URI: " + launch_status.message();
+        result.launch_parse_failed = true;
         return result;
       }
       result.options.raw_launch_argument = argument;

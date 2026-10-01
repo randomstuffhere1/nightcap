@@ -201,6 +201,10 @@ TEST(RobloxLaunchUriTest, RejectsInvalidOrAmbiguousModernIdentifiers) {
            "linkCode=private",
            "roblox://experiences/start?placeId=1&gameInstanceId=instance&"
            "accessCode=private",
+           // Relaxing RequestGameJob to accept an instance-less public join must
+           // not weaken the conflicting-selector gate.
+           "roblox://experiences/start?requestType=RequestGameJob&placeId=1"
+           "&gameInstanceId=instance&linkCode=private",
        }) {
     ExpectRejected(uri);
   }
@@ -223,9 +227,126 @@ TEST(RobloxLaunchUriTest, RejectsMalformedEncodingAndControlBytes) {
   }
 }
 
+TEST(RobloxLaunchUriTest, AcceptsUnencodedReferralPageOnPublicLaunch) {
+  // The website attaches an unencoded referralPage to public launches. Rejecting
+  // a bare '/' in the query made those joins fail to launch at all.
+  RobloxExperienceLaunchRequest request;
+  const Status status = ParseRobloxLaunchUri(
+      "roblox://experiences/start?placeId=17580461965&"
+      "referralPage=https://www.roblox.com/games/17580461965/",
+      &request);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(request.place_id, 17580461965);
+  EXPECT_EQ(request.referral_page,
+            "https://www.roblox.com/games/17580461965/");
+  ExpectCanonicalRequestMatches(request);
+}
+
+TEST(RobloxLaunchUriTest, AcceptsRequestTypeSpellingFromModernUri) {
+  RobloxExperienceLaunchRequest request;
+  const Status status = ParseRobloxLaunchUri(
+      "roblox://experiences/start?requestType=RequestGameJob&"
+      "placeId=1962086868&gameInstanceId=97ea-49e4",
+      &request);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(request.place_id, 1962086868);
+  EXPECT_EQ(request.game_instance_id, "97ea-49e4");
+  ExpectCanonicalRequestMatches(request);
+}
+
+TEST(RobloxLaunchUriTest, AcceptsInstanceLessRequestGameJobPlayButton) {
+  // The Play button on a game page sends RequestGameJob with no game instance
+  // and lets the client resolve a server. Rejecting this refused every
+  // ordinary public launch.
+  RobloxExperienceLaunchRequest request;
+  const Status status = ParseRobloxLaunchUri(
+      "roblox://experiences/start?requestType=RequestGameJob&"
+      "placeId=1962086868&launchData=%257B%2522source%2522%253A%2522Play"
+      "+Button%2522%257D&referralPage=https://www.roblox.com/games/"
+      "1962086868/",
+      &request);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(request.place_id, 1962086868);
+  EXPECT_TRUE(request.game_instance_id.empty());
+  EXPECT_TRUE(request.link_code.empty());
+  EXPECT_TRUE(request.access_code.empty());
+  EXPECT_EQ(request.launch_data, R"({"source":"Play Button"})");
+  ExpectCanonicalRequestMatches(request);
+}
+
+TEST(RobloxLaunchUriTest, AcceptsBareRequestGamePlayButton) {
+  RobloxExperienceLaunchRequest request;
+  const Status status = ParseRobloxLaunchUri(
+      "roblox://experiences/start?requestType=RequestGame&placeId=1962086868",
+      &request);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(request.place_id, 1962086868);
+  ExpectCanonicalRequestMatches(request);
+}
+
+TEST(RobloxLaunchUriTest, SkipsEmptyQueryPairs) {
+  RobloxExperienceLaunchRequest request;
+  const Status status = ParseRobloxLaunchUri(
+      "roblox://experiences/start?placeId=17580461965&&",
+      &request);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(request.place_id, 17580461965);
+  ExpectCanonicalRequestMatches(request);
+}
+
+TEST(RobloxLaunchUriTest, ParsesPublicGamePageUrl) {
+  RobloxExperienceLaunchRequest request;
+  const Status status = ParseRobloxLaunchUri(
+      "https://www.roblox.com/games/1962086868/Tower-of-Hell", &request);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(request.place_id, 1962086868);
+  EXPECT_TRUE(request.link_code.empty());
+  EXPECT_TRUE(request.access_code.empty());
+  EXPECT_TRUE(request.game_instance_id.empty());
+  ExpectCanonicalRequestMatches(request);
+}
+
+TEST(RobloxLaunchUriTest, ParsesPrivateServerGamePageUrl) {
+  RobloxExperienceLaunchRequest request;
+  const Status status = ParseRobloxLaunchUri(
+      "https://www.roblox.com/games/17580461965/Private-Game"
+      "?privateServerLinkCode=123456789",
+      &request);
+
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(request.place_id, 17580461965);
+  EXPECT_EQ(request.link_code, "123456789");
+  ExpectCanonicalRequestMatches(request);
+}
+
+TEST(RobloxLaunchUriTest, RejectsUntrustedOrMalformedGamePageUrls) {
+  for (const char* uri : {
+           "http://www.roblox.com/games/1962086868/Public",
+           "https://evilroblox.com/games/1962086868/Public",
+           "https://roblox.com.example.org/games/1962086868/Public",
+           "https://user@www.roblox.com/games/1962086868/Public",
+           "https://www.roblox.com:444/games/1962086868/Public",
+           "https://www.roblox.com/experiences/start?placeId=1",
+           "https://www.roblox.com/games/1962086868/Public#fragment",
+           "https://www.roblox.com/games/1962086868/Public/"
+           "?privateServerLinkCode=not-digits",
+           "https://www.roblox.com/games/0/Public",
+           "https://www.roblox.com/games/1962086868/Public"
+           "?privateServerLinkCode=1&privateServerLinkCode=2",
+           "https://www.roblox.com/games/1962086868//Public",
+       }) {
+    ExpectRejected(uri);
+  }
+}
+
 TEST(RobloxLaunchUriTest, RejectsUnsupportedSchemesRoutesAndLaunchModes) {
   for (const char* uri : {
-           "https://www.roblox.com/experiences/start?placeId=1",
            "file:///experiences/start?placeId=1",
            "roblox://navigation?placeId=1",
            "roblox://experiences/other?placeId=1",

@@ -259,6 +259,17 @@ int main(int argc, char* argv[]) {
     std::cerr << command_line.error << "\n\n"
               << mocktail::runtime::CommandLineUsage(
                      command_line.options.program_name);
+    if (command_line.launch_parse_failed) {
+      // The desktop entry runs this with no terminal, so a rejected link
+      // produced no output at all and looked like Nightcap never started. Say
+      // what went wrong. command_line.error carries only the parser's reason,
+      // never the URI or its authentication ticket.
+      const mocktail::runtime::ProcessEnvironment parse_environment;
+      (void)mocktail::runtime::ShowFailureDialog(
+          parse_environment,
+          "Nightcap could not open this Roblox link.\n\n" +
+              command_line.error);
+    }
     return EXIT_FAILURE;
   }
   if (command_line.options.mode == mocktail::runtime::CommandMode::kHelp) {
