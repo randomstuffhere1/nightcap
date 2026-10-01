@@ -23,7 +23,13 @@ namespace {
 constexpr size_t kMaxPendingLaunchRequests = 8;
 // libroblox's static TLS requires the proven 16 MiB guest-thread stack floor.
 constexpr size_t kLaunchWorkerStackSize = 64ULL * 1024 * 1024;
-constexpr std::chrono::milliseconds kWebSurfaceReadyTimeout{3000};
+// Covers helper exec through window creation, including cold Flatpak starts.
+constexpr std::chrono::milliseconds kWebSurfaceReadyTimeout{5000};
+// Roblox closes a solved WebViewProtocol challenge itself with closeWindow,
+// as on Android. The host closes it only if Roblox has not done so within
+// this period. Captcha windows close at once instead (see
+// RobloxWebViewOpenRequest::close_when_challenge_solved).
+constexpr std::chrono::milliseconds kSolvedChallengeCloseGrace{3000};
 constexpr char kRobloxBaseUrl[] = "https://www.roblox.com/";
 
 Status Invalid(std::string message) {
@@ -160,24 +166,33 @@ Status LaunchRobloxWebSurface(
   }
   std::fprintf(stderr, "  [%s] opening validated Roblox web surface\n",
                transport);
+  const auto started = std::chrono::steady_clock::now();
   const WebViewHelperLaunchResult launched =
       LaunchWebViewHelper(helper, url, std::move(exit_observer));
   if (!launched) {
     return Unavailable("could not display Roblox web surface: " +
                        launched.error);
   }
-  if (launched.process == nullptr ||
-      !launched.process->WaitUntilReady(kWebSurfaceReadyTimeout)) {
+  const bool ready = launched.process != nullptr &&
+                     launched.process->WaitUntilReady(kWebSurfaceReadyTimeout);
+  const long long elapsed_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - started)
+          .count();
+  if (!ready) {
     if (launched.process != nullptr) {
       (void)launched.process->RequestClose();
     }
     return Unavailable(
-        "Roblox web surface did not become ready before the deadline");
+        "Roblox web surface did not become ready before the deadline (" +
+        std::to_string(elapsed_ms) + " ms of " +
+        std::to_string(kWebSurfaceReadyTimeout.count()) + " ms)");
   }
   if (process != nullptr) {
     *process = launched.process;
   }
-  std::fprintf(stderr, "  [%s] Roblox web surface launched\n", transport);
+  std::fprintf(stderr, "  [%s] Roblox web surface launched in %lld ms\n",
+               transport, elapsed_ms);
   return Status::Ok();
 }
 
@@ -301,12 +316,14 @@ RobloxExperienceComposition::RobloxExperienceComposition(
     const SecureRobloxCredential* initial_web_view_credential,
     RobloxExperienceSurfaceProvider surface_provider,
     RobloxExperiencePresenceObserver presence_observer,
-    bool clear_persisted_web_view_cookie, bool microphone_enabled)
+    bool clear_persisted_web_view_cookie, bool microphone_enabled,
+    RobloxAccountProtocolSymbols account_symbols)
     : environment_(environment),
       message_bus_symbols_(message_bus_symbols),
       web_view_symbols_(web_view_symbols),
       browser_service_symbols_(browser_service_symbols),
       permissions_symbols_(permissions_symbols),
+      account_symbols_(account_symbols),
       microphone_enabled_(microphone_enabled),
       game_symbols_(game_symbols),
       jni_factory_(jni_factory),
@@ -427,11 +444,33 @@ Status RobloxExperienceComposition::InitializePlatformProtocols() {
     (void)ReleaseGlobalObjects();
     return status;
   }
+  // AccountProtocol only shortens a device-integrity login challenge that
+  // cannot succeed here, so its absence or failure never blocks startup.
+  std::unique_ptr<RobloxAccountBridge> account_bridge;
+  if (account_symbols_.complete()) {
+    account_bridge = std::make_unique<RobloxAccountBridge>(
+        environment_, account_symbols_,
+        RobloxAccountProtocolObjects{web_view_objects.message_bus,
+                                     jni_factory_.context,
+                                     jni_factory_.create_request_handler,
+                                     jni_factory_.clear_request_handler});
+    const Status account_status = account_bridge->Initialize();
+    if (!account_status.ok()) {
+      std::fprintf(stderr, "  [account] AccountProtocol unavailable: %s\n",
+                   account_status.message().c_str());
+      account_bridge.reset();
+    }
+  } else {
+    std::fprintf(stderr,
+                 "  [account] AccountProtocol entrypoints are missing; "
+                 "device-integrity challenges wait for Roblox's timeout\n");
+  }
   {
     std::lock_guard<std::mutex> lock(mutex_);
     web_view_bridge_ = std::move(web_view_bridge);
     browser_service_bridge_ = std::move(browser_service_bridge);
     permissions_bridge_ = std::move(permissions_bridge);
+    account_bridge_ = std::move(account_bridge);
     platform_protocols_initialized_ = true;
   }
   std::fprintf(stderr,
@@ -604,6 +643,8 @@ Status RobloxExperienceComposition::OpenWebSurface(
     web_surface_process_generation_ = process_generation;
     web_surface_route_ = route;
     web_surface_logical_generation_ = logical_generation;
+    web_surface_close_when_challenge_solved_ =
+        presentation.close_when_challenge_solved;
     web_surface_logical_exit_observer_ = std::move(exit_observer);
   }
   if (superseded_observer.valid()) {
@@ -616,13 +657,16 @@ Status RobloxExperienceComposition::OpenWebSurface(
   return Status::Ok();
 }
 
-Status RobloxExperienceComposition::CloseWebSurface() {
+Status RobloxExperienceComposition::CloseWebSurface(
+    uint64_t expected_logical_generation) {
   std::lock_guard<std::mutex> operation_lock(web_surface_operation_mutex_);
   std::shared_ptr<WebViewHelperProcess> process;
   WebViewHelperExitObserver exit_observer;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (web_surface_route_ == WebSurfaceRoute::kNone) {
+    if (web_surface_route_ == WebSurfaceRoute::kNone ||
+        (expected_logical_generation != 0 &&
+         expected_logical_generation != web_surface_logical_generation_)) {
       return Status::Ok();
     }
     process = std::move(web_surface_process_);
@@ -630,6 +674,7 @@ Status RobloxExperienceComposition::CloseWebSurface() {
     exit_observer = std::move(web_surface_logical_exit_observer_);
     web_surface_route_ = WebSurfaceRoute::kNone;
     web_surface_logical_generation_ = 0;
+    web_surface_close_when_challenge_solved_ = false;
   }
   // A closed challenge must stop executing. Reusing its hidden document lets
   // late callbacks from the old attempt reach the next login attempt. The APK
@@ -643,6 +688,33 @@ Status RobloxExperienceComposition::CloseWebSurface() {
     return Unavailable("could not close Roblox web surface");
   }
   return Status::Ok();
+}
+
+Status RobloxExperienceComposition::CloseUnclaimedSolvedChallenge() {
+  uint64_t generation = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!solved_challenge_close_deadline_.has_value()) {
+      return Status::Ok();
+    }
+    const bool still_open =
+        web_surface_route_ != WebSurfaceRoute::kNone &&
+        solved_challenge_logical_generation_ == web_surface_logical_generation_;
+    if (still_open &&
+        std::chrono::steady_clock::now() < *solved_challenge_close_deadline_) {
+      return Status::Ok();
+    }
+    solved_challenge_close_deadline_.reset();
+    if (!still_open) {
+      return Status::Ok();
+    }
+    generation = solved_challenge_logical_generation_;
+  }
+  std::fprintf(stderr,
+               "  [webview] closing solved challenge window; Roblox did not "
+               "close it within %lld ms\n",
+               static_cast<long long>(kSolvedChallengeCloseGrace.count()));
+  return CloseWebSurface(generation);
 }
 
 void RobloxExperienceComposition::WebSurfaceExited(void* context) {
@@ -670,6 +742,7 @@ void RobloxExperienceComposition::HandleWebSurfaceExit(
     web_surface_process_generation_ = 0;
     web_surface_route_ = WebSurfaceRoute::kNone;
     web_surface_logical_generation_ = 0;
+    web_surface_close_when_challenge_solved_ = false;
     exit_observer = std::move(web_surface_logical_exit_observer_);
   }
   if (exit_observer.valid()) {
@@ -695,6 +768,8 @@ Status RobloxExperienceComposition::DispatchWebViewOpen(
   // host back navigation too.
   presentation.back_navigation_disabled =
       request.back_button_visible.has_value() && !*request.back_button_visible;
+  presentation.close_when_challenge_solved =
+      request.close_when_challenge_solved;
   return composition->OpenWebSurface(request.url, "webview",
                                      WebSurfaceRoute::kWebView,
                                      std::move(exit_observer), presentation);
@@ -934,6 +1009,29 @@ Status RobloxExperienceComposition::RouteWebSurfaceEvent(
                        "WebView helper event type is unsupported");
 }
 
+Status RobloxExperienceComposition::HandleSolvedChallenge(
+    uint64_t logical_generation) {
+  std::fprintf(stderr, "  [webview] solved challenge forwarded to Roblox\n");
+  bool close_now = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (logical_generation != web_surface_logical_generation_) {
+      return Status::Ok();
+    }
+    close_now = web_surface_close_when_challenge_solved_;
+    if (!close_now) {
+      solved_challenge_close_deadline_ =
+          std::chrono::steady_clock::now() + kSolvedChallengeCloseGrace;
+      solved_challenge_logical_generation_ = logical_generation;
+    }
+  }
+  if (!close_now) {
+    return Status::Ok();
+  }
+  std::fprintf(stderr, "  [webview] closing solved captcha window\n");
+  return CloseWebSurface(logical_generation);
+}
+
 Status RobloxExperienceComposition::RouteCurrentWebSurfaceEvent(
     const std::shared_ptr<WebViewHelperProcess>& source_process,
     uint64_t process_generation, uint64_t logical_generation,
@@ -996,6 +1094,7 @@ Status RobloxExperienceComposition::RouteWebSurfaceEventBatch(
         ParseRobloxWebViewLaunchGame(event.payload, &parsed_request).ok();
 
     Status route_status = Status::Ok();
+    bool relayed = false;
     if (event.type == WebViewHelperEventType::kRobloxCookie) {
       route_status = AcceptWebViewRobloxCookie(event.payload);
     } else if (hybrid_command) {
@@ -1026,6 +1125,7 @@ Status RobloxExperienceComposition::RouteWebSurfaceEventBatch(
           saw_relayed_join = true;
         }
         route_status = RouteWebSurfaceEvent(route, event, web_view_bridge);
+        relayed = true;
       }
       if (have_request) {
         bool duplicate = false;
@@ -1043,10 +1143,19 @@ Status RobloxExperienceComposition::RouteWebSurfaceEventBatch(
           // the dismissal below still applies to it.
           saw_relayed_join = true;
           route_status = RouteWebSurfaceEvent(route, event, web_view_bridge);
+          relayed = true;
         }
       }
     } else {
       route_status = RouteWebSurfaceEvent(route, event, web_view_bridge);
+      relayed = true;
+    }
+    // A solved challenge still has to reach Roblox: it carries the callback
+    // acknowledgement that lets the login flow continue. Forwarding it does
+    // not dismiss the surface, so the batch below is unaffected.
+    if (route_status.ok() && relayed &&
+        IsRobloxWebViewChallengeSuccess(event.payload)) {
+      route_status = HandleSolvedChallenge(logical_generation);
     }
     SecurelyClearString(&event.payload);
     if (!route_status.ok()) {
@@ -1136,6 +1245,7 @@ Status RobloxExperienceComposition::DismissWebSurfaceForGameLaunch(
   return Status::Ok();
 }
 
+
 Status RobloxExperienceComposition::DrainPlatformEvents() {
   RobloxWebViewBridge* web_view_bridge = nullptr;
   RobloxBrowserServiceBridge* browser_service_bridge = nullptr;
@@ -1178,6 +1288,9 @@ Status RobloxExperienceComposition::DrainPlatformEvents() {
                                logical_generation);
   if (status.ok() && web_view_bridge != nullptr) {
     status = web_view_bridge->DrainHostWindowEvents();
+  }
+  if (status.ok()) {
+    status = CloseUnclaimedSolvedChallenge();
   }
   if (status.ok() && browser_service_bridge != nullptr) {
     status = browser_service_bridge->DrainOutgoingEvents();
@@ -1811,6 +1924,7 @@ Status RobloxExperienceComposition::Shutdown() {
   std::unique_ptr<RobloxWebViewBridge> web_view_bridge;
   std::unique_ptr<RobloxBrowserServiceBridge> browser_service_bridge;
   std::unique_ptr<RobloxPermissionsBridge> permissions_bridge;
+  std::unique_ptr<RobloxAccountBridge> account_bridge;
   std::shared_ptr<WebViewHelperProcess> web_surface_process;
   jnivm::VM* late_lifecycle_vm = nullptr;
   {
@@ -1836,6 +1950,7 @@ Status RobloxExperienceComposition::Shutdown() {
     web_view_bridge = std::move(web_view_bridge_);
     browser_service_bridge = std::move(browser_service_bridge_);
     permissions_bridge = std::move(permissions_bridge_);
+    account_bridge = std::move(account_bridge_);
     web_surface_process = std::move(web_surface_process_);
     web_surface_logical_exit_observer_ = {};
     web_surface_route_ = WebSurfaceRoute::kNone;
@@ -1852,8 +1967,12 @@ Status RobloxExperienceComposition::Shutdown() {
   if (web_surface_process != nullptr) {
     (void)web_surface_process->RequestClose();
   }
-  Status status = permissions_bridge != nullptr ? permissions_bridge->Shutdown()
-                                                : Status::Ok();
+  Status status =
+      account_bridge != nullptr ? account_bridge->Shutdown() : Status::Ok();
+  const Status permissions_status = permissions_bridge != nullptr
+                                        ? permissions_bridge->Shutdown()
+                                        : Status::Ok();
+  if (status.ok()) status = permissions_status;
   const Status browser_status = browser_service_bridge != nullptr
                                     ? browser_service_bridge->Shutdown()
                                     : Status::Ok();
@@ -1869,6 +1988,7 @@ Status RobloxExperienceComposition::Shutdown() {
     status = bridge_status;
   }
   browser_service_bridge.reset();
+  account_bridge.reset();
   permissions_bridge.reset();
   web_view_bridge.reset();
   bridge.reset();

@@ -28,7 +28,7 @@ ANYLINUX_APPIMAGETOOL ?= appimagetool
 PREFIX ?= /usr
 FLATPAK_BUILD_DIR ?= build-flatpak
 FLATPAK_MANIFEST ?= packaging/flatpak/io.github.CoderDayton.nightcap.json
-FLATPAK_JOBS ?= 4
+FLATPAK_JOBS ?= 2
 
 # Auto-detect fastest generator: Ninja > Unix Makefiles.  Override with
 # `make build CMAKE_GENERATOR="Unix Makefiles"` if needed.

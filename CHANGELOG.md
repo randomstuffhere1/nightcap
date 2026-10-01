@@ -6,6 +6,14 @@ GitHub are taken from the matching section here.
 
 ## [Unreleased]
 
+### Fixed
+
+- `make update-roblox` no longer deletes your previous Roblox install when an
+  import fails partway through. If a step fails, the old files are put back,
+  or kept in a folder whose path is printed. Thanks to @kimlherme.
+
+## [0.3.2] - 2026-09-29
+
 ### Added
 
 - A settings window: `mocktail --settings`, or the Nightcap Settings entry in
@@ -106,14 +114,47 @@ GitHub are taken from the matching section here.
   keep their normal paste behavior.
 - Performance recordings made with `--profile` now show how busy the CPU was
   during each frame, which makes it easier to tell what caused a stutter.
+- Experimental support for ARM64 (`aarch64`) Linux, running Roblox's Android
+  `arm64-v8a` client.
 
 ### Fixed
 
+- When Roblox asks for a Google Play device check during login, Nightcap now
+  answers right away that it isn't supported. Before, the "Verifying you're
+  not a bot" screen waited about a minute for an answer and then sent you
+  back to the login screen.
+- Solving a login challenge now closes its window. Before, Roblox's
+  "challenge completed" signal was ignored and the window stayed open.
+  Thanks to @glook9001.
+- Login no longer stalls after you pass a verification check. Before, Roblox
+  only saw the page's "challenge completed" signal after a one-minute
+  timeout, so it gave up and the login failed. On a Roblox build Nightcap
+  can't handle this way, the log says "WebViewProtocol getter not
+  recognized" and web pages behave as before.
+- Login check windows and other web pages get 5 seconds to start instead of
+  3, so a slow start no longer closes them. The log says how long each one
+  took to open.
 - Less stutter while joining a game and while textures load in. In Blade
   Ball, loading hitches dropped by about half, and the worst one went from
   0.8 seconds to 0.55 seconds.
 - Clicking Play on a private server now joins right away. Before, nothing
   happened until you clicked a sidebar tab like Home.
+- Middle click now reaches Roblox as the middle mouse button.
+- Scrolling follows your system's natural scrolling setting.
+- Fixed a crash on some x86_64 hosts when Roblox asked about a thread other
+  than the one making the call.
+- Roblox updates no longer mix up the ARM64 and x86_64 compatibility profiles
+  for the same version.
+- A partial or out-of-range user id in `MOCKTAIL_ROBLOX_USER_ID` or
+  `MOCKTAIL_LOCAL_STORAGE_CURRENT_USER_ID` is now ignored instead of being
+  partly read.
+
+### Changed
+
+- `make flatpak` and `scripts/build_flatpak.sh` now build with 2 jobs by
+  default instead of 4, so a local Flatpak build is less likely to run out
+  of memory. Set `FLATPAK_JOBS` or `MOCKTAIL_FLATPAK_JOBS` to use more.
+  Thanks to @glook9001.
 
 ## [0.3.1] - 2026-09-20
 
@@ -299,7 +340,8 @@ First Nightcap release, forked from komaruworld/mocktail.
 - The AppImage build no longer fails on stale checksums for the slimmed
   Arch packages.
 
-[Unreleased]: https://github.com/CoderDayton/nightcap/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/CoderDayton/nightcap/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/CoderDayton/nightcap/releases/tag/v0.3.2
 [0.3.1]: https://github.com/CoderDayton/nightcap/releases/tag/v0.3.1
 [0.3.0]: https://github.com/CoderDayton/nightcap/releases/tag/v0.3.0
 [0.2.0]: https://github.com/CoderDayton/nightcap/releases/tag/v0.2.0

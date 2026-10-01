@@ -3,6 +3,7 @@
 
 #include <jni.h>
 
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -18,6 +19,7 @@
 #include "runtime/roblox_experience_launch_bridge.h"
 #include "runtime/roblox_experience_presence.h"
 #include "runtime/roblox_fresh_game_launch_controller.h"
+#include "runtime/roblox_account_bridge.h"
 #include "runtime/roblox_permissions_bridge.h"
 #include "runtime/roblox_web_view_bridge.h"
 #include "runtime/webview_roblox_cookie.h"
@@ -121,7 +123,8 @@ class RobloxExperienceComposition final {
       RobloxExperienceSurfaceProvider surface_provider = {},
       RobloxExperiencePresenceObserver presence_observer = {},
       bool clear_persisted_web_view_cookie = false,
-      bool microphone_enabled = false);
+      bool microphone_enabled = false,
+      RobloxAccountProtocolSymbols account_symbols = {});
   ~RobloxExperienceComposition();
 
   RobloxExperienceComposition(const RobloxExperienceComposition&) = delete;
@@ -169,6 +172,7 @@ class RobloxExperienceComposition final {
     bool visible = true;
     bool back_navigation_disabled = false;
     bool show_domain_as_title = false;
+    bool close_when_challenge_solved = false;
   };
 
   static Status DispatchLaunch(void* context,
@@ -241,8 +245,14 @@ class RobloxExperienceComposition final {
                         const WebSurfacePresentation& presentation);
   // WebViewProtocol and BrowserService are two logical transports over the
   // APK's single physical WebView container. Either protocol may close or
-  // mutate the surface that the other one opened.
-  Status CloseWebSurface();
+  // mutate the surface that the other one opened. A nonzero
+  // expected_logical_generation closes only that surface.
+  Status CloseWebSurface(uint64_t expected_logical_generation = 0);
+  // Closes a solved challenge that Roblox left open past its grace period.
+  Status CloseUnclaimedSolvedChallenge();
+  // Records a solved challenge that was just forwarded to Roblox, and closes
+  // the surface when it was opened as a throwaway captcha window.
+  Status HandleSolvedChallenge(uint64_t logical_generation);
   void HandleWebSurfaceExit(uint64_t process_generation);
   bool CanHandleMainTextPasteLocked() const;
   Status QueueLaunchRequestLocked(
@@ -272,6 +282,7 @@ class RobloxExperienceComposition final {
   const RobloxWebViewMessageBusSymbols web_view_symbols_;
   const RobloxBrowserServiceSymbols browser_service_symbols_;
   const RobloxPermissionsMessageBusSymbols permissions_symbols_;
+  const RobloxAccountProtocolSymbols account_symbols_;
   const bool microphone_enabled_;
   const RobloxGameSessionSymbols game_symbols_;
   const RobloxExperienceJniFactory jni_factory_;
@@ -291,6 +302,8 @@ class RobloxExperienceComposition final {
   std::unique_ptr<RobloxWebViewBridge> web_view_bridge_;
   std::unique_ptr<RobloxBrowserServiceBridge> browser_service_bridge_;
   std::unique_ptr<RobloxPermissionsBridge> permissions_bridge_;
+  // Optional: a payload without the AccountProtocol entrypoints still starts.
+  std::unique_ptr<RobloxAccountBridge> account_bridge_;
   std::shared_ptr<WebViewHelperProcess> web_surface_process_;
   std::shared_ptr<WebSurfaceExitTarget> web_surface_exit_target_;
   std::shared_ptr<LifecycleTarget> lifecycle_target_;
@@ -300,6 +313,13 @@ class RobloxExperienceComposition final {
   uint64_t web_surface_logical_generation_ = 0;
   uint64_t next_web_surface_process_generation_ = 1;
   uint64_t next_web_surface_logical_generation_ = 1;
+  // The current surface closes as soon as its solved challenge is forwarded.
+  bool web_surface_close_when_challenge_solved_ = false;
+  // Set when a solved challenge is forwarded; applies only to that logical
+  // surface generation.
+  std::optional<std::chrono::steady_clock::time_point>
+      solved_challenge_close_deadline_;
+  uint64_t solved_challenge_logical_generation_ = 0;
   SecureWebViewRobloxCookie web_view_cookie_;
   std::string web_view_cookie_initialization_error_;
   bool web_view_cookie_synchronized_ = false;

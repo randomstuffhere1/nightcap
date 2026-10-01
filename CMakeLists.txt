@@ -378,6 +378,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/roblox_game_session_native_adapter.cc
   src/runtime/roblox_web_view_bridge.cc
   src/runtime/roblox_permissions_bridge.cc
+  src/runtime/roblox_account_bridge.cc
   src/runtime/payload_update_preflight.cc
   src/runtime/process_launch_policy.cc
   src/runtime/process_diagnostics.cc
@@ -494,7 +495,8 @@ add_library(mocktail_webview_helper_policy STATIC
   src/webview/webview_helper_policy.cc
 )
 add_library(Mocktail::WebViewHelperPolicy ALIAS mocktail_webview_helper_policy)
-target_include_directories(mocktail_webview_helper_policy PUBLIC src)
+target_include_directories(mocktail_webview_helper_policy PUBLIC src
+  PRIVATE include)
 target_link_libraries(mocktail_webview_helper_policy PUBLIC
   PkgConfig::WEBKITGTK6
   nlohmann_json::nlohmann_json

@@ -50,6 +50,8 @@ struct Probe {
   int permission_disconnects = 0;
   int permission_handlers_cleared = 0;
   std::map<std::string, jobject> permission_handlers;
+  std::map<std::string, jobject> account_handlers;
+  int account_handlers_cleared = 0;
   std::string permission_response;
   int browser_bindings = 0;
   int browser_disconnects = 0;
@@ -267,6 +269,45 @@ nlohmann::json QueryMicrophone(Probe* probe) {
 }
 
 void SetRequestHandler(JNIEnv*, jobject, jstring, jstring, jobject) {}
+
+std::string CopyJavaString(JNIEnv* env, jstring value) {
+  const char* chars = value ? env->GetStringUTFChars(value, nullptr) : nullptr;
+  const std::string copy = chars ? chars : "";
+  if (chars) env->ReleaseStringUTFChars(value, chars);
+  return copy;
+}
+
+jstring AccountProtocolName(JNIEnv* env, jclass) {
+  return env->NewStringUTF("AccountProtocol");
+}
+jstring AccountAvailableMethod(JNIEnv* env, jclass) {
+  return env->NewStringUTF("DeviceIntegrityAvailable");
+}
+jstring AccountTokenMethod(JNIEnv* env, jclass) {
+  return env->NewStringUTF("GetIntegrityToken");
+}
+jstring AccountSupportKey(JNIEnv* env, jclass) {
+  return env->NewStringUTF("support");
+}
+jstring AccountTokenKey(JNIEnv* env, jclass) {
+  return env->NewStringUTF("token");
+}
+jstring AccountResultKey(JNIEnv* env, jclass) {
+  return env->NewStringUTF("result");
+}
+void SetAccountHandler(JNIEnv* env, jobject, jstring, jstring method,
+                       jobject handler) {
+  g_probe->account_handlers[CopyJavaString(env, method)] = handler;
+}
+void ClearAccountHandler(JNIEnv*, jobject, jstring, jstring) {
+  ++g_probe->account_handlers_cleared;
+}
+
+RobloxAccountProtocolSymbols AccountSymbols() {
+  return {AccountProtocolName, AccountAvailableMethod, AccountTokenMethod,
+          AccountSupportKey,   AccountTokenKey,        AccountResultKey,
+          SetAccountHandler,   ClearAccountHandler};
+}
 void ClearNativeRequestHandler(JNIEnv*, jobject, jstring, jstring) {}
 void PublishRaw(JNIEnv*, jobject, jstring, jstring) {}
 void BroadcastDataModelFocus(JNIEnv*, jclass, jstring, jstring, jstring) {}
@@ -918,6 +959,49 @@ TEST(RobloxExperienceCompositionTest,
   EXPECT_EQ(probe.browser_disconnects, 4);
   EXPECT_EQ(probe.browser_releases, 4);
   EXPECT_EQ(probe.browser_callbacks_cleared, 4);
+  EXPECT_TRUE(probe.account_handlers.empty());
+  g_probe = nullptr;
+}
+
+TEST(RobloxExperienceCompositionTest,
+     AnswersDeviceIntegrityAsUnsupportedWithPlatformProtocols) {
+  jnivm::VM vm;
+  Probe probe{&vm};
+  g_probe = &probe;
+  for (const char* class_name : {
+           "com/roblox/protocols/webview/WebViewProtocol",
+           "com/roblox/universalapp/messagebus/MessageBus",
+           "com/roblox/universalapp/messagebus/Connection",
+           "com/roblox/engine/jni/memstorage/MemStorage",
+           "com/roblox/engine/jni/memstorage/Connection",
+           "com/roblox/engine/jni/memstorage/Callback",
+       }) {
+    vm.RegisterClass(class_name);
+  }
+  RobloxExperienceComposition composition(
+      {vm.GetJavaVM(), &vm, Prepare}, {},
+      {GetWebViewOpenId, GetWebViewHandleWindowCloseId, GetWebViewProtocolName,
+       GetWebViewAvailabilityId, GetWebViewMessageId, InitializeWebViewProtocol,
+       Subscribe, Disconnect, SetRequestHandler, ClearNativeRequestHandler,
+       PublishRaw, BroadcastDataModelFocus, GetWebViewMutateId,
+       GetWebViewCloseId, SignalWebViewJavascriptCallback,
+       UpdateCookieSetHandler},
+      BrowserServiceSymbols(), PermissionsSymbols(), {}, JniFactory(&probe),
+      {}, {}, nullptr, {}, {}, false, false, AccountSymbols());
+
+  ASSERT_TRUE(composition.InitializePlatformProtocols().ok());
+  ASSERT_EQ(probe.account_handlers.size(), 2u);
+  JNIEnv* env = vm.GetJNIEnv();
+  jstring request = env->NewStringUTF("{}");
+  jstring response = vm.DispatchMessageBusRequestHandler(
+      probe.account_handlers.at("DeviceIntegrityAvailable"), env, request);
+  EXPECT_EQ(nlohmann::json::parse(CopyJavaString(env, response)),
+            (nlohmann::json{{"support", false}}));
+  env->DeleteLocalRef(request);
+  if (response) env->DeleteLocalRef(response);
+
+  EXPECT_TRUE(composition.Shutdown().ok());
+  EXPECT_EQ(probe.account_handlers_cleared, 2);
   g_probe = nullptr;
 }
 
@@ -1030,7 +1114,7 @@ TEST(RobloxExperienceCompositionTest,
 class RobloxExperienceCompositionWebSurfaceTest : public ::testing::Test {
  protected:
   struct Helper {
-    Helper() {
+    explicit Helper(const char* before_ready = "") {
       char pattern[] = "/tmp/mocktail_surface_close_XXXXXX";
       const char* created = mkdtemp(pattern);
       if (created == nullptr) return;
@@ -1042,6 +1126,7 @@ import socket, sys
 sys.stdin.buffer.read()
 s = socket.socket(fileno=198)
 s.settimeout(5)
+)PY" << before_ready << R"PY(
 s.send(b'MWVE' + bytes([1, 3, 0, 0]) + bytes(4))
 while True:
     packet = s.recv(1024 * 1024)
@@ -1076,6 +1161,14 @@ while True:
 
   static void ObserveExit(void* context) {
     ++static_cast<ExitProbe*>(context)->calls;
+  }
+
+  static Status Open(RobloxExperienceComposition* composition,
+                     const std::shared_ptr<ExitProbe>& probe) {
+    return composition->OpenWebSurface(
+        "https://www.roblox.com/challenge/cdn/hybrid", "webview",
+        RobloxExperienceComposition::WebSurfaceRoute::kWebView,
+        {probe, &RobloxExperienceCompositionWebSurfaceTest::ObserveExit}, {});
   }
 
   static std::unique_ptr<RobloxExperienceComposition> MakeComposition(
@@ -1146,6 +1239,61 @@ while True:
   static void PhysicalExit(RobloxExperienceComposition* composition,
                            uint64_t process_generation) {
     composition->HandleWebSurfaceExit(process_generation);
+  }
+
+  static void MarkClosesWhenChallengeSolved(
+      RobloxExperienceComposition* composition) {
+    std::lock_guard<std::mutex> lock(composition->mutex_);
+    composition->web_surface_close_when_challenge_solved_ = true;
+  }
+
+  static bool SolvedChallengeClosePending(
+      RobloxExperienceComposition* composition) {
+    std::lock_guard<std::mutex> lock(composition->mutex_);
+    return composition->solved_challenge_close_deadline_.has_value();
+  }
+
+  static void ExpireSolvedChallengeGrace(
+      RobloxExperienceComposition* composition) {
+    std::lock_guard<std::mutex> lock(composition->mutex_);
+    if (composition->solved_challenge_close_deadline_.has_value()) {
+      composition->solved_challenge_close_deadline_ =
+          std::chrono::steady_clock::now();
+    }
+  }
+
+  static std::string ChallengeSuccess() {
+    return R"({"moduleID":"Navigation","functionName":"navigateToFeature",)"
+           R"("params":{"params":{"data":{"captchaData":{}},)"
+           R"("feature":"CaptchaSuccess"}},"callbackID":"challenge-1"})";
+  }
+
+  static std::unique_ptr<RobloxExperienceComposition> MakeWebViewComposition(
+      jnivm::VM* vm, Probe* probe) {
+    for (const char* class_name : {
+             "com/roblox/protocols/webview/WebViewProtocol",
+             "com/roblox/universalapp/messagebus/MessageBus",
+             "com/roblox/universalapp/messagebus/Connection",
+             "com/roblox/engine/jni/memstorage/MemStorage",
+             "com/roblox/engine/jni/memstorage/Connection",
+             "com/roblox/engine/jni/memstorage/Callback",
+         }) {
+      vm->RegisterClass(class_name);
+    }
+    return std::make_unique<RobloxExperienceComposition>(
+        JniEnvironmentProvider{vm->GetJavaVM(), vm, Prepare},
+        RobloxExperienceMessageBusSymbols{},
+        RobloxWebViewMessageBusSymbols{
+            GetWebViewOpenId, GetWebViewHandleWindowCloseId,
+            GetWebViewProtocolName, GetWebViewAvailabilityId,
+            GetWebViewMessageId, InitializeWebViewProtocol, Subscribe,
+            Disconnect, SetRequestHandler, ClearNativeRequestHandler,
+            PublishRaw, BroadcastDataModelFocus, GetWebViewMutateId,
+            GetWebViewCloseId, SignalWebViewJavascriptCallback,
+            UpdateCookieSetHandler},
+        BrowserServiceSymbols(), PermissionsSymbols(),
+        RobloxGameSessionSymbols{}, JniFactory(probe),
+        RobloxFreshLaunchPresentBoundary{});
   }
 };
 
@@ -1618,6 +1766,164 @@ TEST_F(RobloxExperienceCompositionWebSurfaceTest,
   PhysicalExit(composition.get(), 9);
   PhysicalExit(composition.get(), 9);
   EXPECT_EQ(probe->calls, 1);
+}
+
+TEST_F(RobloxExperienceCompositionWebSurfaceTest,
+       WaitsForSlowHelperStartupBeforeRejectingSurface) {
+  Helper helper("import time\ntime.sleep(3.5)\n");
+  ASSERT_FALSE(helper.path.empty());
+  ASSERT_EQ(setenv("MOCKTAIL_WEBVIEW_HELPER", helper.path.c_str(), 1), 0);
+  SecureRobloxCredential credential{".ROBLOSECURITY=typed-secret"};
+  auto composition = MakeComposition(&credential);
+  auto probe = std::make_shared<ExitProbe>();
+
+  ::testing::internal::CaptureStderr();
+  const Status status = Open(composition.get(), probe);
+  const std::string log = ::testing::internal::GetCapturedStderr();
+  unsetenv("MOCKTAIL_WEBVIEW_HELPER");
+
+  EXPECT_TRUE(status.ok()) << status.message();
+  const std::string marker = "Roblox web surface launched in ";
+  const size_t at = log.find(marker);
+  ASSERT_NE(at, std::string::npos) << log;
+  EXPECT_GE(std::stol(log.substr(at + marker.size())), 3500) << log;
+  EXPECT_TRUE(Close(composition.get()).ok());
+}
+
+TEST_F(RobloxExperienceCompositionWebSurfaceTest,
+       ReportsElapsedStartupTimeWhenHelperNeverBecomesReady) {
+  Helper helper("sys.exit(0)\n");
+  ASSERT_FALSE(helper.path.empty());
+  ASSERT_EQ(setenv("MOCKTAIL_WEBVIEW_HELPER", helper.path.c_str(), 1), 0);
+  SecureRobloxCredential credential{".ROBLOSECURITY=typed-secret"};
+  auto composition = MakeComposition(&credential);
+  auto probe = std::make_shared<ExitProbe>();
+
+  const Status status = Open(composition.get(), probe);
+  unsetenv("MOCKTAIL_WEBVIEW_HELPER");
+
+  ASSERT_FALSE(status.ok());
+  EXPECT_NE(status.message().find("did not become ready"), std::string::npos)
+      << status.message();
+  EXPECT_NE(status.message().find(" ms of 5000 ms"), std::string::npos)
+      << status.message();
+}
+
+TEST_F(RobloxExperienceCompositionWebSurfaceTest,
+       ForwardsSolvedChallengeAndLeavesClosingToRoblox) {
+  jnivm::VM vm;
+  Probe probe{&vm};
+  g_probe = &probe;
+  auto composition = MakeWebViewComposition(&vm, &probe);
+  ASSERT_TRUE(composition->InitializePlatformProtocols().ok());
+  auto exit_probe = std::make_shared<ExitProbe>();
+  Activate(composition.get(), false, 17, 23, exit_probe);
+
+  const std::string success = ChallengeSuccess();
+  ASSERT_TRUE(RouteCurrentEvent(composition.get(), 17, 23,
+                                {WebViewHelperEventType::kRobloxWkHybrid,
+                                 success})
+                  .ok());
+  EXPECT_EQ(probe.web_view_javascript_callback, success);
+  EXPECT_TRUE(SolvedChallengeClosePending(composition.get()));
+  ASSERT_TRUE(composition->DrainPlatformEvents().ok());
+  EXPECT_EQ(exit_probe->calls, 0);
+
+  ASSERT_TRUE(Close(composition.get()).ok());
+  EXPECT_EQ(exit_probe->calls, 1);
+  ExpireSolvedChallengeGrace(composition.get());
+  ASSERT_TRUE(composition->DrainPlatformEvents().ok());
+  EXPECT_EQ(exit_probe->calls, 1);
+  EXPECT_FALSE(SolvedChallengeClosePending(composition.get()));
+
+  EXPECT_TRUE(composition->Shutdown().ok());
+  g_probe = nullptr;
+}
+
+TEST_F(RobloxExperienceCompositionWebSurfaceTest,
+       ClosesSolvedChallengeWhenRobloxLeavesItOpen) {
+  jnivm::VM vm;
+  Probe probe{&vm};
+  g_probe = &probe;
+  auto composition = MakeWebViewComposition(&vm, &probe);
+  ASSERT_TRUE(composition->InitializePlatformProtocols().ok());
+  auto exit_probe = std::make_shared<ExitProbe>();
+  Activate(composition.get(), false, 17, 23, exit_probe);
+
+  ASSERT_TRUE(RouteCurrentEvent(composition.get(), 17, 23,
+                                {WebViewHelperEventType::kExecuteRoblox,
+                                 ChallengeSuccess()})
+                  .ok());
+  ASSERT_TRUE(composition->DrainPlatformEvents().ok());
+  EXPECT_EQ(exit_probe->calls, 0);
+
+  ExpireSolvedChallengeGrace(composition.get());
+  ::testing::internal::CaptureStderr();
+  const Status status = composition->DrainPlatformEvents();
+  const std::string log = ::testing::internal::GetCapturedStderr();
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(exit_probe->calls, 1);
+  EXPECT_NE(log.find("closing solved challenge window"), std::string::npos)
+      << log;
+  EXPECT_FALSE(SolvedChallengeClosePending(composition.get()));
+
+  EXPECT_TRUE(composition->Shutdown().ok());
+  g_probe = nullptr;
+}
+
+TEST_F(RobloxExperienceCompositionWebSurfaceTest,
+       ClosesSolvedCaptchaWindowAfterForwardingSuccess) {
+  jnivm::VM vm;
+  Probe probe{&vm};
+  g_probe = &probe;
+  auto composition = MakeWebViewComposition(&vm, &probe);
+  ASSERT_TRUE(composition->InitializePlatformProtocols().ok());
+  auto exit_probe = std::make_shared<ExitProbe>();
+  Activate(composition.get(), false, 17, 23, exit_probe);
+  MarkClosesWhenChallengeSolved(composition.get());
+
+  const std::string success = ChallengeSuccess();
+  ::testing::internal::CaptureStderr();
+  const Status status = RouteCurrentEvent(
+      composition.get(), 17, 23,
+      {WebViewHelperEventType::kRobloxWkHybrid, success});
+  const std::string log = ::testing::internal::GetCapturedStderr();
+  ASSERT_TRUE(status.ok()) << status.message();
+  EXPECT_EQ(probe.web_view_javascript_callback, success);
+  EXPECT_EQ(exit_probe->calls, 1);
+  EXPECT_FALSE(SolvedChallengeClosePending(composition.get()));
+  EXPECT_NE(log.find("closing solved captcha window"), std::string::npos)
+      << log;
+
+  EXPECT_TRUE(composition->Shutdown().ok());
+  g_probe = nullptr;
+}
+
+TEST_F(RobloxExperienceCompositionWebSurfaceTest,
+       UnsolvedChallengeEventsKeepWindowOpen) {
+  jnivm::VM vm;
+  Probe probe{&vm};
+  g_probe = &probe;
+  auto composition = MakeWebViewComposition(&vm, &probe);
+  ASSERT_TRUE(composition->InitializePlatformProtocols().ok());
+  auto exit_probe = std::make_shared<ExitProbe>();
+  Activate(composition.get(), false, 17, 23, exit_probe);
+
+  const std::string shown =
+      R"({"moduleID":"Navigation","functionName":"navigateToFeature",)"
+      R"("params":{"params":{"feature":"CaptchaShown"}},"callbackID":"c"})";
+  ASSERT_TRUE(RouteCurrentEvent(composition.get(), 17, 23,
+                                {WebViewHelperEventType::kRobloxWkHybrid,
+                                 shown})
+                  .ok());
+  EXPECT_EQ(probe.web_view_javascript_callback, shown);
+  EXPECT_FALSE(SolvedChallengeClosePending(composition.get()));
+  ASSERT_TRUE(composition->DrainPlatformEvents().ok());
+  EXPECT_EQ(exit_probe->calls, 0);
+
+  EXPECT_TRUE(Close(composition.get()).ok());
+  EXPECT_TRUE(composition->Shutdown().ok());
+  g_probe = nullptr;
 }
 
 namespace {}  // namespace

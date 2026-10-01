@@ -22,6 +22,13 @@ target_link_libraries(fleasion_probe PRIVATE Mocktail::Services libc_shim)
 mocktail_apply_compile_options(fleasion_probe)
 find_program(MOCKTAIL_TEST_PYTHON python3)
 find_program(MOCKTAIL_TEST_OPENSSL openssl)
+if(MOCKTAIL_TEST_PYTHON)
+  add_test(NAME PayloadImportRollbackTest.PreservesPreviousInstallation
+    COMMAND ${MOCKTAIL_TEST_PYTHON}
+            ${CMAKE_CURRENT_SOURCE_DIR}/payload_import_rollback_test.py)
+  set_tests_properties(PayloadImportRollbackTest.PreservesPreviousInstallation
+    PROPERTIES TIMEOUT 180)
+endif()
 if(MOCKTAIL_TEST_PYTHON AND MOCKTAIL_TEST_OPENSSL)
   add_test(NAME FleasionIntegrationTest.ProxyAndTrust
     COMMAND ${MOCKTAIL_TEST_PYTHON} ${CMAKE_CURRENT_SOURCE_DIR}/fleasion_integration_test.py
@@ -395,6 +402,15 @@ target_link_libraries(roblox_permissions_bridge_test PRIVATE
   Threads::Threads
 )
 mocktail_apply_compile_options(roblox_permissions_bridge_test)
+
+add_executable(roblox_account_bridge_test roblox_account_bridge_test.cc)
+target_link_libraries(roblox_account_bridge_test PRIVATE
+  Mocktail::LegacyJni
+  Mocktail::Runtime
+  GTest::gtest_main
+  Threads::Threads
+)
+mocktail_apply_compile_options(roblox_account_bridge_test)
 
 add_executable(roblox_browser_service_bridge_test
   roblox_browser_service_bridge_test.cc
@@ -771,6 +787,15 @@ target_link_libraries(elf_build_id_test PRIVATE
   GTest::gtest_main
 )
 
+add_executable(web_view_protocol_contract_test
+  web_view_protocol_contract_test.cc
+)
+target_link_libraries(web_view_protocol_contract_test PRIVATE
+  Mocktail::Compat
+  GTest::gtest_main
+)
+mocktail_apply_compile_options(web_view_protocol_contract_test)
+
 add_executable(build_profile_test build_profile_test.cc)
 target_link_libraries(build_profile_test PRIVATE
   Mocktail::Compat
@@ -1064,6 +1089,7 @@ gtest_discover_tests(roblox_game_session_native_adapter_test)
 gtest_discover_tests(roblox_experience_launch_bridge_test)
 gtest_discover_tests(roblox_web_view_bridge_test)
 gtest_discover_tests(roblox_permissions_bridge_test)
+gtest_discover_tests(roblox_account_bridge_test)
 gtest_discover_tests(roblox_browser_service_bridge_test)
 gtest_discover_tests(roblox_fresh_game_launch_controller_test)
 gtest_discover_tests(roblox_experience_composition_test)
@@ -1099,6 +1125,7 @@ gtest_discover_tests(auth_service_test)
 gtest_discover_tests(auth_runtime_composition_test)
 gtest_discover_tests(client_settings_service_test)
 gtest_discover_tests(elf_build_id_test)
+gtest_discover_tests(web_view_protocol_contract_test)
 gtest_discover_tests(build_profile_test)
 gtest_discover_tests(host_abi_profile_test)
 gtest_discover_tests(payload_compatibility_host_abi_gate_test)
