@@ -407,9 +407,13 @@ WriteClassicPixbufCache() {
   destination_cache="${STAGING}/lib/plugins/gdk-pixbuf-2.0/2.10.0/loaders.cache"
   [[ -f "${source_cache}" && ! -L "${source_cache}" ]] ||
     Die "classic GdkPixbuf loader cache is unavailable"
+  # Every loader entry is rewritten, not just the libpixbufloader ones: a
+  # distribution can ship other GdkPixbuf modules under a different name
+  # (libopenraw_pixbuf.so on Debian derivatives, for one), and an entry left
+  # absolute points the staged bundle back at the host's loader directory.
   sed -E \
     -e 's@^# LoaderDir = .*$@# LoaderDir = lib/plugins/gdk-pixbuf-2.0/2.10.0/loaders@' \
-    -e 's#^"[^"]*/(libpixbufloader[-_][^/"]+\.so)"$#"lib/plugins/gdk-pixbuf-2.0/2.10.0/loaders/\1"#' \
+    -e 's#^"[^"]*/([^/"]+\.so)"$#"lib/plugins/gdk-pixbuf-2.0/2.10.0/loaders/\1"#' \
     "${source_cache}" >"${destination_cache}"
   if grep -Eq '^"/(usr|lib|lib64|opt|home|hdd|tmp)/' \
       "${destination_cache}"; then

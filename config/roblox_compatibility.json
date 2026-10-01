@@ -103,6 +103,32 @@
         "input_select_method_rva": "0x32d0a56"
       },
       "reason": "Verified 2026-09-06: exact Build-ID profile passed two isolated no-recovery Tier C Vulkan canaries and real game sessions, including fullscreen state synchronization and host FMOD output-device interposition; legacy executable patches and signal recovery remain disabled."
+    },
+    {
+      "version_name": "2.738.1397",
+      "version_code": 3092,
+      "abi": "x86_64",
+      "elf_build_id": "5f0704edd9064f566ee3d6df2bd2fabbcc709f03",
+      "status": "supported",
+      "default_allowed": true,
+      "allow_legacy_binary_patches": false,
+      "allow_host_abi_bridges": true,
+      "allow_host_constructor_replay": true,
+      "user_game_settings_fullscreen_setter_rva": "0x45c5f42",
+      "fmod_output_device_bridge": {
+        "vtable_rva": "0x6cd3ce0",
+        "vtable_layout_version": 2,
+        "string_constructor_rva": "0x1d7a038",
+        "count_method_rva": "0x320c676",
+        "info_method_rva": "0x320c716",
+        "current_method_rva": "0x320c6c6",
+        "select_method_rva": "0x320bf78",
+        "input_count_method_rva": "0x320ccf6",
+        "input_info_method_rva": "0x320cd04",
+        "input_current_method_rva": "0x320d152",
+        "input_select_method_rva": "0x320bd18"
+      },
+      "reason": "Machine-derived from the verified 2.736.1408 x86-64 reference, then verified 2026-09-11: this exact Build-ID profile passed two isolated no-recovery Tier C Vulkan canaries and real game sessions, including fullscreen state synchronization and host FMOD output-device interposition; legacy executable patches and signal recovery remain disabled."
     }
   ]
 }

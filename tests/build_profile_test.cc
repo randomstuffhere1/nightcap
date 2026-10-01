@@ -5,6 +5,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -155,12 +156,27 @@ TEST(BuildProfileTest, RejectsInvalidManifest) {
 }
 
 TEST(BuildProfileTest, RejectsPartialInputProfilesAndUpgradesCachedLayouts) {
-  nlohmann::json document;
+  nlohmann::json manifest;
   {
     std::ifstream input(kManifestPath);
-    input >> document;
+    input >> manifest;
   }
-  auto &entry = document["profiles"].back();
+  // Selected by Build ID rather than by position: the manifest's ordering is
+  // not a contract, and appending a newer supported profile must not retarget
+  // this test. Only this one profile is kept, because the layout-2 half below
+  // rewrites its Build ID to one the real manifest also carries and a
+  // duplicate is rejected outright.
+  const auto source = std::find_if(
+      manifest["profiles"].begin(), manifest["profiles"].end(),
+      [](const nlohmann::json& profile) {
+        return profile.value("elf_build_id", "") ==
+               "ade08266c67aee88ec9c1d00902150e1684dad3a";
+      });
+  ASSERT_NE(source, manifest["profiles"].end())
+      << "manifest has no 2.736.1408 x86-64 profile to test";
+  nlohmann::json document = manifest;
+  document["profiles"] = nlohmann::json::array({*source});
+  auto &entry = document["profiles"][0];
   auto &bridge = entry["fmod_output_device_bridge"];
   char path[] = "/tmp/mocktail-input-profile-XXXXXX";
   int fd = mkstemp(path);

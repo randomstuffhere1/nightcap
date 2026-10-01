@@ -6,6 +6,33 @@ namespace mocktail::compat {
 namespace {
 
 constexpr HostAbiProfile kProfiles[] = {
+    // Roblox 2.738.1397. Machine-derived from the verified 2.736.1408
+    // x86-64 profile, then approved for the default set after this exact
+    // Build-ID profile passed two isolated no-recovery Tier C Vulkan canaries
+    // and real game sessions. The payload keeps the native mimalloc/bootstrap
+    // design of its reference, but .init_array grows to 3599 entries and every
+    // address below is scoped to this exact ELF Build ID.
+    {"5f0704edd9064f566ee3d6df2bd2fabbcc709f03",
+     {{{0x1d73422, HostBridgeKind::kAllocate, "small-allocate"},
+       {0x1d7667a, HostBridgeKind::kUsableSize, "usable-size"},
+       {0x222f4c0, HostBridgeKind::kReallocate, "reallocate"},
+       {0x1d731c2, HostBridgeKind::kAllocate, "allocate"},
+       {0x1d8e7f9, HostBridgeKind::kAlignedAllocate,
+        "aligned-allocate-direct"},
+       {0x1d76c19, HostBridgeKind::kFree, "free"}}},
+     6,
+     {0x76e2da0, 0x77efb98, 0x7c4b780, 0x400, 0x1d73838, 0x1dffad7,
+      0x7b87830, 0x7b878c0, 0x400000},
+     {0x1d731c2, 0x1d76c19},
+     0x70e1618,
+     3599,
+     {{{2, 3}, {5, 3599}}},
+     2,
+     {{{2, 3599}}},
+     1,
+     2,
+     {0x22308d3, 0x7b8b998},
+     HostAllocatorStrategy::kNativeMimalloc},
     // Roblox 2.736.1408 arm64-v8a. Every RVA was derived from the AArch64
     // payload of the same release as the x86-64 reference above, matched by
     // allocator internals, init_array call graphs, and static state layout.
