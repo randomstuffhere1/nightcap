@@ -31,6 +31,28 @@ struct RobloxGameUrlLink {
 // a private join to a public one. Returns nullopt for every other input.
 std::optional<RobloxGameUrlLink> ParseRobloxGameUrl(std::string_view url);
 
+// Roblox's deferred share form,
+// https://www.roblox.com/share?code=<32 hex>&type=Server. Since October 2025
+// Roblox generates this shorter link for private servers instead of the
+// /games/<id>?privateServerLinkCode=... form, and every previously generated
+// link keeps working.
+struct RobloxShareLinkUrl {
+  // The opaque deferred-link token. It carries no place ID and no link code:
+  // only Roblox's authenticated LinkingService can turn it into a joinable
+  // target.
+  std::string code;
+  // Share flavour, normalized to the casing Roblox documents ("Server").
+  // Only a shared private server reaches the private-server paste path;
+  // every other flavour is a different link form.
+  std::string type;
+};
+
+// Parses the deferred share form under the same origin allow-list as
+// ParseRobloxGameUrl, so the two cannot drift on host, port or path handling.
+// Accepts both /share and the /share-links path Roblox redirects browsers to.
+// Returns nullopt for every other input, including other share flavours.
+std::optional<RobloxShareLinkUrl> ParseRobloxShareUrl(std::string_view url);
+
 }  // namespace runtime
 }  // namespace mocktail
 

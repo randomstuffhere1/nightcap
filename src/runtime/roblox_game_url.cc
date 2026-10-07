@@ -238,68 +238,160 @@ std::string DisplayNameFromSlug(std::string_view slug) {
   return name;
 }
 
-}  // namespace
+struct RobloxUrlParts {
+  std::string path;
+  std::string query;
+};
 
-std::optional<RobloxGameUrlLink> ParseRobloxGameUrl(std::string_view url) {
-  if (url.empty() || url.size() > kMaximumGameUrlBytes ||
-      ContainsControlBytes(url) || !IsValidUtf8(url)) {
-    return std::nullopt;
-  }
-
-  const ScopedCurlUrl parsed;
-  const std::string owned_url(url);
-  if (parsed.get() == nullptr ||
-      curl_url_set(parsed.get(), CURLUPART_URL, owned_url.c_str(),
-                   CURLU_NON_SUPPORT_SCHEME | CURLU_PATH_AS_IS) != CURLUE_OK) {
-    return std::nullopt;
-  }
-
+// Applies the one origin allow-list shared by every roblox.com link parser:
+// https only, host roblox.com or www.roblox.com, no userinfo, no fragment and
+// port 443 only. Returns the decoded path and the raw query string.
+bool ReadRobloxUrlParts(const ScopedCurlUrl& parsed, RobloxUrlParts* parts) {
+  if (parsed.get() == nullptr || parts == nullptr) return false;
   std::string scheme;
   std::string host;
-  std::string path;
   if (!GetUrlPart(parsed.get(), CURLUPART_SCHEME, 0, &scheme) ||
       !GetUrlPart(parsed.get(), CURLUPART_HOST, 0, &host) ||
-      !GetUrlPart(parsed.get(), CURLUPART_PATH, CURLU_URLDECODE, &path) ||
+      !GetUrlPart(parsed.get(), CURLUPART_PATH, CURLU_URLDECODE, &parts->path) ||
       AsciiLower(scheme) != "https") {
-    return std::nullopt;
+    return false;
   }
   const std::string normalized_host = AsciiLower(host);
-  if ((normalized_host != "www.roblox.com" && normalized_host != "roblox.com") ||
+  if ((normalized_host != "www.roblox.com" &&
+       normalized_host != "roblox.com") ||
       HasUrlPart(parsed.get(), CURLUPART_USER) ||
       HasUrlPart(parsed.get(), CURLUPART_PASSWORD) ||
       HasUrlPart(parsed.get(), CURLUPART_FRAGMENT)) {
-    return std::nullopt;
+    return false;
   }
   ScopedCurlString port;
   const CURLUcode port_status =
       curl_url_get(parsed.get(), CURLUPART_PORT, port.output(), 0);
   if (port_status == CURLUE_OK && port.get() != nullptr &&
       std::string_view(port.get()) != "443") {
-    return std::nullopt;
+    return false;
   }
+  ScopedCurlString raw_query;
+  (void)curl_url_get(parsed.get(), CURLUPART_QUERY, raw_query.output(), 0);
+  if (raw_query.get() != nullptr) parts->query = raw_query.get();
+  return true;
+}
 
-  const std::string_view path_view(path);
-  if (path_view.size() >= 2 && path_view.back() == '/' &&
-      path_view[path_view.size() - 2] == '/') {
-    return std::nullopt;
+// Runs the shared size/encoding gates, parses the URL and applies the origin
+// allow-list, leaving `parsed` and `parts` ready for path-shape validation.
+bool PrepareRobloxUrl(std::string_view url, ScopedCurlUrl* parsed,
+                      RobloxUrlParts* parts) {
+  if (parsed == nullptr || parts == nullptr || url.empty() ||
+      url.size() > kMaximumGameUrlBytes || ContainsControlBytes(url) ||
+      !IsValidUtf8(url)) {
+    return false;
   }
-  std::vector<std::string_view> segments;
+  const std::string owned_url(url);
+  if (parsed->get() == nullptr ||
+      curl_url_set(parsed->get(), CURLUPART_URL, owned_url.c_str(),
+                   CURLU_NON_SUPPORT_SCHEME | CURLU_PATH_AS_IS) != CURLUE_OK) {
+    return false;
+  }
+  return ReadRobloxUrlParts(*parsed, parts);
+}
+
+// Splits a decoded roblox.com path into non-empty segments. A single trailing
+// slash is harmless and is common in copied Roblox links; empty interior
+// segments and double slashes remain rejected.
+bool SplitRobloxPath(std::string_view path,
+                     std::vector<std::string_view>* segments) {
+  if (segments == nullptr) return false;
+  segments->clear();
+  if (path.size() >= 2 && path.back() == '/' &&
+      path[path.size() - 2] == '/') {
+    return false;
+  }
   std::size_t begin = 1;
-  while (begin < path_view.size()) {
-    const std::size_t end = path_view.find('/', begin);
-    const std::string_view segment = path_view.substr(
-        begin, end == std::string_view::npos ? path_view.size() - begin
+  while (begin < path.size()) {
+    const std::size_t end = path.find('/', begin);
+    const std::string_view segment = path.substr(
+        begin, end == std::string_view::npos ? path.size() - begin
                                              : end - begin);
     if (segment.empty()) {
-      // A single trailing slash is harmless and is common in copied Roblox
-      // links; double slashes and empty interior segments remain rejected.
-      if (end == path_view.size() - 1) break;
-      return std::nullopt;
+      if (end == path.size() - 1) break;
+      return false;
     }
-    segments.push_back(segment);
+    segments->push_back(segment);
     if (end == std::string_view::npos) break;
     begin = end + 1;
   }
+  return true;
+}
+
+bool IsShareCode(std::string_view value) {
+  return value.size() == 32 &&
+         std::all_of(value.begin(), value.end(), [](unsigned char character) {
+           return (character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f') ||
+                  (character >= 'A' && character <= 'F');
+         });
+}
+
+// Reads the deferred-link selectors out of a share URL query. A `code` that is
+// present but malformed rejects the link. Only type=Server names a shared
+// private server; every other share flavour is a different link form and is
+// left to the normal paste behavior.
+bool ReadShareQuery(std::string_view query, std::string* code,
+                    std::string* type) {
+  if (query.empty() || code == nullptr || type == nullptr ||
+      query.size() > kMaximumQueryBytes) {
+    return false;
+  }
+  std::size_t count = 0;
+  std::size_t begin = 0;
+  while (begin <= query.size()) {
+    if (++count > kMaximumQueryParameters) return false;
+    const std::size_t end = query.find('&', begin);
+    const std::string_view pair =
+        query.substr(begin, end == std::string_view::npos
+                                ? query.size() - begin
+                                : end - begin);
+    const std::size_t equals = pair.find('=');
+    if (pair.empty() || equals == std::string_view::npos || equals == 0) {
+      return false;
+    }
+    std::string key;
+    std::string value;
+    if (!PercentDecode(pair.substr(0, equals), true, &key) ||
+        !PercentDecode(pair.substr(equals + 1), true, &value)) {
+      return false;
+    }
+    const std::string normalized = AsciiLower(key);
+    if (normalized == "code") {
+      if (!code->empty() || !IsShareCode(value)) return false;
+      *code = std::move(value);
+    } else if (normalized == "type") {
+      if (!type->empty() || value.size() > kMaximumLinkCodeBytes ||
+          ContainsControlBytes(value)) {
+        return false;
+      }
+      *type = std::move(value);
+    }
+    if (end == std::string_view::npos) break;
+    begin = end + 1;
+  }
+  if (code->empty() || AsciiLower(*type) != "server") return false;
+  std::transform(code->begin(), code->end(), code->begin(),
+                 [](unsigned char character) {
+                   return static_cast<char>(std::tolower(character));
+                 });
+  return true;
+}
+
+}  // namespace
+
+std::optional<RobloxGameUrlLink> ParseRobloxGameUrl(std::string_view url) {
+  ScopedCurlUrl parsed;
+  RobloxUrlParts parts;
+  if (!PrepareRobloxUrl(url, &parsed, &parts)) return std::nullopt;
+
+  std::vector<std::string_view> segments;
+  if (!SplitRobloxPath(parts.path, &segments)) return std::nullopt;
   if (segments.size() < 2 || segments.size() > 3 ||
       segments[0] != "games") {
     return std::nullopt;
@@ -309,14 +401,11 @@ std::optional<RobloxGameUrlLink> ParseRobloxGameUrl(std::string_view url) {
   if (!ParsePositiveId(segments[1], &place_id)) return std::nullopt;
 
   // A public game page has no query at all, so an absent part is not an error.
-  ScopedCurlString raw_query;
-  (void)curl_url_get(parsed.get(), CURLUPART_QUERY, raw_query.output(), 0);
   std::string link_code;
   std::string access_code;
-  const std::string_view query = raw_query.get() != nullptr
-                                     ? std::string_view(raw_query.get())
-                                     : std::string_view();
-  if (!ReadJoinQuery(query, &link_code, &access_code)) return std::nullopt;
+  if (!ReadJoinQuery(parts.query, &link_code, &access_code)) {
+    return std::nullopt;
+  }
 
   std::string fallback_game_name;
   if (segments.size() == 3) {
@@ -329,6 +418,26 @@ std::optional<RobloxGameUrlLink> ParseRobloxGameUrl(std::string_view url) {
   return RobloxGameUrlLink{place_id, std::move(link_code),
                            std::move(access_code),
                            std::move(fallback_game_name)};
+}
+
+std::optional<RobloxShareLinkUrl> ParseRobloxShareUrl(std::string_view url) {
+  ScopedCurlUrl parsed;
+  RobloxUrlParts parts;
+  if (!PrepareRobloxUrl(url, &parsed, &parts)) return std::nullopt;
+
+  std::vector<std::string_view> segments;
+  if (!SplitRobloxPath(parts.path, &segments)) return std::nullopt;
+  // Roblox serves the share form at /share and redirects browsers to
+  // /share-links; both name the same deferred link.
+  if (segments.size() != 1 ||
+      (segments[0] != "share" && segments[0] != "share-links")) {
+    return std::nullopt;
+  }
+
+  std::string code;
+  std::string type;
+  if (!ReadShareQuery(parts.query, &code, &type)) return std::nullopt;
+  return RobloxShareLinkUrl{std::move(code), std::move(type)};
 }
 
 }  // namespace runtime
