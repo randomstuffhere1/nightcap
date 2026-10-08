@@ -43,6 +43,8 @@ required_permissions = {
     "--filesystem=xdg-run/discord-ipc-0:rw",
 }
 assert required_permissions <= finish_args
+# X11 is only a fallback; Wayland sessions get no X11 socket.
+assert "--socket=x11" not in finish_args
 assert not any(argument.startswith("--filesystem=host") for argument in finish_args)
 assert not any(argument == "--filesystem=home" for argument in finish_args)
 

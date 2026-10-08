@@ -6,6 +6,30 @@ GitHub are taken from the matching section here.
 
 ## [Unreleased]
 
+### Changed
+
+- The Flatpak build asks for the X11 socket only when there is no Wayland
+  session, as before 0.3.3.
+
+### Fixed
+
+- Fixed a random crash on Wayland with NVIDIA drivers, where the game window
+  closed after you let go of the camera or left mouse lock. The log showed
+  `wp_linux_drm_syncobj_surface_v1` error 3.
+- Fixed some menu actions being ignored. The Chat button on a profile now
+  opens the Party tab with that player, and clicking a search suggestion now
+  runs the search instead of closing the search menu.
+- Fixed possible crashes when the game calls an Android function Nightcap did
+  not provide, or releases the same reference twice.
+- Fixed a possible hang on close when a web view process stayed open. Nightcap
+  now stops waiting for the log writer after 2 seconds.
+- Fixed a possible missing picture on graphics drivers that reject the
+  low-latency present mode. Nightcap now retries with the game's own mode.
+- Fixed a possible Wayland crash when the window first appears on the OpenGL
+  graphics path.
+
+## [0.3.3] - 2026-10-04
+
 ### Added
 
 - Joining a friend from a Roblox "follow user" link now works. Nightcap looks
@@ -40,6 +64,8 @@ GitHub are taken from the matching section here.
 - Going to another page in the web view, such as Friends from a profile, no
   longer closes the web view. It crashed on every page change on Wayland
   systems whose GL setup GTK could not use.
+- Fixed a crash when Roblox's saved dark or light theme setting was missing or
+  damaged.
 - Re-opening an in-app browser window no longer shows the previous page.
   The stale document is replaced with a fresh WebView before the new URL
   loads, so a reopened window presents the new load instead of the old one.
@@ -372,7 +398,8 @@ First Nightcap release, forked from komaruworld/mocktail.
 - The AppImage build no longer fails on stale checksums for the slimmed
   Arch packages.
 
-[Unreleased]: https://github.com/CoderDayton/nightcap/compare/v0.3.2...HEAD
+[Unreleased]: https://github.com/CoderDayton/nightcap/compare/v0.3.3...HEAD
+[0.3.3]: https://github.com/CoderDayton/nightcap/releases/tag/v0.3.3
 [0.3.2]: https://github.com/CoderDayton/nightcap/releases/tag/v0.3.2
 [0.3.1]: https://github.com/CoderDayton/nightcap/releases/tag/v0.3.1
 [0.3.0]: https://github.com/CoderDayton/nightcap/releases/tag/v0.3.0
