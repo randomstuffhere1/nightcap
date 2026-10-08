@@ -121,6 +121,8 @@ bool QueueHelperEvent(AppState* state,
                       std::string_view command);
 void RequestRobloxCookie(AppState* state);
 void OnCookiesChanged(WebKitCookieManager* manager, gpointer user_data);
+WebKitWebView* CreateSurface(AppState* app, WebKitWebView* related_view);
+void ResetPrimarySurface(AppState* state);
 
 void ClearSensitiveString(std::string* value) {
   volatile char* bytes = value->empty() ? nullptr : value->data();
@@ -1041,6 +1043,12 @@ bool ApplyControlCommand(
                           nullptr)) {
         ClearSensitiveString(&state->pending_navigation_url);
         state->pending_navigation_url = command->payload;
+        // A hidden primary window belongs to a dismissed surface. Reset it
+        // before navigating so re-opening never presents the previous
+        // document while the replacement load is in flight.
+        if (window != nullptr && !gtk_widget_get_visible(GTK_WIDGET(window))) {
+          ResetPrimarySurface(state);
+        }
         StartInitialLoad(state);
       } else {
         std::cerr << "[webview] rejected URL control without a valid surface\n";
@@ -1194,8 +1202,6 @@ gboolean OnControlChannel(gint descriptor, GIOCondition condition,
 void DestroySurfaceState(gpointer data) {
   delete static_cast<SurfaceState*>(data);
 }
-
-WebKitWebView* CreateSurface(AppState* app, WebKitWebView* related_view);
 
 GtkWidget* OnCreatePopup(WebKitWebView* parent,
                          WebKitNavigationAction* navigation_action,
@@ -1408,6 +1414,48 @@ WebKitWebView* CreateSurface(AppState* app, WebKitWebView* related_view) {
   g_signal_connect(window, "map", G_CALLBACK(OnWindowMapped), nullptr);
   g_signal_connect(window, "unmap", G_CALLBACK(OnWindowUnmapped), nullptr);
   return web_view;
+}
+
+// Replace the current primary surface with a fresh, hidden one. Reopening a
+// dismissed surface must show the replacement load rather than the previous
+// document: destroying the old window drops its WebView and page, so late
+// callbacks from the old attempt cannot fire either.
+void ResetPrimarySurface(AppState* state) {
+  GtkWindow* old_window = nullptr;
+  auto* web_view_object =
+      static_cast<GObject*>(g_weak_ref_get(&state->primary_web_view));
+  if (web_view_object != nullptr) {
+    auto* surface = static_cast<SurfaceState*>(
+        g_object_get_data(web_view_object, "mocktail-surface-state"));
+    if (surface != nullptr) {
+      auto* window_object =
+          static_cast<GObject*>(g_weak_ref_get(&surface->window));
+      if (window_object != nullptr) {
+        old_window = GTK_WINDOW(window_object);
+        g_object_unref(window_object);
+      }
+    }
+    g_object_unref(web_view_object);
+  }
+  g_weak_ref_set(&state->primary_web_view, nullptr);
+  g_weak_ref_set(&state->primary_window, nullptr);
+  if (old_window != nullptr) {
+    gtk_window_destroy(old_window);
+  }
+  WebKitWebView* fresh = CreateSurface(state, nullptr);
+  if (fresh != nullptr) {
+    g_weak_ref_set(&state->primary_web_view, G_OBJECT(fresh));
+    auto* surface = static_cast<SurfaceState*>(
+        g_object_get_data(G_OBJECT(fresh), "mocktail-surface-state"));
+    if (surface != nullptr) {
+      auto* window_object =
+          static_cast<GObject*>(g_weak_ref_get(&surface->window));
+      if (window_object != nullptr) {
+        g_weak_ref_set(&state->primary_window, window_object);
+        g_object_unref(window_object);
+      }
+    }
+  }
 }
 
 void Activate(GtkApplication* application, gpointer user_data) {

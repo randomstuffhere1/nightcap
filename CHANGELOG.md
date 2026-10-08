@@ -40,6 +40,9 @@ GitHub are taken from the matching section here.
 - Going to another page in the web view, such as Friends from a profile, no
   longer closes the web view. It crashed on every page change on Wayland
   systems whose GL setup GTK could not use.
+- Re-opening an in-app browser window no longer shows the previous page.
+  The stale document is replaced with a fresh WebView before the new URL
+  loads, so a reopened window presents the new load instead of the old one.
 
 ## [0.3.2] - 2026-09-29
 

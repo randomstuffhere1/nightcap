@@ -644,12 +644,18 @@ Status RobloxExperienceComposition::OpenWebSurface(
   const bool cookie_synchronized =
       clear_persisted_cookie ? current->ClearRobloxCookie()
                              : current->SetRobloxCookie(cookie.value());
-  if (!current->SetTitle(presentation.title) ||
-      !current->SetVisible(presentation.visible) ||
-      !current->SetBackNavigationDisabled(
+  // Navigate while the previous surface is still hidden, before the window
+  // is presented: a reopened surface must render the new load, never the
+  // previous document. The helper replaces its stale WebView before loading,
+  // so the title and visibility applied afterwards land on the reset
+  // surface.
+  const bool navigated = spawn || current->LoadUrl(url);
+  if (!current->SetBackNavigationDisabled(
           presentation.back_navigation_disabled) ||
       !current->SetShowDomainAsTitle(presentation.show_domain_as_title) ||
-      !cookie_synchronized || (!spawn && !current->LoadUrl(url))) {
+      !cookie_synchronized || !navigated ||
+      !current->SetTitle(presentation.title) ||
+      !current->SetVisible(presentation.visible)) {
     (void)current->RequestClose();
     return Unavailable("could not configure reusable Roblox web surface");
   }
