@@ -550,9 +550,17 @@ target_link_libraries(mocktail_linker PUBLIC
 mocktail_apply_compile_options(mocktail_linker)
 target_compile_definitions(mocktail_linker PUBLIC MOCKTAIL_USE_BIONIC_LINKER=1)
 # The Bionic linker expects IPLT boundaries that host executables do not have.
+# These are absolute symbols, and linker_main.cpp takes their addresses, so the
+# code that uses them is not position independent. An optimized build folds
+# those addresses away, but the unoptimized build the Debug and test
+# configurations use keeps a PC-relative relocation against an absolute symbol,
+# and that cannot be resolved in a PIE: mold rejects it outright and GNU ld only
+# warns about it. Every executable that links the vendored linker is therefore
+# linked non-PIE in those configurations. Release keeps its PIE.
 target_link_options(mocktail_linker INTERFACE
   -Wl,--defsym=__rela_iplt_start=0
   -Wl,--defsym=__rela_iplt_end=0
+  "$<$<CONFIG:Debug>:-no-pie>"
 )
 
 add_library(libc_shim STATIC
