@@ -177,6 +177,8 @@ blocked, not busy, which is what the item above now says.
   `scripts/summarize_profile_trace.py` builds the before and after table.
 - Texture uploads no longer stall the frame they land on: ETC2 decode and
   resampling run on a persistent worker pool.
+- Less stutter while joining an experience and while textures load in. See
+  the [changelog](../CHANGELOG.md) for the numbers.
 - The host main thread rests between engine polls instead of spinning, and
   GameMode's core pinning is released, so Roblox's workers spread across
   every core. See [PERFORMANCE.md](PERFORMANCE.md).

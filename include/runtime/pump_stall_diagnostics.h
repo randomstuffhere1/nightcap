@@ -44,8 +44,8 @@ bool ParseMapsLine(std::string_view line, AddressRegion *region);
 const std::vector<AddressRegion> &HostAddressRegions();
 void RefreshHostAddressRegions();
 
-// Frames are captured by the caller, which owns the execinfo dependency, so
-// this type and the policy below stay testable without one.
+// Frames are captured by the caller, which owns the unwinding, so this type and
+// the policy below stay testable without one.
 using PumpStallFrames = std::vector<std::string>;
 
 // Identifies a stall shape. Two stalls with the same signature are the same

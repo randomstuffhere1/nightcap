@@ -11,6 +11,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <link.h>
+#include <unwind.h>
 #include <iomanip>
 #include <iostream>
 #include <csignal>
@@ -31,7 +32,6 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
-#include <execinfo.h>
 #include <ucontext.h>
 #include <elf.h>
 #include <fcntl.h>
@@ -653,10 +653,10 @@ void ApplyRuntimeDefaults() {
   SetEnvDefault("MOCKTAIL_INIT_CLIENT_SETTINGS", "0");
   SetEnvDefault("MOCKTAIL_POST_CLIENT_SETTINGS", "0");
   SetEnvDefault("MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP", "1");
-  // Current Roblox Android builds drive app startup through NativeGLInterface's
-  // V2 app bridge path. The legacy NativeAppBridgeInterface entry point stays
-  // available by opt-in, but running it in parallel can block V2 init.
-  SetEnvDefault("MOCKTAIL_APP_BRIDGE_APP_START", "0");
+  // nativeAppBridgeAppStart runs Roblox's StartupController, which builds the
+  // experimentation protocol that writes ClientSettings/IxpSettings.json. It
+  // runs inline before V2 init; on its own thread it can block V2 init.
+  SetEnvDefault("MOCKTAIL_APP_BRIDGE_APP_START", "1");
   SetEnvDefault("MOCKTAIL_APP_BRIDGE_APP_START_THREAD", "0");
   SetEnvDefault("MOCKTAIL_START_LUA_APP_DM", "1");
   SetEnvDefault("MOCKTAIL_START_LUA_APP_DM_INLINE", "0");
@@ -975,11 +975,12 @@ std::uint64_t MonotonicNowNs() {
 constexpr std::size_t kPumpStallFrames = 32;
 
 // Labels one frame with the image it falls in. A Release build has no symbols
-// for the guest, so `backtrace_symbols` alone yields little more than
-// "main+0x50cf" and the wait cannot be named. The address is still meaningful,
-// and the mapping it falls in is what identifies a wait in practice: a frame in
-// the guest's own image says the engine is blocking, and one inside a system
-// library's read or connect says it is the network.
+// for the guest, and a guest frame has no symbol name at all, so the bare
+// address is little more than "main+0x50cf" and the wait cannot be named from
+// it. The address is still meaningful, and the mapping it falls in is what
+// identifies a wait in practice: a frame in the guest's own image says the
+// engine is blocking, and one inside a system library's read or connect says it
+// is the network.
 std::string DescribeFrame(void* address, const char* symbol) {
   const mocktail::runtime::AddressRegion region =
       mocktail::runtime::AddressRegion::For(address);
@@ -1002,6 +1003,33 @@ std::string DescribeFrame(void* address, const char* symbol) {
   return described;
 }
 
+// Captures the call stack through libgcc's unwinder rather than execinfo's
+// backtrace, so a stall report needs neither libexecinfo on musl nor a glibc
+// backtrace. Symbol names come from dladdr below, which is already linked for
+// the RTLD_DEFAULT lookups elsewhere in this file.
+struct PumpStallCapture {
+  void** frames;
+  std::size_t capacity;
+  std::size_t filled;
+};
+
+_Unwind_Reason_Code CapturePumpStallFrame(_Unwind_Context* context,
+                                          void* argument) {
+  auto& capture = *static_cast<PumpStallCapture*>(argument);
+  if (capture.filled >= capture.capacity) {
+    return _URC_END_OF_STACK;
+  }
+  // The return address, not the address itself, so it maps to the caller that
+  // made the call rather than to the instruction after the call.
+  const _Unwind_Word ip = _Unwind_GetIP(context);
+  if (ip == 0) {
+    return _URC_END_OF_STACK;
+  }
+  capture.frames[capture.filled++] =
+      reinterpret_cast<void*>(static_cast<std::uintptr_t>(ip));
+  return _URC_NO_REASON;
+}
+
 void ReportEnginePumpStall(std::uint64_t start_ns, std::uint64_t end_ns) {
   const std::uint64_t duration_ns = end_ns - start_ns;
   mocktail::runtime::PumpStallRecorder& recorder =
@@ -1010,24 +1038,21 @@ void ReportEnginePumpStall(std::uint64_t start_ns, std::uint64_t end_ns) {
     return;
   }
   void* frames[kPumpStallFrames];
-  const int count = ::backtrace(frames, static_cast<int>(kPumpStallFrames));
-  if (count <= 1) {
-    return;
-  }
-  // Starts at the top of the unwind and includes the capture helper, so the
-  // pump's own frames can be found and trimmed rather than assumed.
-  char** symbols =
-      ::backtrace_symbols(frames, count);
-  if (symbols == nullptr) {
+  PumpStallCapture capture{frames, kPumpStallFrames, 0};
+  _Unwind_Backtrace(CapturePumpStallFrame, &capture);
+  if (capture.filled <= 1) {
     return;
   }
   mocktail::runtime::PumpStallFrames described;
-  described.reserve(static_cast<std::size_t>(count));
-  for (int index = 0; index < count; ++index) {
-    described.emplace_back(DescribeFrame(
-        frames[index], index < count ? symbols[index] : nullptr));
+  described.reserve(capture.filled);
+  for (std::size_t index = 0; index < capture.filled; ++index) {
+    // Starts at the top of the unwind and includes the capture helper, so the
+    // pump's own frames can be found and trimmed rather than assumed.
+    Dl_info info{};
+    const char* symbol =
+        ::dladdr(frames[index], &info) != 0 ? info.dli_sname : nullptr;
+    described.emplace_back(DescribeFrame(frames[index], symbol));
   }
-  free(symbols);
 
   mocktail::runtime::PumpStallFrames identifying;
   std::string driven_from;

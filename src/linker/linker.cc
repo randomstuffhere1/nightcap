@@ -135,6 +135,7 @@ bool IsBionicLibcOnlySymbol(std::string_view symbol) {
   return symbol == "__cmsg_nxthdr" || symbol == "__cxa_thread_atexit_impl" ||
          symbol == "__readlink_chk" || symbol == "__register_atfork" ||
          symbol == "arc4random_buf" || symbol == "geteuid" ||
+         (!mocktail::compat::kHostAtoiMatchesBionic && symbol == "atoi") ||
          symbol == "getuid" || symbol == "lseek64" ||
          symbol == "mallinfo" || symbol == "pread64" || symbol == "pwrite64" ||
          symbol == "sigaction" || symbol == "strerror_r" ||
@@ -384,6 +385,10 @@ void RegisterBionicHostLibcRuntimeForLibc() {
   RegisterSyntheticSymbol("libc.so", "arc4random_buf",
                           reinterpret_cast<void*>(
                               mocktail_bionic_arc4random_buf));
+  if (!mocktail::compat::kHostAtoiMatchesBionic) {
+    RegisterSyntheticSymbol("libc.so", "atoi",
+                            reinterpret_cast<void*>(mocktail_bionic_atoi));
+  }
   RegisterSyntheticSymbol("libc.so", "mallinfo",
                           reinterpret_cast<void*>(mocktail_bionic_mallinfo));
   RegisterSyntheticSymbol("libc.so", "sysinfo",

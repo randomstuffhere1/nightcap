@@ -150,6 +150,15 @@ Result ParseInHostCLocale(Parser parser) noexcept {
   return result;
 }
 
+// Highest errno in Bionic's message table (EHWPOISON). Numbers 41 and 58 are
+// unassigned in the generic Linux errno list, so Bionic has no text for them.
+constexpr int kBionicMaxErrno = 133;
+
+constexpr bool HasBionicErrnoMessage(int error_number) noexcept {
+  return error_number >= 0 && error_number <= kBionicMaxErrno &&
+         error_number != 41 && error_number != 58;
+}
+
 template <typename Result>
 const char* HostStrErrorResult(Result result, char* buffer) noexcept {
   if constexpr (std::is_integral_v<Result>) {
@@ -318,10 +327,16 @@ int BionicStrError(int error_number, char* buffer,
     return -1;
   }
 
+  // Bionic's table ends at EHWPOISON. Unknown numbers get the same text on
+  // every host instead of whatever the host libc prints (musl has no
+  // "Unknown error N" form).
   std::array<char, 256> host_buffer{};
-  auto host_result =
-      ::strerror_r(error_number, host_buffer.data(), host_buffer.size());
-  const char* message = HostStrErrorResult(host_result, host_buffer.data());
+  const char* message = nullptr;
+  if (HasBionicErrnoMessage(error_number)) {
+    auto host_result =
+        ::strerror_r(error_number, host_buffer.data(), host_buffer.size());
+    message = HostStrErrorResult(host_result, host_buffer.data());
+  }
 
   std::array<char, 64> unknown_buffer{};
   if (message == nullptr) {
@@ -371,6 +386,10 @@ extern "C" int mocktail_bionic_cxa_thread_atexit_impl(
 
 extern "C" void mocktail_bionic_arc4random_buf(void* buffer, size_t size) {
   mocktail::compat::BionicArc4RandomBuffer(buffer, size);
+}
+
+extern "C" int mocktail_bionic_atoi(const char* text) {
+  return static_cast<int>(std::strtol(text, nullptr, 10));
 }
 
 extern "C" mocktail::compat::BionicMallinfoSnapshot mocktail_bionic_mallinfo() {
