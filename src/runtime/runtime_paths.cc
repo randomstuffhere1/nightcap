@@ -350,6 +350,14 @@ RuntimePaths RuntimePaths::FromEnvironment(
   paths.cookie_file_ = paths.auth_root_ / "roblox.cookie";
   paths.use_real_sober_paths_ =
       LegacyEnabled(environment, "MOCKTAIL_USE_REAL_SOBER_PATHS");
+  if (environment.HasNonEmpty("MOCKTAIL_ASSET_OVERLAY_DIR")) {
+    paths.asset_overlay_dir_ =
+        environment.GetOr("MOCKTAIL_ASSET_OVERLAY_DIR", "");
+  } else {
+    paths.asset_overlay_dir_ = paths.DefaultSoberAwarePath(
+        paths.sober_data_root_ / "asset_overlay",
+        paths.data_root_ / "asset_overlay");
+  }
   return paths;
 }
 
@@ -595,7 +603,7 @@ bool ExportRuntimePathEnvironment(const RuntimePaths& paths,
   for (const std::filesystem::path& directory :
        {paths.android_runtime_root(), paths.android_cache_root(),
         paths.vulkan_shader_cache_file().parent_path(),
-        paths.pipeline_cache_dir()}) {
+        paths.pipeline_cache_dir(), paths.asset_overlay_dir()}) {
     if (!RuntimePaths::EnsureDirectory(directory, &filesystem_error)) {
       if (error != nullptr) {
         *error = "cannot create resolved runtime path: " + directory.string();
@@ -613,7 +621,9 @@ bool ExportRuntimePathEnvironment(const RuntimePaths& paths,
          SetEnvironmentDefault("MOCKTAIL_PIPELINE_CACHE_DIR",
                                paths.pipeline_cache_dir(), error) &&
          SetEnvironmentDefault("MOCKTAIL_TEXTURE_OVERRIDE_DIR",
-                               paths.config_root() / "textures", error);
+                               paths.config_root() / "textures", error) &&
+         SetEnvironmentDefault("MOCKTAIL_ASSET_OVERLAY_DIR",
+                               paths.asset_overlay_dir(), error);
 }
 
 bool PrepareManagedPayloadWorkingDirectory(const RuntimePaths& paths,

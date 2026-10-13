@@ -43,6 +43,7 @@ struct AAsset {
   std::string apk_entry;
   std::vector<unsigned char> data;
   bool transcoded = false;
+  bool is_overlay = false;
   size_t offset = 0;
 };
 struct AAssetDir {};
@@ -115,25 +116,46 @@ bool FileExists(const std::string& path) {
   return !path.empty() && ::stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
+struct ResolvedAsset {
+  std::string path;
+  bool is_overlay = false;
+};
+
 struct AssetLookupCache {
   std::mutex mutex;
-  std::unordered_map<std::string, std::string> resolved_paths;
+  std::unordered_map<std::string, ResolvedAsset> resolved_paths;
 };
 
 AssetLookupCache g_asset_lookup_cache;
 constexpr std::size_t kMaxCachedAssetPaths = 1024 * 5;
 
 std::string AssetCacheKey(const std::string& root,
+                          const std::string& overlay,
                           const std::string& requested) {
   std::string key;
-  key.reserve(root.size() + 1 + requested.size());
+  key.reserve(root.size() + 1 + overlay.size() + 1 + requested.size());
   key.append(root);
+  key.push_back('\0');
+  key.append(overlay);
   key.push_back('\0');
   key.append(requested);
   return key;
 }
 
-std::string ResolveAssetPath(const char* filename) {
+// Stores a resolved asset, dropping one entry first when the cache is full.
+ResolvedAsset CacheResolvedAsset(const std::string& cache_key,
+                                 ResolvedAsset resolved) {
+  std::scoped_lock lock(g_asset_lookup_cache.mutex);
+  auto& cached = g_asset_lookup_cache.resolved_paths;
+  if (cached.size() >= kMaxCachedAssetPaths &&
+      cached.find(cache_key) == cached.end()) {
+    cached.erase(cached.begin());
+  }
+  cached.insert_or_assign(cache_key, resolved);
+  return resolved;
+}
+
+ResolvedAsset ResolveAssetPath(const char* filename) {
   if (filename == nullptr) {
     return {};
   }
@@ -145,13 +167,16 @@ std::string ResolveAssetPath(const char* filename) {
   const std::string requested(requested_view);
   const char* root_env = GetEnvNonEmpty("MOCKTAIL_ASSET_ROOT");
   const std::string root = root_env != nullptr ? root_env : "rbx_bin/assets";
-  const std::string cache_key = AssetCacheKey(root, requested);
+  const char* overlay_env = GetEnvNonEmpty("MOCKTAIL_ASSET_OVERLAY_DIR");
+  const std::string overlay =
+      overlay_env != nullptr ? overlay_env : "rbx_bin/asset_overlay";
+  const std::string cache_key = AssetCacheKey(root, overlay, requested);
 
   {
     std::scoped_lock lock(g_asset_lookup_cache.mutex);
     auto it = g_asset_lookup_cache.resolved_paths.find(cache_key);
     if (it != g_asset_lookup_cache.resolved_paths.end()) {
-      if (FileExists(it->second)) {
+      if (FileExists(it->second.path)) {
         return it->second;
       }
       g_asset_lookup_cache.resolved_paths.erase(it);
@@ -160,25 +185,33 @@ std::string ResolveAssetPath(const char* filename) {
 
   const std::string stripped(StripAndroidAssetPrefix(requested_view));
 
-  const std::vector<std::string> candidates = {
+  if (!overlay.empty()) {
+    const std::vector<std::string> overlay_candidates = {
+        overlay + "/" + requested,
+        overlay + "/" + stripped,
+        overlay + "/content/" + requested,
+        overlay + "/content/" + stripped,
+        overlay + "/ExtraContent/" + requested,
+        overlay + "/ExtraContent/" + stripped,
+    };
+    for (const std::string& candidate : overlay_candidates) {
+      if (FileExists(candidate)) {
+        return CacheResolvedAsset(cache_key, {candidate, true});
+      }
+    }
+  }
+
+  const std::vector<std::string> root_candidates = {
       root + "/" + requested,
       root + "/" + stripped,
+      root + "/content/" + requested,
+      root + "/content/" + stripped,
       root + "/ExtraContent/" + requested,
       root + "/ExtraContent/" + stripped,
   };
-  for (const std::string& candidate : candidates) {
+  for (const std::string& candidate : root_candidates) {
     if (FileExists(candidate)) {
-      std::scoped_lock lock(g_asset_lookup_cache.mutex);
-      if (g_asset_lookup_cache.resolved_paths.size() >=
-              kMaxCachedAssetPaths &&
-          g_asset_lookup_cache.resolved_paths.find(cache_key) ==
-              g_asset_lookup_cache.resolved_paths.end()) {
-        g_asset_lookup_cache.resolved_paths.erase(
-            g_asset_lookup_cache.resolved_paths.begin());
-      }
-      g_asset_lookup_cache.resolved_paths.insert_or_assign(cache_key,
-                                                           candidate);
-      return candidate;
+      return CacheResolvedAsset(cache_key, {candidate, false});
     }
   }
 
@@ -330,24 +363,31 @@ AAsset* AAssetManager_open(AAssetManager* mgr, const char* filename,
   if (mgr == nullptr) {
     return nullptr;
   }
-  std::string path = ResolveAssetPath(filename);
-  if (path.empty()) {
+  ResolvedAsset resolved = ResolveAssetPath(filename);
+  if (resolved.path.empty()) {
+    if (AssetTraceEnabled()) {
+      std::fprintf(stderr, "[asset] miss %s\n",
+                   filename != nullptr ? filename : "(null)");
+    }
     return nullptr;
   }
   auto* asset = new AAsset;
-  asset->path = path;
+  asset->path = resolved.path;
   asset->apk_entry = ApkEntryName(filename);
-  if (!LoadFile(path, &asset->data)) {
+  asset->is_overlay = resolved.is_overlay;
+  if (!LoadFile(resolved.path, &asset->data)) {
     delete asset;
     return nullptr;
   }
   if (MocktailUsesDirectVulkan()) {
     asset->transcoded =
-        libc_shim::TranscodeEtc1SkyTextureForVulkan(path.c_str(), &asset->data);
+        libc_shim::TranscodeEtc1SkyTextureForVulkan(resolved.path.c_str(),
+                                                    &asset->data);
   }
   if (AssetTraceEnabled()) {
-    std::fprintf(stderr, "[asset] open %s -> %s (%zu bytes)\n", filename,
-                 path.c_str(), asset->data.size());
+    std::fprintf(stderr, "[asset] open %s -> %s (%zu bytes%s)\n", filename,
+                 resolved.path.c_str(), asset->data.size(),
+                 resolved.is_overlay ? " [overlay]" : "");
   }
   return asset;
 }
@@ -464,7 +504,8 @@ int AAsset_openFileDescriptor(AAsset* asset, off_t* outStart,
   int fd = -1;
   off_t start = 0;
   off_t descriptor_length = static_cast<off_t>(asset->data.size());
-  if (!OpenStoredApkEntryDescriptor(asset->apk_entry, &fd, &start,
+  if (asset->is_overlay ||
+      !OpenStoredApkEntryDescriptor(asset->apk_entry, &fd, &start,
                                     &descriptor_length)) {
     fd = ::open(asset->path.c_str(), O_RDONLY | O_CLOEXEC);
   }

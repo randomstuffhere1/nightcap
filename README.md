@@ -33,6 +33,10 @@ side by side.
   can replace any texture with your own PNG in `~/.config/mocktail/textures`.
   A ready-made crosshair is in [`textures/`](textures/README.md). Set
   `MOCKTAIL_SMALL_TEXTURE_UPSCALE=1` to turn the upscale off.
+- **Replace bundled files.** Put your own cursors, fonts or sky textures in
+  `~/.local/share/mocktail/asset_overlay`, under the same path Roblox uses,
+  and Nightcap loads them instead. The layout matches Sober's `asset_overlay`
+  folder. See [`textures/`](textures/README.md) for which folder to use.
 - **ETC2 textures on any GPU.** Games that use compressed mobile textures now
   render correctly on desktop GPUs, without stutter.
 - **A pipeline cache that is already warm.** The client keeps its own
@@ -84,8 +88,17 @@ sudo pacman -U nightcap-<version>-1-x86_64.pkg.tar.zst
 ```
 
 They install `/usr/bin/mocktail`, so they conflict with upstream's `mocktail`
-package. Nightcap is not in any distribution repository or the AUR; the
-recipes under `packaging/aur` are kept for local builds only.
+package.
+
+On Arch Linux, [`nightcap-git`](https://aur.archlinux.org/packages/nightcap-git)
+is on the AUR. It builds the current `main` branch and is maintained by
+[@dim-ghub](https://github.com/dim-ghub):
+
+```bash
+yay -S nightcap-git
+```
+
+Nightcap is in no other distribution repository.
 
 Or build and install from source using the steps under
 [Building](#building).
