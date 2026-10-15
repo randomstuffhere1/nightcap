@@ -397,6 +397,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/ui_config_overrides.cc
   src/runtime/runtime_paths.cc
   src/runtime/session_log.cc
+  src/runtime/server_location.cc
   src/runtime/single_instance_lock.cc
   src/runtime/startup_state_machine.cc
   src/runtime/supported_launch_policy.cc
@@ -433,7 +434,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
   )
 endif()
 target_link_libraries(mocktail_runtime PUBLIC Threads::Threads)
+# The runtime spawns the dialog helper's executable for transient toasts; it
+# never links GTK into the process that loads Android libraries.
 target_link_libraries(mocktail_runtime PRIVATE
+  Mocktail::FailureDialog
   OpenSSL::Crypto
   CURL::libcurl
   nlohmann_json::nlohmann_json

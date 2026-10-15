@@ -246,5 +246,86 @@ TEST(BuildProfileTest, ParsesOnlyKnownFmodVtableLayouts) {
   unlink(path);
 }
 
+TEST(BuildProfileTest, LeavesGraphicsFixupsStockUnlessAProfileOptsIn) {
+  // Every shipped profile is stock today: the fixups are opt-in, so a payload
+  // nobody measured keeps the behavior this runtime has always had.
+  const ProfileLookupResult result = FindBuildProfile(
+      kManifestPath, "5f0704edd9064f566ee3d6df2bd2fabbcc709f03");
+
+  ASSERT_TRUE(result) << result.error;
+  ASSERT_TRUE(result.profile.has_value());
+  EXPECT_EQ(result.profile->graphics_fixups.swapchain_fixup, 0);
+  EXPECT_FALSE(result.profile->graphics_fixups.shader_fixups);
+  EXPECT_FALSE(result.profile->graphics_fixups.use_new_text_renderer);
+}
+
+TEST(BuildProfileTest, ReadsOnlyValidGraphicsFixupDeclarations) {
+  nlohmann::json manifest;
+  {
+    std::ifstream input(kManifestPath);
+    input >> manifest;
+  }
+  const auto source = std::find_if(
+      manifest["profiles"].begin(), manifest["profiles"].end(),
+      [](const nlohmann::json& profile) {
+        return profile.value("elf_build_id", "") ==
+               "d0cb1fa0deb3d9161b4cd77530cbcd2e50de3a21";
+      });
+  ASSERT_NE(source, manifest["profiles"].end())
+      << "manifest has no 2.725.1142 profile to test";
+  nlohmann::json document = manifest;
+  document["profiles"] = nlohmann::json::array({*source});
+  auto& entry = document["profiles"][0];
+  char path[] = "/tmp/mocktail-graphics-fixups-XXXXXX";
+  const int descriptor = mkstemp(path);
+  ASSERT_GE(descriptor, 0);
+  close(descriptor);
+  const auto read = [&] {
+    {
+      std::ofstream output(path);
+      output << document;
+    }
+    return FindBuildProfile(path, entry["elf_build_id"].get<std::string>());
+  };
+
+  auto result = read();
+  ASSERT_TRUE(result && result.profile);
+  EXPECT_EQ(result.profile->graphics_fixups.swapchain_fixup, 0);
+
+  entry["swapchain_fixup"] = 3;
+  entry["shader_fixups"] = true;
+  entry["use_new_text_renderer"] = true;
+  result = read();
+  ASSERT_TRUE(result && result.profile);
+  EXPECT_EQ(result.profile->graphics_fixups.swapchain_fixup, 3);
+  EXPECT_TRUE(result.profile->graphics_fixups.shader_fixups);
+  EXPECT_TRUE(result.profile->graphics_fixups.use_new_text_renderer);
+
+  // A null is how a manifest says "stock" without dropping the key.
+  entry["swapchain_fixup"] = nullptr;
+  entry["shader_fixups"] = nullptr;
+  result = read();
+  ASSERT_TRUE(result && result.profile);
+  EXPECT_EQ(result.profile->graphics_fixups.swapchain_fixup, 0);
+  EXPECT_FALSE(result.profile->graphics_fixups.shader_fixups);
+
+  for (const nlohmann::json& invalid :
+       {nlohmann::json("1"), nlohmann::json(true), nlohmann::json(4),
+        nlohmann::json(-1)}) {
+    entry["swapchain_fixup"] = invalid;
+    EXPECT_FALSE(read()) << invalid.dump();
+  }
+  for (const nlohmann::json& invalid :
+       {nlohmann::json("true"), nlohmann::json(1), nlohmann::json(0)}) {
+    entry["swapchain_fixup"] = 0;
+    entry["shader_fixups"] = invalid;
+    EXPECT_FALSE(read()) << invalid.dump();
+  }
+  entry["shader_fixups"] = false;
+  entry["use_new_text_renderer"] = "no";
+  EXPECT_FALSE(read());
+  unlink(path);
+}
+
 }  // namespace
 }  // namespace mocktail::compat

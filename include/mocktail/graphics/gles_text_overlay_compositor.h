@@ -13,6 +13,10 @@ struct GlesTextOverlaySource {
   bool (*may_present)() = nullptr;
   bool (*query)(MocktailTextOverlayFrameInfo *) = nullptr;
   bool (*copy)(std::uint64_t, void *, std::size_t) = nullptr;
+  // The host's own layer, such as a notice about which region a session's
+  // server is in. Optional: without it only the text surface is composited.
+  bool (*host_query)(MocktailHostOverlayFrameInfo *) = nullptr;
+  bool (*host_copy)(std::uint64_t, void *, std::size_t) = nullptr;
 };
 
 // Composites the host text editor before SDL swaps the game's GLES backbuffer.

@@ -131,6 +131,11 @@ input:
   raw_mouse: false
 
 integrations:
+  # Boolean (default: false): after you join, look up which region the game
+  # server is in and print it in the session log. Roblox's own server info is
+  # asked first; otherwise the server's address goes to ipinfo.io. Only the
+  # server's address is sent, never yours.
+  server_location_indicator: false
   fleasion:
     # Boolean (default: false): trust Fleasion's CA without editing Roblox files.
     enabled: false
@@ -188,6 +193,9 @@ window:
   # Boolean (default: false): render at physical display-pixel density instead
   # of the logical desktop resolution. Enable only for sharper high-DPI output.
   high_dpi: false
+  # Boolean (default: false): close Nightcap when you leave an experience,
+  # instead of staying open on the Roblox home screen.
+  close_on_leave: false
 
 network:
   # Boolean (default: false): follow the host HTTP/SOCKS5 proxy and

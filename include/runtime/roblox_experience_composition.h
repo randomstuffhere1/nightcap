@@ -156,6 +156,17 @@ class RobloxExperienceComposition final {
   bool subscribed() const;
   GameSessionSnapshot Snapshot() const;
 
+  // Reports, and clears, that the guest returned to the Roblox home screen
+  // while a game was running and the host had not asked for it: the player left
+  // the experience themselves, rather than a queued join switching out of it.
+  // Main loop only, and only after DrainLaunchRequests() has consumed the
+  // observation that set it.
+  bool TakePlayerLeftExperience();
+
+  // The server ID of the running session, or empty when no session is running
+  // or Roblox chose the server itself. Main loop only.
+  std::string ActiveGameInstanceId() const;
+
  private:
   friend class RobloxExperienceCompositionWebSurfaceTest;
   struct GlobalObjects;
@@ -349,6 +360,7 @@ class RobloxExperienceComposition final {
   bool playing_presence_published_ = false;
   bool lua_app_return_pending_ = false;
   bool controlled_switch_waiting_for_return_ = false;
+  bool player_left_experience_ = false;
   bool lua_app_surface_recreation_pending_ = false;
   bool late_surface_tracking_ = false;
   GameSurface late_surface_snapshot_;

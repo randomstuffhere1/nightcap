@@ -32,6 +32,23 @@ std::mutex g_active_overlay_mutex;
 RobloxTextSurfaceOverlay* g_active_overlay = nullptr;
 std::atomic<bool> g_overlay_may_present{false};
 
+// A payload-scoped fixup can hand text drawing back to the client, published by
+// the Build-ID-scoped compatibility profile as MOCKTAIL_NEW_TEXT_RENDERER. The
+// overlay still tracks the guest's text state so nothing observes a gap, but it
+// never presents, which leaves the drawing to the client's own text renderer.
+// Read once: the overlay is driven from guest and compositor threads.
+bool ClientDrawsItsOwnText() {
+  static const bool client_draws = [] {
+    const char* value = std::getenv("MOCKTAIL_NEW_TEXT_RENDERER");
+    if (value == nullptr || value[0] == '\0') {
+      return false;
+    }
+    return std::strcmp(value, "0") != 0 && std::strcmp(value, "off") != 0 &&
+           std::strcmp(value, "false") != 0;
+  }();
+  return client_draws;
+}
+
 void SecureClear(std::string* value) {
   if (value == nullptr) {
     return;
@@ -289,6 +306,11 @@ Status RobloxTextSurfaceOverlay::Initialize(
   initialized_ = true;
   g_active_overlay = this;
   g_overlay_may_present.store(false, std::memory_order_release);
+  if (ClientDrawsItsOwnText()) {
+    std::fprintf(stderr,
+                 "  [input] text overlay unarmed; the client's own text "
+                 "renderer draws text this session\n");
+  }
   return Status::Ok();
 }
 
@@ -356,7 +378,8 @@ void RobloxTextSurfaceOverlay::ApplyUpdate(
     ++state_revision_;
   }
   const RobloxTextOverlayPresentation& presentation = state_.presentation();
-  const bool drawable = presentation.visible && presentation.geometry.valid();
+  const bool drawable = presentation.visible && presentation.geometry.valid() &&
+                        !ClientDrawsItsOwnText();
   if (!drawable) {
     ClearFrameLocked();
   }

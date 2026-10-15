@@ -28,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "compat/build_profile.h"
 #include "compat/elf_build_id.h"
 #include "compat/fmod_output_device_contract.h"
 #include "compat/guest_abi.h"
@@ -1200,6 +1201,10 @@ struct FmodRuntimeAnchors {
 struct RuntimeCompatibilityAnchors {
   std::optional<std::uint64_t> fullscreen_setter;
   std::optional<FmodRuntimeAnchors> fmod;
+  // Graphics fixups are claims about one payload rather than something the
+  // binary can be asked for, so a derived profile carries the reference's
+  // values across unchanged instead of re-deriving them.
+  Json graphics_fixups = Json::object();
 };
 
 std::optional<RuntimeCompatibilityAnchors> LoadRuntimeCompatibilityAnchors(
@@ -1232,6 +1237,40 @@ std::optional<RuntimeCompatibilityAnchors> LoadRuntimeCompatibilityAnchors(
           return std::nullopt;
         }
         result.fullscreen_setter = *value;
+      }
+      // Two reference manifests that disagree about a fixup leave the derived
+      // profile undefined, so that is an error rather than a last-one-wins.
+      const auto carry_fixup = [&](std::string_view name, const Json& value) {
+        const auto recorded = result.graphics_fixups.find(name);
+        if (recorded != result.graphics_fixups.end() && *recorded != value) {
+          *error = "reference compatibility manifests disagree on " +
+                   std::string(name);
+          return false;
+        }
+        result.graphics_fixups[name] = value;
+        return true;
+      };
+      for (const char* name : {"shader_fixups", "use_new_text_renderer"}) {
+        if (!profile.contains(name)) continue;
+        if (!profile[name].is_boolean()) {
+          *error = "reference graphics fixup " + std::string(name) +
+                   " has an invalid type";
+          return std::nullopt;
+        }
+        if (!carry_fixup(name, profile[name])) return std::nullopt;
+      }
+      if (profile.contains("swapchain_fixup")) {
+        if (!profile["swapchain_fixup"].is_number_integer() ||
+            profile["swapchain_fixup"].get<int>() < 0 ||
+            profile["swapchain_fixup"].get<int>() >
+                compat::kMaximumSwapchainFixupLevel) {
+          *error =
+              "reference graphics fixup swapchain_fixup has an invalid level";
+          return std::nullopt;
+        }
+        if (!carry_fixup("swapchain_fixup", profile["swapchain_fixup"])) {
+          return std::nullopt;
+        }
       }
       if (!profile.contains("fmod_output_device_bridge")) continue;
       const Json& bridge = profile["fmod_output_device_bridge"];
@@ -1363,6 +1402,9 @@ std::optional<Json> DeriveRuntimeCompatibility(
     const Disassembler& disassembler,
     const RuntimeCompatibilityAnchors& source, std::string* error) {
   Json result = Json::object();
+  for (const auto& [name, value] : source.graphics_fixups.items()) {
+    result[name] = value;
+  }
   if (source.fullscreen_setter.has_value()) {
     if (!HasFullscreenSetterContract(reference, *source.fullscreen_setter)) {
       *error = "reference fullscreen setter contract changed";

@@ -75,7 +75,17 @@ TEST_F(CompatibilityCatalogTest, RejectsInvalidPolicyTypesWithoutTerminating) {
       {"default_allowed", nullptr},
       {"allow_legacy_binary_patches", "false"},
       {"allow_legacy_binary_patches", 0},
-      {"allow_legacy_binary_patches", nullptr}};
+      {"allow_legacy_binary_patches", nullptr},
+      {"swapchain_fixup", "1"},
+      {"swapchain_fixup", true},
+      {"swapchain_fixup", -1},
+      // A level above the highest this runtime implements is not clamped: a
+      // manifest must not describe a fixup that would silently not run.
+      {"swapchain_fixup", 4},
+      {"shader_fixups", "true"},
+      {"shader_fixups", 1},
+      {"use_new_text_renderer", "no"},
+      {"use_new_text_renderer", 0}};
   for (const auto& [name, value] : invalid) {
     SCOPED_TRACE(name);
     SCOPED_TRACE(value.dump());
@@ -85,6 +95,29 @@ TEST_F(CompatibilityCatalogTest, RejectsInvalidPolicyTypesWithoutTerminating) {
     EXPECT_FALSE(catalog);
     EXPECT_FALSE(catalog.error.empty());
   }
+}
+
+TEST_F(CompatibilityCatalogTest, ReadsGraphicsFixupsOnlyWhenAProfileDeclaresThem) {
+  auto declared = ValidProfile();
+  declared["swapchain_fixup"] = 2;
+  declared["shader_fixups"] = true;
+  const auto opted_in =
+      Load({{"schema_version", 1}, {"profiles", {declared}}});
+  ASSERT_TRUE(opted_in) << opted_in.error;
+  ASSERT_EQ(opted_in.profiles.size(), 1u);
+  EXPECT_EQ(opted_in.profiles.front().graphics_fixups.swapchain_fixup, 2);
+  EXPECT_TRUE(opted_in.profiles.front().graphics_fixups.shader_fixups);
+  EXPECT_FALSE(
+      opted_in.profiles.front().graphics_fixups.use_new_text_renderer);
+
+  // Omitted means stock: a payload nobody measured keeps today's behavior.
+  const auto stock = Load({{"schema_version", 1}, {"profiles", {ValidProfile()}}});
+  ASSERT_TRUE(stock) << stock.error;
+  ASSERT_EQ(stock.profiles.size(), 1u);
+  EXPECT_EQ(stock.profiles.front().graphics_fixups.swapchain_fixup, 0);
+  EXPECT_FALSE(stock.profiles.front().graphics_fixups.shader_fixups);
+  EXPECT_FALSE(
+      stock.profiles.front().graphics_fixups.use_new_text_renderer);
 }
 
 TEST_F(CompatibilityCatalogTest, MissingPolicyFieldsCannotAuthorizeAPayload) {

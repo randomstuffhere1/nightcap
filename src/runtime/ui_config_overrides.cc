@@ -201,6 +201,11 @@ std::vector<UiConfigField> UiConfigFields() {
          "Include the experience's name in the Discord status.");
   toggle("integrations.discord_rpc.show_elapsed_time", "false",
          "Include how long you have been playing.");
+  toggle("integrations.server_location_indicator", "false",
+         "Look up which region the game server is in after you join and show it "
+         "in a brief toast. Roblox's own server info is asked first; otherwise "
+         "the server's address goes to ipinfo.io. Only the server's address is "
+         "sent, never yours.");
   toggle("integrations.discord_rpc.join.enabled", "false",
          "Show a Join button in the Discord presence.");
   toggle("integrations.discord_rpc.join.public_servers_only", "true",
@@ -214,6 +219,9 @@ std::vector<UiConfigField> UiConfigFields() {
          "Use the desktop's proxy configuration.");
   toggle("runtime.headless", "false",
          "Start with no window. Useful for testing, not for playing.");
+  toggle("window.close_on_leave", "false",
+         "Close Nightcap when you leave an experience, instead of staying open "
+         "on the Roblox home screen.");
 
   return fields;
 }

@@ -189,6 +189,7 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
        "window.height",
        "window.title",
        "window.high_dpi",
+       "window.close_on_leave",
        "input.touch_enabled",
        "input.raw_mouse",
       "compatibility.desktop_playability",
@@ -200,6 +201,7 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
       "integrations.fleasion.proxy_mode",
       "integrations.fleasion.proxy_port",
       "integrations.fleasion.ca_certificate",
+      "integrations.server_location_indicator",
       "integrations.discord_rpc.enabled",
       "integrations.discord_rpc.show_place_name",
       "integrations.discord_rpc.show_elapsed_time",
@@ -482,6 +484,15 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     }
     (*environment)["MOCKTAIL_WIN_HIGH_DPI"] = parsed ? "1" : "0";
   }
+  if (const auto close_on_leave = value("window.close_on_leave");
+      close_on_leave.has_value()) {
+    bool parsed = false;
+    if (!ParseBoolean(*close_on_leave, &parsed)) {
+      *error = "window.close_on_leave must be true or false";
+      return false;
+    }
+    (*environment)["MOCKTAIL_WIN_CLOSE_ON_LEAVE"] = parsed ? "1" : "0";
+  }
   if (const auto touch = value("input.touch_enabled"); touch.has_value()) {
     bool parsed = false;
     if (!ParseBoolean(*touch, &parsed)) {
@@ -561,6 +572,8 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
             "MOCKTAIL_DISCORD_RPC_JOIN_ENABLED"},
            {"integrations.discord_rpc.join.public_servers_only",
             "MOCKTAIL_DISCORD_RPC_PUBLIC_SERVERS_ONLY"},
+           {"integrations.server_location_indicator",
+            "MOCKTAIL_SERVER_LOCATION_INDICATOR"},
        }) {
     const std::optional<std::string> configured = value(key);
     if (!configured.has_value()) {
@@ -872,6 +885,10 @@ RuntimeConfigLoadResult LoadRuntimeConfig(
     result.error = "audio buffer size is invalid";
   } else if (!result.config.window().high_dpi_valid) {
     result.error = "window high-DPI policy is invalid";
+  } else if (!result.config.window().close_on_leave_valid) {
+    result.error = "window close-on-leave policy is invalid";
+  } else if (!result.config.server_location().enabled_valid) {
+    result.error = "server location indicator policy is invalid";
   } else if (result.config.vsync_mode() != "auto" &&
              result.config.vsync_mode() != "on" &&
              result.config.vsync_mode() != "off") {
@@ -989,6 +1006,8 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
       SetEnvironmentValue("MOCKTAIL_WIN_TITLE", config.window().title, error) &&
       SetEnvironmentValue("MOCKTAIL_WIN_HIGH_DPI",
                           config.window().high_dpi ? "1" : "0", error) &&
+      SetEnvironmentValue("MOCKTAIL_WIN_CLOSE_ON_LEAVE",
+                          config.window().close_on_leave ? "1" : "0", error) &&
       SetEnvironmentValue(
           "MOCKTAIL_TOUCH_MODE",
           config.input_capabilities().touch_enabled ? "on" : "off", error) &&
@@ -1038,6 +1057,8 @@ bool ExportRuntimeConfigEnvironment(const RuntimeConfig& config,
                           config.audio_input_device(), error) &&
       SetEnvironmentValue("MOCKTAIL_USE_SYSTEM_PROXY",
                           config.use_system_proxy() ? "1" : "0", error) &&
+      SetEnvironmentValue("MOCKTAIL_SERVER_LOCATION_INDICATOR",
+                          config.server_location().enabled ? "1" : "0", error) &&
       SetEnvironmentValue("MOCKTAIL_DISCORD_RPC_ENABLED",
                           config.discord_rpc().enabled ? "1" : "0", error) &&
       SetEnvironmentValue(

@@ -167,13 +167,14 @@ bool AuthService::RedactRejectedRoblosecurity(std::string_view cookie_header,
     return false;
   }
   redacted_header->clear();
-  if (rejected_value.empty()) {
-    return false;
-  }
   const ExtractedCookie effective = ExtractCookie(cookie_header);
   if (!effective.present || effective.value != rejected_value) {
     return false;
   }
+  // An empty value is still retirable: the comparison above proved the file
+  // still carries exactly the cookie that was rejected, and the segments below
+  // are identified by name. Refusing here used to strand a cookie file holding
+  // nothing but an empty `.ROBLOSECURITY`.
 
   redacted_header->assign(cookie_header);
   bool redacted = false;
@@ -221,6 +222,9 @@ AuthSession AuthService::ResolveSession(std::string_view cookie_header,
                                         bool allow_guest) {
   AuthSession session;
   const ExtractedCookie cookie = ExtractCookie(cookie_header);
+  // An empty value is deliberately invalid, not absent: a file that claims a
+  // session and carries nothing must not be read as a deliberate guest
+  // session. It is recovered by retiring the credential instead.
   if (!cookie.present) {
     if (allow_guest) {
       session.status = AuthSessionStatus::kGuest;

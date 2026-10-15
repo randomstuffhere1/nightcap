@@ -148,6 +148,42 @@ bool ParseOptionalFmodOutputDeviceBridge(
   return input_fields_present == 0 || input_fields_present == 4;
 }
 
+// The graphics fixups are optional at the top level of a profile, beside the
+// per-build RVAs: an absent key means stock behavior, and a present key must
+// carry the declared type. A swapchain level this runtime does not implement
+// is rejected rather than clamped, so a manifest can never claim a fixup that
+// silently did not happen.
+bool ParseOptionalGraphicsFixups(const Json& object,
+                                 GraphicsFixupProfile* fixups) {
+  if (fixups == nullptr) {
+    return false;
+  }
+  *fixups = GraphicsFixupProfile{};
+  const auto swapchain_fixup = object.find("swapchain_fixup");
+  if (swapchain_fixup != object.end() && !swapchain_fixup->is_null()) {
+    if (!swapchain_fixup->is_number_integer() ||
+        swapchain_fixup->get<int>() < 0 ||
+        swapchain_fixup->get<int>() > kMaximumSwapchainFixupLevel) {
+      return false;
+    }
+    fixups->swapchain_fixup = swapchain_fixup->get<int>();
+  }
+  for (const auto& [name, destination] :
+       {std::pair<const char*, bool*>{"shader_fixups",
+                                      &fixups->shader_fixups},
+        {"use_new_text_renderer", &fixups->use_new_text_renderer}}) {
+    const auto knob = object.find(name);
+    if (knob == object.end() || knob->is_null()) {
+      continue;
+    }
+    if (!knob->is_boolean()) {
+      return false;
+    }
+    *destination = knob->get<bool>();
+  }
+  return true;
+}
+
 }  // namespace
 
 std::string_view BuildStatusName(BuildStatus status) noexcept {
@@ -211,6 +247,7 @@ ProfileLookupResult FindBuildProfile(const std::string& manifest_path,
     const Json* reason = RequiredField(entry, "reason");
     std::optional<std::uintptr_t> fullscreen_setter_rva;
     std::optional<FmodOutputDeviceBridgeProfile> fmod_output_device_bridge;
+    GraphicsFixupProfile graphics_fixups;
     if (version_name == nullptr || !version_name->is_string() ||
         version_code == nullptr || !version_code->is_number_integer() ||
         profile_build_id == nullptr || !profile_build_id->is_string() ||
@@ -227,7 +264,8 @@ ProfileLookupResult FindBuildProfile(const std::string& manifest_path,
                           "user_game_settings_fullscreen_setter_rva",
                           &fullscreen_setter_rva) ||
         !ParseOptionalFmodOutputDeviceBridge(
-            entry, &fmod_output_device_bridge)) {
+            entry, &fmod_output_device_bridge) ||
+        !ParseOptionalGraphicsFixups(entry, &graphics_fixups)) {
       return Failure("compatibility profile has missing or invalid fields");
     }
 
@@ -278,6 +316,7 @@ ProfileLookupResult FindBuildProfile(const std::string& manifest_path,
         allow_host_constructor_replay->get<bool>(),
         fullscreen_setter_rva,
         fmod_output_device_bridge,
+        graphics_fixups,
         reason->get_ref<const std::string&>(),
     };
   }

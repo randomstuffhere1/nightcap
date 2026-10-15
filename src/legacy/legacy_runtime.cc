@@ -73,6 +73,7 @@
 #include "runtime/platform_cache_migration.h"
 #include "runtime/asset_overlay_names.h"
 #include "runtime/roblox_app_lifecycle.h"
+#include "runtime/server_location.h"
 #include "runtime/roblox_capability_resolver.h"
 #include "runtime/roblox_platform_web_symbols.h"
 #include "runtime/roblox_experience_composition.h"
@@ -4946,6 +4947,17 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       std::to_string(build_profile.version_code);
   SetEnvDefault("MOCKTAIL_ROBLOX_VERSION_CODE",
                 roblox_version_code.c_str());
+  // Payload-scoped graphics fixups. SetEnvDefault only fills a variable the
+  // user or config.yaml did not set, so an explicit experiment always wins over
+  // the profile the exact Build ID selected.
+  const std::string swapchain_fixup =
+      std::to_string(build_profile.graphics_fixups.swapchain_fixup);
+  SetEnvDefault("MOCKTAIL_SWAPCHAIN_FIXUP", swapchain_fixup.c_str());
+  SetEnvDefault("MOCKTAIL_SHADER_FIXUPS",
+                build_profile.graphics_fixups.shader_fixups ? "1" : "0");
+  SetEnvDefault("MOCKTAIL_NEW_TEXT_RENDERER",
+                build_profile.graphics_fixups.use_new_text_renderer ? "1"
+                                                                     : "0");
   const std::string default_user_agent =
       "Roblox/" + build_profile.version_name +
       " (Linux; Android 33; Mocktail)";
@@ -4963,7 +4975,16 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
             << (allow_host_abi_bridges ? "allowed" : "denied")
             << '\n';
   std::cout << "  [compat] Build-ID constructor replay: "
-            << (allow_host_constructor_replay ? "allowed" : "denied")
+            << (allow_host_constructor_replay ? "allowed" : "denied") << '\n';
+  std::cout << "  [compat] graphics fixups: swapchain="
+            << build_profile.graphics_fixups.swapchain_fixup
+            << " shader=" << (build_profile.graphics_fixups.shader_fixups
+                                  ? "on"
+                                  : "off")
+            << " text="
+            << (build_profile.graphics_fixups.use_new_text_renderer
+                    ? "client-renderer"
+                    : "host-overlay")
             << '\n'
             << std::flush;
   if (!build_profile.default_allowed && !options.allow_unverified_build) {
@@ -7292,6 +7313,11 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
 
   bool real_frame_presented = false;
   bool lifecycle_shutdown_completed = false;
+  // Set when window.close_on_leave asked for the exit, which is a deliberate
+  // exit rather than the runtime falling over before it drew anything.
+  bool closed_because_the_player_left = false;
+  mocktail::runtime::ServerLocationResolver server_location;
+  bool server_location_requested = false;
   bool game_surface_events_completed = true;
   bool input_shutdown_completed = window_input_runtime == nullptr;
   bool resize_readiness_completed = true;
@@ -7413,6 +7439,40 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
           game_surface_events_completed = false;
           break;
         }
+        // A queued join switching out of an experience is not the player
+        // leaving, so only a leave the host did not ask for closes the window.
+        // The observation is always consumed, so it cannot stay set for a
+        // setting that is not watching.
+        const bool player_left_experience =
+            experience_composition->TakePlayerLeftExperience();
+        if (player_left_experience &&
+            runtime_config.window().close_on_leave) {
+          closed_because_the_player_left = true;
+          std::fprintf(stderr,
+                       "  [main] the player left the experience; closing "
+                       "because window.close_on_leave is on\n");
+          mocktail::window::RequestQuit();
+        }
+        // One lookup per session, once the game is actually running. The
+        // resolver runs on its own worker, so this never delays the loop.
+        // One lookup per session, watched from the moment the client is on screen.
+// The game session coordinator is not the signal here: it only advances when
+// the host launches an experience itself, and joining from the client's own
+// front page or from a place id never touches it. A presented frame is the
+// signal that works for every way in, and the resolver waits for the game's
+// connection rather than assuming the join already happened.
+        if (runtime_config.server_location().enabled &&
+            mocktail::window::HasPresentedFrame() &&
+            !server_location_requested) {
+          server_location_requested = true;
+          server_location.ObserveJoinedServer(
+              experience_composition->ActiveGameInstanceId());
+        } else if (server_location_requested &&
+                   !server_location.Watching()) {
+          // The previous watch is done, having reported or given up. Arming
+          // again lets a later join, or a second server, be looked up too.
+          server_location_requested = false;
+        }
       }
       const uint64_t fps_after_launch_ns = fps_trace ? MonotonicNanos() : 0;
       // The pacer sleeps only under throttled presentation. Unthrottled, the
@@ -7498,6 +7558,8 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                   << experience_shutdown.message() << '\n';
       }
     }
+    // Joined before the session log goes away: the lookup prints into it.
+    server_location.Stop();
     if (game_session_runtime != nullptr) {
       const mocktail::runtime::GameSessionUpdateResult shutdown_result =
           game_session_runtime->Shutdown();
@@ -7602,7 +7664,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                  "the supported runtime yet.\n";
     return EXIT_FAILURE;
   }
-  if (!real_frame_presented) {
+  if (!real_frame_presented && !closed_because_the_player_left) {
     std::cerr << "[FATAL] Windowed runtime exited without a real presented "
                  "frame.\n";
     return EXIT_FAILURE;

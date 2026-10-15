@@ -7,6 +7,24 @@ Release notes on GitHub are taken from the matching section here.
 
 ### Added
 
+- `window.close_on_leave` closes Nightcap when you leave an experience instead of leaving it open on the
+  Roblox home screen. Switching servers because you joined another place is not leaving, and a leave the
+  runtime asked for still exits cleanly.
+- `integrations.server_location_indicator` looks up which region the game server is in after you join and shows
+  it in a small notice at the top of the game window, in the style of Sober's indicator: a dark pill with a
+  blue information mark and the place, region and country. It is drawn into the frame the game is already
+  presenting rather than into a window of its own, so it cannot take a click meant for the game. Roblox's
+  own server info is asked first; otherwise the server's address goes to ipinfo.io, the provider
+  Bloxstrap's server-location hint uses. Only the server's address is sent, never yours, and it is off by
+  default. A session is located once, on a connection opened after the client is up, so the client's own
+  conversations with Roblox are never mistaken for the server you joined, and nothing private or
+  link-local is looked up at all.
+- A compatibility profile can now declare payload-scoped graphics fixups: `swapchain_fixup` (a 0 to 3
+  ladder, from clamping the swapchain extent to retrying a minimal FIFO swapchain), `shader_fixups` (prefer
+  the host-keyed pipeline cache over the payload's own seed, and keep the shader entrypoints wrapped), and
+  `use_new_text_renderer` (let the client draw its own text instead of the host text overlay). Every one is
+  absent by default, so a payload nobody measured keeps today's behavior, and each can be overridden with
+  `MOCKTAIL_SWAPCHAIN_FIXUP`, `MOCKTAIL_SHADER_FIXUPS` and `MOCKTAIL_NEW_TEXT_RENDERER`.
 - An asset overlay folder, `~/.local/share/mocktail/asset_overlay`. A file there replaces the file Roblox
   ships at the same path, such as a cursor, a font or a sky texture, and it stays in place when Roblox
   updates. The layout matches Sober's `asset_overlay` folder. `MOCKTAIL_ASSET_OVERLAY_DIR` moves it. Thanks to
@@ -17,6 +35,15 @@ Release notes on GitHub are taken from the matching section here.
 - `MOCKTAIL_ASSET_TRACE=1` now also prints the files Roblox asks for and does not get, as `[asset] miss`.
 - Arch Linux: `nightcap-git` is on the AUR and builds the current `main` branch. Thanks to @dim-ghub, who
   maintains it.
+
+### Fixed
+
+- Nightcap no longer fails to start on a saved Roblox session the server will not accept. A cookie whose
+  request never got an answer is now retired like a rejected one instead of being retried forever, and a
+  cookie stored with an empty value is dropped by name rather than mistaken for a session that was never
+  saved. An explicit cookie file or `MOCKTAIL_COOKIE` still fails closed.
+- Closing the game window no longer sits in `window closed, shutting down` for several seconds. The server
+  location lookup now stops before it is joined rather than after, and notices it while it waits.
 
 ## [0.3.4] - 2026-10-11
 
@@ -35,6 +62,12 @@ Release notes on GitHub are taken from the matching section here.
 
 ### Fixed
 
+- Fixed Nightcap refusing to start when the saved Roblox session could not be used at all. A cookie that is
+  malformed, truncated, or hand-edited was reported as an invalid `.ROBLOSECURITY` cookie and aborted startup,
+  leaving no way back in. It is now retired like a rejected one: the unusable value is cleared from the cookie
+  file, the other cookies in it are kept, and Nightcap continues as a guest with a sign-in prompt. This includes
+  a `.ROBLOSECURITY=` with an empty value, which could not be identified by value and so failed the cleanup
+  instead of clearing the cookie.
 - Fixed Roblox 2.742 being rejected as an update, which left the game on the older version. Nightcap now
   accepts Roblox versions that change the order of their start-up steps.
 - Fixed Nightcap reporting Mocktail's version number, 1.0.4, in session logs and support bundles. It now

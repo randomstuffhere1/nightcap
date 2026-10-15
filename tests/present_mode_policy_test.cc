@@ -150,6 +150,98 @@ TEST(PresentModePolicyTest, ReturnsTheRetrysResultWhenItAlsoFails) {
   EXPECT_EQ(calls, 2);
 }
 
+TEST(PresentModePolicyTest, ResolvesOnlyImplementedSwapchainFixupLevels) {
+  EXPECT_EQ(ResolveSwapchainFixupLevel("0"), SwapchainFixupLevel::kNone);
+  EXPECT_EQ(ResolveSwapchainFixupLevel("1"),
+            SwapchainFixupLevel::kClampExtent);
+  EXPECT_EQ(ResolveSwapchainFixupLevel("2"), SwapchainFixupLevel::kImageFloor);
+  EXPECT_EQ(ResolveSwapchainFixupLevel("3"),
+            SwapchainFixupLevel::kMinimalFallback);
+  // Anything this runtime does not implement, including a level above the
+  // highest one, is stock: a typo must never select the most invasive fixup.
+  EXPECT_EQ(ResolveSwapchainFixupLevel(""), SwapchainFixupLevel::kNone);
+  EXPECT_EQ(ResolveSwapchainFixupLevel("4"), SwapchainFixupLevel::kNone);
+  EXPECT_EQ(ResolveSwapchainFixupLevel("-1"), SwapchainFixupLevel::kNone);
+  EXPECT_EQ(ResolveSwapchainFixupLevel("on"), SwapchainFixupLevel::kNone);
+  EXPECT_EQ(ResolveSwapchainFixupLevel("maybe"), SwapchainFixupLevel::kNone);
+}
+
+TEST(PresentModePolicyTest, ClampsTheExtentOnlyFromTheFirstLevelOn) {
+  const VkExtent2D requested{3840, 2160};
+  const VkExtent2D minimum{64, 64};
+  const VkExtent2D maximum{2560, 1440};
+  const auto expect_extent = [](VkExtent2D extent, std::uint32_t width,
+                                std::uint32_t height) {
+    EXPECT_EQ(extent.width, width);
+    EXPECT_EQ(extent.height, height);
+  };
+  expect_extent(ClampSwapchainExtent(requested, minimum, maximum,
+                                     SwapchainFixupLevel::kNone),
+                requested.width, requested.height);
+  expect_extent(ClampSwapchainExtent(requested, minimum, maximum,
+                                     SwapchainFixupLevel::kClampExtent),
+                2560, 1440);
+  expect_extent(ClampSwapchainExtent({16, 16}, minimum, maximum,
+                                     SwapchainFixupLevel::kImageFloor),
+                minimum.width, minimum.height);
+  // A surface that reports no maximum is left alone rather than clamped to 0.
+  expect_extent(ClampSwapchainExtent(requested, minimum, {0, 0},
+                                     SwapchainFixupLevel::kMinimalFallback),
+                requested.width, requested.height);
+}
+
+TEST(PresentModePolicyTest, RaisesTheImageFloorOnlyFromTheSecondLevelOn) {
+  // A stock host-default policy is untouched: the fixup is not the policy's
+  // business.
+  EXPECT_EQ(PreferSwapchainMinImageCount(PresentModePolicy::kHostDefault, 1, 2, 8),
+            2U);
+  EXPECT_EQ(
+      PreferSwapchainMinImageCount(PresentModePolicy::kHostDefault, 1, 2, 8, 2),
+      3U);
+  EXPECT_EQ(
+      PreferSwapchainMinImageCount(PresentModePolicy::kHostDefault, 1, 2, 3, 3),
+      3U);
+  // Level 1 clamps the extent only and leaves the image count to the policy.
+  EXPECT_EQ(
+      PreferSwapchainMinImageCount(PresentModePolicy::kHostDefault, 1, 2, 8, 1),
+      2U);
+}
+
+TEST(PresentModePolicyTest, RetriesWithAMinimalSwapchainOnlyFromTheLastLevel) {
+  VkSwapchainCreateInfoKHR info{};
+  info.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+  info.flags = VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR;
+  std::vector<VkResult> attempts;
+  const VkResult result = CreateSwapchainWithFixupFallbacks(
+      info, VK_PRESENT_MODE_FIFO_KHR, SwapchainFixupLevel::kImageFloor,
+      [&](const VkSwapchainCreateInfoKHR &) {
+        attempts.push_back(VK_ERROR_INITIALIZATION_FAILED);
+        return VK_ERROR_INITIALIZATION_FAILED;
+      });
+  EXPECT_EQ(result, VK_ERROR_INITIALIZATION_FAILED);
+  EXPECT_EQ(attempts.size(), 2U);
+  EXPECT_EQ(info.flags, VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR);
+
+  VkSwapchainCreateInfoKHR minimal{};
+  minimal.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+  minimal.flags = VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR;
+  std::vector<std::uint32_t> flag_attempts;
+  const VkResult minimal_result = CreateSwapchainWithFixupFallbacks(
+      minimal, VK_PRESENT_MODE_FIFO_KHR,
+      SwapchainFixupLevel::kMinimalFallback,
+      [&](const VkSwapchainCreateInfoKHR &attempt) {
+        flag_attempts.push_back(attempt.flags);
+        return VK_ERROR_INITIALIZATION_FAILED;
+      });
+  EXPECT_EQ(minimal_result, VK_ERROR_INITIALIZATION_FAILED);
+  // The policy retry still comes first; only then does the minimal swapchain.
+  EXPECT_EQ(flag_attempts,
+            (std::vector<std::uint32_t>{VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR,
+                                        VK_SWAPCHAIN_CREATE_PROTECTED_BIT_KHR,
+                                        0U}));
+  EXPECT_EQ(minimal.presentMode, VK_PRESENT_MODE_FIFO_KHR);
+}
+
 } // namespace
 } // namespace graphics
 } // namespace mocktail

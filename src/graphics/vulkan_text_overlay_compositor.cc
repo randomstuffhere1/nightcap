@@ -32,6 +32,9 @@ using OverlayQueryFn = bool (*)(MocktailTextOverlayFrameInfo* frame);
 using OverlayCopyFn = bool (*)(std::uint64_t revision, void* rgba,
                                std::size_t rgba_capacity);
 using OverlayMayPresentFn = bool (*)();
+using HostOverlayQueryFn = bool (*)(MocktailHostOverlayFrameInfo* frame);
+using HostOverlayCopyFn = bool (*)(std::uint64_t revision, void* rgba,
+                                   std::size_t rgba_capacity);
 
 template <typename Function>
 Function ResolveDeviceFunction(PFN_vkGetDeviceProcAddr get_device_proc_addr,
@@ -132,6 +135,24 @@ void LibplaceboLog(void*, enum pl_log_level level, const char* message) {
 }  // namespace
 
 struct VulkanTextOverlayCompositor::Impl {
+  // A slot holding nothing yet.
+  static constexpr std::size_t kUnassignedLayer = static_cast<std::size_t>(-1);
+  // The two layers this compositor knows about, in draw order.
+  static constexpr std::size_t kTextLayer = 0;
+  static constexpr std::size_t kHostLayer = 1;
+
+  // One composited layer: its pixels and the frame they came from.
+  struct OverlayLayer {
+    pl_tex source = nullptr;
+    std::uint64_t revision = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    // Which layer's pixels this slot holds. Two layers number their frames
+    // independently, so a slot cannot be reused on revision and size alone: a
+    // notice and a chat field can sit in the same slot with the same size.
+    std::size_t identity = kUnassignedLayer;
+  };
+
   struct ImageState {
     VkImage image = VK_NULL_HANDLE;
     pl_tex target = nullptr;
@@ -176,10 +197,10 @@ struct VulkanTextOverlayCompositor::Impl {
     pl_log log = nullptr;
     pl_vulkan vulkan = nullptr;
     pl_dispatch dispatch = nullptr;
-    pl_tex source = nullptr;
-    std::uint64_t source_revision = 0;
-    std::uint32_t source_width = 0;
-    std::uint32_t source_height = 0;
+    // One source texture per composited layer. The chat text surface is layer
+    // zero and the host's own notices are layer one; either can be absent while
+    // the other is shown.
+    std::vector<OverlayLayer> layers;
     bool enabled = true;
     bool dispatch_failure_logged = false;
     std::vector<QueueState> queues;
@@ -189,6 +210,7 @@ struct VulkanTextOverlayCompositor::Impl {
   struct WorkItem {
     SwapchainState* swapchain = nullptr;
     ImageState* image = nullptr;
+    std::size_t layer = 0;
     pl_rect2df source_rect{};
     pl_rect2d target_rect{};
   };
@@ -201,6 +223,25 @@ struct VulkanTextOverlayCompositor::Impl {
           dlsym(RTLD_DEFAULT, "mocktail_text_overlay_may_present"));
   OverlayQueryFn overlay_query = nullptr;
   OverlayCopyFn overlay_copy = nullptr;
+  // Resolved up front, unlike the text layer's callbacks, because the fast path
+  // below has to be able to ask whether a notice is up before it decides to skip
+  // compositing altogether.
+  HostOverlayQueryFn host_overlay_query =
+      reinterpret_cast<HostOverlayQueryFn>(
+          dlsym(RTLD_DEFAULT, "mocktail_host_overlay_query"));
+  HostOverlayCopyFn host_overlay_copy =
+      reinterpret_cast<HostOverlayCopyFn>(
+          dlsym(RTLD_DEFAULT, "mocktail_host_overlay_copy"));
+
+  // Whether the host has a notice on screen right now. Answers "no" in the
+  // common case, without taking the registry lock or sharing the queue.
+  bool HostLayerHasContent() {
+    if (host_overlay_query == nullptr || host_overlay_copy == nullptr) {
+      return false;
+    }
+    MocktailHostOverlayFrameInfo frame{};
+    return host_overlay_query(&frame) && frame.visible != 0;
+  }
 
   static void LockQueue(void* context, std::uint32_t, std::uint32_t) {
     if (context != nullptr) {
@@ -257,6 +298,20 @@ struct VulkanTextOverlayCompositor::Impl {
     if (overlay_copy == nullptr) {
       overlay_copy = reinterpret_cast<OverlayCopyFn>(
           dlsym(RTLD_DEFAULT, "mocktail_text_overlay_copy"));
+    }
+    // The host's own layer is optional: without it the chat text surface still
+    // composites, which is the older behaviour.
+    if (host_overlay_query == nullptr) {
+      host_overlay_query = reinterpret_cast<HostOverlayQueryFn>(
+          dlsym(RTLD_DEFAULT, "mocktail_host_overlay_query"));
+    }
+    if (host_overlay_copy == nullptr) {
+      host_overlay_copy = reinterpret_cast<HostOverlayCopyFn>(
+          dlsym(RTLD_DEFAULT, "mocktail_host_overlay_copy"));
+    }
+    if (host_overlay_query == nullptr || host_overlay_copy == nullptr) {
+      host_overlay_query = nullptr;
+      host_overlay_copy = nullptr;
     }
     return overlay_query != nullptr && overlay_copy != nullptr;
   }
@@ -358,9 +413,13 @@ struct VulkanTextOverlayCompositor::Impl {
       DestroySwapchainResources(device, swapchain.get(), false);
     }
     device->swapchains.clear();
-    if (device->source != nullptr && device->vulkan != nullptr) {
-      pl_tex_destroy(device->vulkan->gpu, &device->source);
+    for (OverlayLayer& layer : device->layers) {
+      if (layer.source != nullptr && device->vulkan != nullptr) {
+        pl_tex_destroy(device->vulkan->gpu, &layer.source);
+        layer.source = nullptr;
+      }
     }
+    device->layers.clear();
     if (device->dispatch != nullptr) {
       pl_dispatch_destroy(&device->dispatch);
     }
@@ -372,16 +431,31 @@ struct VulkanTextOverlayCompositor::Impl {
     }
   }
 
-  bool EnsureSource(DeviceState* device,
-                    const MocktailTextOverlayFrameInfo& frame) {
-    if (device == nullptr || device->vulkan == nullptr ||
-        overlay_copy == nullptr) {
+  // The two layers' pixel sources are copied through different entry points, so
+  // each layer carries the function that fetches its own frame.
+  struct LayerSource {
+    std::uint64_t revision = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::uint32_t row_bytes = 0;
+    std::uint64_t rgba_bytes = 0;
+    std::int32_t x = 0;
+    std::int32_t y = 0;
+    std::uint32_t coordinate_width = 0;
+    std::uint32_t coordinate_height = 0;
+  };
+
+  bool EnsureSource(DeviceState* device, std::size_t layer_index,
+                    std::size_t identity, const LayerSource& frame,
+                    OverlayCopyFn copy) {
+    if (device == nullptr || device->vulkan == nullptr || copy == nullptr ||
+        layer_index >= device->layers.size()) {
       return false;
     }
-    if (device->source != nullptr &&
-        device->source_revision == frame.revision &&
-        device->source_width == frame.width &&
-        device->source_height == frame.height) {
+    OverlayLayer& layer = device->layers[layer_index];
+    if (layer.source != nullptr && layer.identity == identity &&
+        layer.revision == frame.revision && layer.width == frame.width &&
+        layer.height == frame.height) {
       return true;
     }
 
@@ -396,24 +470,26 @@ struct VulkanTextOverlayCompositor::Impl {
 
     std::vector<std::uint8_t> pixels(
         static_cast<std::size_t>(frame.rgba_bytes));
-    if (!overlay_copy(frame.revision, pixels.data(), pixels.size())) {
+    if (!copy(frame.revision, pixels.data(), pixels.size())) {
       SecureClear(&pixels);
       return false;
     }
 
     bool uploaded = false;
-    if (device->source != nullptr && device->source_width == frame.width &&
-        device->source_height == frame.height) {
+    if (layer.source != nullptr && layer.width == frame.width &&
+        layer.height == frame.height) {
       pl_tex_transfer_params transfer{};
-      transfer.tex = device->source;
+      transfer.tex = layer.source;
       transfer.row_pitch = frame.row_bytes;
       transfer.ptr = pixels.data();
       transfer.no_import = true;
       uploaded = pl_tex_upload(device->vulkan->gpu, &transfer);
     } else {
-      if (device->source != nullptr) {
-        pl_tex_destroy(device->vulkan->gpu, &device->source);
+      if (layer.source != nullptr) {
+        pl_tex_destroy(device->vulkan->gpu, &layer.source);
+        layer.source = nullptr;
       }
+      layer.identity = Impl::kUnassignedLayer;
       const pl_fmt format = pl_find_fmt(device->vulkan->gpu, PL_FMT_UNORM, 4, 8,
                                         8, PL_FMT_CAP_SAMPLEABLE);
       if (format != nullptr) {
@@ -424,113 +500,134 @@ struct VulkanTextOverlayCompositor::Impl {
         texture.sampleable = true;
         texture.host_writable = true;
         texture.initial_data = pixels.data();
-        device->source = pl_tex_create(device->vulkan->gpu, &texture);
+        layer.source = pl_tex_create(device->vulkan->gpu, &texture);
       }
-      uploaded = device->source != nullptr;
+      uploaded = layer.source != nullptr;
     }
     SecureClear(&pixels);
     if (!uploaded) {
-      device->source_revision = 0;
-      device->source_width = 0;
-      device->source_height = 0;
+      layer.revision = 0;
+      layer.width = 0;
+      layer.height = 0;
+      layer.identity = Impl::kUnassignedLayer;
       return false;
     }
-    device->source_revision = frame.revision;
-    device->source_width = frame.width;
-    device->source_height = frame.height;
+    layer.revision = frame.revision;
+    layer.width = frame.width;
+    layer.height = frame.height;
+    layer.identity = identity;
     return true;
   }
 
   bool BuildWorkItems(DeviceState* device, QueueState* queue,
                       const VkPresentInfoKHR& present_info,
-                      const MocktailTextOverlayFrameInfo& frame,
+                      const std::vector<LayerSource>& frames,
                       std::vector<WorkItem>* work_items) {
     if (device == nullptr || queue == nullptr || work_items == nullptr ||
-        queue->family != device->graphics_queue_family ||
-        frame.coordinate_width == 0 || frame.coordinate_height == 0 ||
+        queue->family != device->graphics_queue_family || frames.empty() ||
         present_info.swapchainCount == 0 ||
         present_info.pSwapchains == nullptr ||
         present_info.pImageIndices == nullptr) {
       return false;
     }
 
-    for (std::uint32_t index = 0; index < present_info.swapchainCount;
-         ++index) {
-      SwapchainState* swapchain =
-          FindSwapchain(device, present_info.pSwapchains[index]);
-      if (swapchain == nullptr || !swapchain->enabled ||
-          present_info.pImageIndices[index] >= swapchain->images.size()) {
+    // One item per layer per presented image: a chat field and a host notice can
+    // be on screen at once, and they are drawn in that order, so a notice is
+    // never hidden behind a chat box.
+    for (std::size_t layer_index = 0; layer_index < frames.size();
+         ++layer_index) {
+      const LayerSource& frame = frames[layer_index];
+      if (frame.coordinate_width == 0 || frame.coordinate_height == 0) {
         continue;
       }
-      ImageState* image = &swapchain->images[present_info.pImageIndices[index]];
-      if (!image->held_by_host || image->target == nullptr ||
-          image->bridge == VK_NULL_HANDLE || image->done == VK_NULL_HANDLE) {
-        continue;
-      }
-      const auto duplicate = std::find_if(
-          work_items->begin(), work_items->end(),
-          [image](const WorkItem& item) { return item.image == image; });
-      if (duplicate != work_items->end()) {
-        continue;
-      }
+      for (std::uint32_t index = 0; index < present_info.swapchainCount;
+           ++index) {
+        SwapchainState* swapchain =
+            FindSwapchain(device, present_info.pSwapchains[index]);
+        if (swapchain == nullptr || !swapchain->enabled ||
+            present_info.pImageIndices[index] >= swapchain->images.size()) {
+          continue;
+        }
+        ImageState* image =
+            &swapchain->images[present_info.pImageIndices[index]];
+        if (!image->held_by_host || image->target == nullptr ||
+            image->bridge == VK_NULL_HANDLE ||
+            image->done == VK_NULL_HANDLE) {
+          continue;
+        }
+        const auto duplicate =
+            std::find_if(work_items->begin(), work_items->end(),
+                         [image, layer_index](const WorkItem& item) {
+                           return item.image == image &&
+                                  item.layer == layer_index;
+                         });
+        if (duplicate != work_items->end()) {
+          continue;
+        }
 
-      const std::int64_t source_x0 =
-          std::max<std::int64_t>(0, -static_cast<std::int64_t>(frame.x));
-      const std::int64_t source_y0 =
-          std::max<std::int64_t>(0, -static_cast<std::int64_t>(frame.y));
-      const std::int64_t logical_x0 = std::max<std::int64_t>(0, frame.x);
-      const std::int64_t logical_y0 = std::max<std::int64_t>(0, frame.y);
-      const std::int64_t visible_width = std::min<std::int64_t>(
-          static_cast<std::int64_t>(frame.width) - source_x0,
-          static_cast<std::int64_t>(frame.coordinate_width) - logical_x0);
-      const std::int64_t visible_height = std::min<std::int64_t>(
-          static_cast<std::int64_t>(frame.height) - source_y0,
-          static_cast<std::int64_t>(frame.coordinate_height) - logical_y0);
-      if (visible_width <= 0 || visible_height <= 0 ||
-          source_x0 > std::numeric_limits<int>::max() ||
-          source_y0 > std::numeric_limits<int>::max() ||
-          visible_width > std::numeric_limits<int>::max() ||
-          visible_height > std::numeric_limits<int>::max()) {
-        continue;
-      }
+        // A layer whose origin is above or left of the window is clipped here,
+        // which is how a notice slides in from off the top of the screen.
+        const std::int64_t source_x0 =
+            std::max<std::int64_t>(0, -static_cast<std::int64_t>(frame.x));
+        const std::int64_t source_y0 =
+            std::max<std::int64_t>(0, -static_cast<std::int64_t>(frame.y));
+        const std::int64_t logical_x0 = std::max<std::int64_t>(0, frame.x);
+        const std::int64_t logical_y0 = std::max<std::int64_t>(0, frame.y);
+        const std::int64_t visible_width = std::min<std::int64_t>(
+            static_cast<std::int64_t>(frame.width) - source_x0,
+            static_cast<std::int64_t>(frame.coordinate_width) - logical_x0);
+        const std::int64_t visible_height = std::min<std::int64_t>(
+            static_cast<std::int64_t>(frame.height) - source_y0,
+            static_cast<std::int64_t>(frame.coordinate_height) - logical_y0);
+        if (visible_width <= 0 || visible_height <= 0 ||
+            source_x0 > std::numeric_limits<int>::max() ||
+            source_y0 > std::numeric_limits<int>::max() ||
+            visible_width > std::numeric_limits<int>::max() ||
+            visible_height > std::numeric_limits<int>::max()) {
+          continue;
+        }
 
-      const std::uint64_t target_x0 = static_cast<std::uint64_t>(logical_x0) *
-                                      swapchain->extent.width /
-                                      frame.coordinate_width;
-      const std::uint64_t target_y0 = static_cast<std::uint64_t>(logical_y0) *
-                                      swapchain->extent.height /
-                                      frame.coordinate_height;
-      const std::uint64_t logical_x1 =
-          static_cast<std::uint64_t>(logical_x0 + visible_width);
-      const std::uint64_t logical_y1 =
-          static_cast<std::uint64_t>(logical_y0 + visible_height);
-      const std::uint64_t target_x1 =
-          (logical_x1 * swapchain->extent.width + frame.coordinate_width - 1) /
-          frame.coordinate_width;
-      const std::uint64_t target_y1 = (logical_y1 * swapchain->extent.height +
-                                       frame.coordinate_height - 1) /
-                                      frame.coordinate_height;
-      if (target_x1 <= target_x0 || target_y1 <= target_y0 ||
-          target_x1 > swapchain->extent.width ||
-          target_y1 > swapchain->extent.height ||
-          target_x1 >
-              static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
-          target_y1 >
-              static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
-        continue;
-      }
+        const std::uint64_t target_x0 =
+            static_cast<std::uint64_t>(logical_x0) * swapchain->extent.width /
+            frame.coordinate_width;
+        const std::uint64_t target_y0 =
+            static_cast<std::uint64_t>(logical_y0) * swapchain->extent.height /
+            frame.coordinate_height;
+        const std::uint64_t logical_x1 =
+            static_cast<std::uint64_t>(logical_x0 + visible_width);
+        const std::uint64_t logical_y1 =
+            static_cast<std::uint64_t>(logical_y0 + visible_height);
+        const std::uint64_t target_x1 =
+            (logical_x1 * swapchain->extent.width + frame.coordinate_width - 1) /
+            frame.coordinate_width;
+        const std::uint64_t target_y1 =
+            (logical_y1 * swapchain->extent.height +
+             frame.coordinate_height - 1) /
+            frame.coordinate_height;
+        if (target_x1 <= target_x0 || target_y1 <= target_y0 ||
+            target_x1 > swapchain->extent.width ||
+            target_y1 > swapchain->extent.height ||
+            target_x1 >
+                static_cast<std::uint64_t>(std::numeric_limits<int>::max()) ||
+            target_y1 >
+                static_cast<std::uint64_t>(std::numeric_limits<int>::max())) {
+          continue;
+        }
 
-      WorkItem item;
-      item.swapchain = swapchain;
-      item.image = image;
-      item.source_rect = {static_cast<float>(source_x0),
-                          static_cast<float>(source_y0),
-                          static_cast<float>(source_x0 + visible_width),
-                          static_cast<float>(source_y0 + visible_height)};
-      item.target_rect = {
-          static_cast<int>(target_x0), static_cast<int>(target_y0),
-          static_cast<int>(target_x1), static_cast<int>(target_y1)};
-      work_items->push_back(item);
+        WorkItem item;
+        item.swapchain = swapchain;
+        item.image = image;
+        item.layer = layer_index;
+        item.source_rect = {static_cast<float>(source_x0),
+                            static_cast<float>(source_y0),
+                            static_cast<float>(source_x0 + visible_width),
+                            static_cast<float>(source_y0 + visible_height)};
+        item.target_rect = {static_cast<int>(target_x0),
+                            static_cast<int>(target_y0),
+                            static_cast<int>(target_x1),
+                            static_cast<int>(target_y1)};
+        work_items->push_back(item);
+      }
     }
     return !work_items->empty();
   }
@@ -591,13 +688,14 @@ struct VulkanTextOverlayCompositor::Impl {
 
   bool DispatchWork(DeviceState* device, const WorkItem& item) {
     if (device == nullptr || device->dispatch == nullptr ||
-        device->source == nullptr || item.image == nullptr ||
+        item.layer >= device->layers.size() ||
+        device->layers[item.layer].source == nullptr || item.image == nullptr ||
         item.image->target == nullptr) {
       return false;
     }
     pl_shader shader = pl_dispatch_begin(device->dispatch);
     pl_sample_src source{};
-    source.tex = device->source;
+    source.tex = device->layers[item.layer].source;
     source.rect = item.source_rect;
     source.address_mode = PL_TEX_ADDRESS_CLAMP;
     source.new_w = pl_rect_w(item.target_rect);
@@ -953,8 +1051,13 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
   // so an inactive overlay forwards the original present without touching the
   // registry or the imported queue lock. libplacebo only shares VkQueue while
   // an overlay is actually compositing.
+  //
+  // "Nothing to composite" means neither layer has anything: a notice with no
+  // chat box beside it is the common case, and asking only the chat surface
+  // about it is what left notices invisible on Vulkan while they worked on
+  // OpenGL.
   if (impl_->overlay_may_present != nullptr &&
-      !impl_->overlay_may_present()) {
+      !impl_->overlay_may_present() && !impl_->HostLayerHasContent()) {
     impl_->SetOverlayActive(false);
     return fallback(queue, present_info);
   }
@@ -988,11 +1091,63 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
   // global registry lock across a potentially blocking host queue call.
   std::lock_guard<std::mutex> overlay_lock(device->overlay_mutex);
 
-  MocktailTextOverlayFrameInfo frame{};
-  if (!impl_->overlay_query(&frame) ||
-      frame.abi_version != MocktailTextOverlayFrameInfo::kAbiVersion ||
-      frame.visible == 0 || frame.revision == 0 ||
-      !impl_->EnsureSource(device, frame)) {
+  // Both layers are asked about on every present. Either may be absent: a session
+  // with no chat field on screen and one with no notice are both normal.
+  std::vector<Impl::LayerSource> frames;
+  std::vector<OverlayCopyFn> copies;
+  std::vector<std::size_t> identities;
+  MocktailTextOverlayFrameInfo text_frame{};
+  if (impl_->overlay_query(&text_frame) &&
+      text_frame.abi_version == MocktailTextOverlayFrameInfo::kAbiVersion &&
+      text_frame.visible != 0 && text_frame.revision != 0) {
+    Impl::LayerSource source;
+    source.revision = text_frame.revision;
+    source.width = text_frame.width;
+    source.height = text_frame.height;
+    source.row_bytes = text_frame.row_bytes;
+    source.rgba_bytes = text_frame.rgba_bytes;
+    source.x = text_frame.x;
+    source.y = text_frame.y;
+    source.coordinate_width = text_frame.coordinate_width;
+    source.coordinate_height = text_frame.coordinate_height;
+    frames.push_back(source);
+    copies.push_back(impl_->overlay_copy);
+    identities.push_back(Impl::kTextLayer);
+  }
+  MocktailHostOverlayFrameInfo host_frame{};
+  if (impl_->host_overlay_query != nullptr &&
+      impl_->host_overlay_query(&host_frame) &&
+      host_frame.abi_version == MocktailHostOverlayFrameInfo::kAbiVersion &&
+      host_frame.visible != 0 && host_frame.revision != 0) {
+    Impl::LayerSource source;
+    source.revision = host_frame.revision;
+    source.width = host_frame.width;
+    source.height = host_frame.height;
+    source.row_bytes = host_frame.row_bytes;
+    source.rgba_bytes = host_frame.rgba_bytes;
+    source.x = host_frame.x;
+    source.y = host_frame.y;
+    source.coordinate_width = host_frame.coordinate_width;
+    source.coordinate_height = host_frame.coordinate_height;
+    frames.push_back(source);
+    copies.push_back(impl_->host_overlay_copy);
+    identities.push_back(Impl::kHostLayer);
+  }
+  if (frames.empty() || device->layers.size() < frames.size()) {
+    device->layers.resize(std::max<std::size_t>(frames.size(), 1));
+  }
+  for (std::size_t layer = 0; layer < frames.size(); ++layer) {
+    if (!impl_->EnsureSource(device, layer, identities[layer], frames[layer],
+                             copies[layer])) {
+      // One unreadable layer is not a reason to drop the other: the notice still
+      // shows if the chat field could not be fetched.
+      frames.erase(frames.begin() + static_cast<std::ptrdiff_t>(layer));
+      copies.erase(copies.begin() + static_cast<std::ptrdiff_t>(layer));
+      identities.erase(identities.begin() + static_cast<std::ptrdiff_t>(layer));
+      break;
+    }
+  }
+  if (frames.empty()) {
     return impl_->CallFallback(shared_queue_mutex, queue, present_info,
                                fallback);
   }
@@ -1012,8 +1167,8 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
   }
 
   std::vector<Impl::WorkItem> work_items;
-  work_items.reserve(present_info->swapchainCount);
-  if (!impl_->BuildWorkItems(device, &queue_state, *present_info, frame,
+  work_items.reserve(present_info->swapchainCount * frames.size());
+  if (!impl_->BuildWorkItems(device, &queue_state, *present_info, frames,
                              &work_items)) {
     return impl_->CallFallback(shared_queue_mutex, queue, present_info,
                                fallback);

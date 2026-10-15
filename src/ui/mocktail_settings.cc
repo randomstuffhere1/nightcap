@@ -586,7 +586,8 @@ bool TabMatches(const std::string& tab, const UiConfigField& field) {
   }
   return field.key.rfind("appearance.", 0) == 0 ||
          field.key.rfind("network.", 0) == 0 ||
-         field.key.rfind("runtime.", 0) == 0;
+         field.key.rfind("runtime.", 0) == 0 ||
+         field.key.rfind("window.", 0) == 0;
 }
 
 void OnWindowActivate(AdwApplication* application, gpointer user_data) {

@@ -169,14 +169,38 @@ bool ValidFrame(const MocktailTextOverlayFrameInfo &frame) {
          frame.row_bytes == row_bytes && frame.rgba_bytes == bytes;
 }
 
+bool ValidFrame(const MocktailHostOverlayFrameInfo &frame) {
+  const std::uint64_t row_bytes = std::uint64_t{frame.width} * 4;
+  const std::uint64_t bytes = row_bytes * frame.height;
+  return frame.abi_version == MocktailHostOverlayFrameInfo::kAbiVersion &&
+         frame.coordinate_width != 0 && frame.coordinate_height != 0 &&
+         frame.width != 0 && frame.height != 0 &&
+         row_bytes <= kMaximumOverlayBytes && bytes <= kMaximumOverlayBytes &&
+         frame.row_bytes == row_bytes && frame.rgba_bytes == bytes;
+}
+
 } // namespace
 
 struct GlesTextOverlayCompositor::Impl {
-  explicit Impl(GlesTextOverlaySource input) : source(input) {}
+  // One composited layer's texture: the chat text surface and the host's own
+  // notices are drawn in that order.
+  struct Layer {
+    GLuint texture = 0;
+    std::uint64_t revision = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    bool uploaded = false;
+  };
+
+  explicit Impl(GlesTextOverlaySource input) : source(input) {
+    layers.resize(2);
+  }
   ~Impl() {
     if (context != nullptr && SDL_GL_GetCurrentContext() == context) {
-      if (texture != 0)
-        gl.DeleteTextures(1, &texture);
+      for (Layer &layer : layers) {
+        if (layer.texture != 0)
+          gl.DeleteTextures(1, &layer.texture);
+      }
       if (vertex_array != 0)
         gl.DeleteVertexArrays(1, &vertex_array);
       if (program != 0)
@@ -257,21 +281,21 @@ void main() { color = texture(image, uv); }
     bounds_location = gl.GetUniformLocation(program, "bounds");
     image_location = gl.GetUniformLocation(program, "image");
     gl.GenVertexArrays(1, &vertex_array);
-    gl.GenTextures(1, &texture);
+    for (Layer &layer : layers) {
+      gl.GenTextures(1, &layer.texture);
+    }
     gl.GetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
-    return vertex_array != 0 && texture != 0 && bounds_location >= 0 &&
-           image_location >= 0;
+    return vertex_array != 0 && bounds_location >= 0 && image_location >= 0;
   }
 
   GlesTextOverlaySource source;
   Gl gl;
   SDL_GLContext context = nullptr;
-  GLuint program = 0, vertex_array = 0, texture = 0;
+  GLuint program = 0, vertex_array = 0;
   GLint bounds_location = -1, image_location = -1, max_texture_size = 0;
   bool initialized = false, failed = false, failure_logged = false;
-  bool uploaded = false, ready_logged = false;
-  std::uint64_t revision = 0;
-  std::uint32_t width = 0, height = 0;
+  bool ready_logged = false;
+  std::vector<Layer> layers;
 };
 
 GlesTextOverlayCompositor::GlesTextOverlayCompositor(
@@ -282,15 +306,25 @@ GlesTextOverlayCompositor::~GlesTextOverlayCompositor() = default;
 bool GlesTextOverlayCompositor::Draw(SDL_Window *window) {
   Impl &state = *impl_;
   const GlesTextOverlaySource &source = state.source;
-  if (source.may_present != nullptr && !source.may_present())
+  if (source.may_present != nullptr && !source.may_present() &&
+      (source.host_query == nullptr || source.host_copy == nullptr))
     return true;
   if (source.query == nullptr || source.copy == nullptr)
     return true;
-  MocktailTextOverlayFrameInfo frame{};
-  if (!source.query(&frame) || frame.visible == 0)
-    return true;
-  if (!ValidFrame(frame))
+  // Both layers are asked about each frame; either may be absent, and a notice
+  // is drawn on top of a chat field rather than instead of one.
+  MocktailTextOverlayFrameInfo text_frame{};
+  const bool draw_text = source.query(&text_frame) && text_frame.visible != 0;
+  if (draw_text && !ValidFrame(text_frame))
     return state.Fail("invalid text overlay frame");
+  MocktailHostOverlayFrameInfo host_frame{};
+  const bool draw_host =
+      source.host_query != nullptr && source.host_query(&host_frame) &&
+      host_frame.visible != 0;
+  if (draw_host && !ValidFrame(host_frame))
+    return state.Fail("invalid host overlay frame");
+  if (!draw_text && !draw_host)
+    return true;
   int pixel_width = 0, pixel_height = 0;
   if (window == nullptr ||
       !SDL_GetWindowSizeInPixels(window, &pixel_width, &pixel_height) ||
@@ -316,34 +350,6 @@ bool GlesTextOverlayCompositor::Draw(SDL_Window *window) {
     }
     state.initialized = true;
   }
-  if (frame.width > static_cast<std::uint32_t>(state.max_texture_size) ||
-      frame.height > static_cast<std::uint32_t>(state.max_texture_size)) {
-    return state.Fail("text overlay exceeds GL_MAX_TEXTURE_SIZE");
-  }
-  gl.BindTexture(GL_TEXTURE_2D, state.texture);
-  gl.BindSampler(0, 0);
-  if (!state.uploaded || state.revision != frame.revision ||
-      state.width != frame.width || state.height != frame.height) {
-    PixelCopy copy(static_cast<std::size_t>(frame.rgba_bytes));
-    if (!source.copy(frame.revision, copy.pixels.data(), copy.pixels.size())) {
-      return false;
-    }
-    gl.BindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    gl.PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-    gl.PixelStorei(GL_UNPACK_SKIP_ROWS, 0);
-    gl.PixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
-    gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, frame.width, frame.height, 0,
-                  GL_RGBA, GL_UNSIGNED_BYTE, copy.pixels.data());
-    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    state.revision = frame.revision;
-    state.width = frame.width;
-    state.height = frame.height;
-    state.uploaded = true;
-  }
   for (GLenum capability : kCapabilities)
     gl.Disable(capability);
   gl.Enable(GL_BLEND);
@@ -357,13 +363,65 @@ bool GlesTextOverlayCompositor::Draw(SDL_Window *window) {
   gl.UseProgram(state.program);
   gl.BindVertexArray(state.vertex_array);
   gl.Uniform1i(state.image_location, 0);
-  const double x_scale = 2.0 / frame.coordinate_width;
-  const double y_scale = 2.0 / frame.coordinate_height;
-  gl.Uniform4f(state.bounds_location, frame.x * x_scale - 1.0,
-               1.0 - frame.y * y_scale,
-               (static_cast<double>(frame.x) + frame.width) * x_scale - 1.0,
-               1.0 - (static_cast<double>(frame.y) + frame.height) * y_scale);
-  gl.DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+  const auto draw_layer = [&](std::size_t index, std::uint64_t revision,
+                              std::uint32_t width, std::uint32_t height,
+                              std::uint64_t rgba_bytes, std::int32_t x,
+                              std::int32_t y, std::uint32_t coordinate_width,
+                              std::uint32_t coordinate_height,
+                              bool (*copy)(std::uint64_t, void *,
+                                           std::size_t)) -> bool {
+    if (width > static_cast<std::uint32_t>(state.max_texture_size) ||
+        height > static_cast<std::uint32_t>(state.max_texture_size)) {
+      return state.Fail("overlay exceeds GL_MAX_TEXTURE_SIZE");
+    }
+    Impl::Layer &layer = state.layers[index];
+    gl.BindTexture(GL_TEXTURE_2D, layer.texture);
+    gl.BindSampler(0, 0);
+    if (!layer.uploaded || layer.revision != revision || layer.width != width ||
+        layer.height != height) {
+      PixelCopy pixels(static_cast<std::size_t>(rgba_bytes));
+      if (!copy(revision, pixels.pixels.data(), pixels.pixels.size())) {
+        return false;
+      }
+      gl.BindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+      gl.PixelStorei(GL_UNPACK_ALIGNMENT, 1);
+      gl.PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+      gl.PixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+      gl.PixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+      gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA,
+                    GL_UNSIGNED_BYTE, pixels.pixels.data());
+      gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+      gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+      gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+      gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+      layer.revision = revision;
+      layer.width = width;
+      layer.height = height;
+      layer.uploaded = true;
+    }
+    const double x_scale = 2.0 / coordinate_width;
+    const double y_scale = 2.0 / coordinate_height;
+    gl.Uniform4f(state.bounds_location, x * x_scale - 1.0,
+                 1.0 - y * y_scale,
+                 (static_cast<double>(x) + width) * x_scale - 1.0,
+                 1.0 - (static_cast<double>(y) + height) * y_scale);
+    gl.DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    return true;
+  };
+
+  if (draw_text &&
+      !draw_layer(0, text_frame.revision, text_frame.width, text_frame.height,
+                  text_frame.rgba_bytes, text_frame.x, text_frame.y,
+                  text_frame.coordinate_width, text_frame.coordinate_height,
+                  source.copy))
+    return false;
+  if (draw_host &&
+      !draw_layer(1, host_frame.revision, host_frame.width, host_frame.height,
+                  host_frame.rgba_bytes, host_frame.x, host_frame.y,
+                  host_frame.coordinate_width, host_frame.coordinate_height,
+                  source.host_copy))
+    return false;
   if (!state.ready_logged) {
     std::fprintf(stderr,
                  "  [gles-overlay] same-surface TextBox compositor ready\n");

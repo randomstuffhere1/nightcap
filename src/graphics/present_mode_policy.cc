@@ -106,7 +106,8 @@ const char *PresentModePolicyName(PresentModePolicy policy) {
 std::uint32_t PreferSwapchainMinImageCount(PresentModePolicy policy,
                                            std::uint32_t requested,
                                            std::uint32_t min_images,
-                                           std::uint32_t max_images) {
+                                           std::uint32_t max_images,
+                                           int fixup) {
   std::uint32_t count = std::max(requested, min_images);
   if (policy == PresentModePolicy::kUnthrottled) {
     constexpr std::uint32_t kUnthrottledImages = 5;
@@ -120,11 +121,53 @@ std::uint32_t PreferSwapchainMinImageCount(PresentModePolicy policy,
     if (min_images != 0) {
       count = std::max(count, min_images + 2);
     }
+  } else if (fixup >= static_cast<int>(SwapchainFixupLevel::kImageFloor) &&
+             min_images != 0) {
+    count = std::max(count, min_images + 1);
   }
   if (max_images != 0) {
     count = std::min(count, max_images);
   }
   return count;
+}
+
+SwapchainFixupLevel ResolveSwapchainFixupLevel(std::string_view value) {
+  if (value == "1") {
+    return SwapchainFixupLevel::kClampExtent;
+  }
+  if (value == "2") {
+    return SwapchainFixupLevel::kImageFloor;
+  }
+  if (value == "3") {
+    return SwapchainFixupLevel::kMinimalFallback;
+  }
+  // "0", an empty value and anything this runtime does not implement all mean
+  // stock: a typo must never select the most invasive level by accident.
+  return SwapchainFixupLevel::kNone;
+}
+
+SwapchainFixupLevel CachedSwapchainFixupLevel() {
+  static const SwapchainFixupLevel level = ResolveSwapchainFixupLevel(
+      EnvironmentOr("MOCKTAIL_SWAPCHAIN_FIXUP", "0"));
+  return level;
+}
+
+VkExtent2D ClampSwapchainExtent(VkExtent2D requested, VkExtent2D min_extent,
+                                 VkExtent2D max_extent,
+                                 SwapchainFixupLevel fixup) {
+  if (fixup < SwapchainFixupLevel::kClampExtent) {
+    return requested;
+  }
+  VkExtent2D clamped = requested;
+  if (max_extent.width != 0) {
+    clamped.width = std::clamp(clamped.width, min_extent.width,
+                               max_extent.width);
+  }
+  if (max_extent.height != 0) {
+    clamped.height = std::clamp(clamped.height, min_extent.height,
+                                max_extent.height);
+  }
+  return clamped;
 }
 
 } // namespace graphics

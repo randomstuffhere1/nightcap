@@ -300,6 +300,61 @@ class FailClosedUtilityTest(unittest.TestCase):
             profile["fmod_output_device_bridge"], {"vtable_rva": "0x5678"}
         )
 
+    def test_probation_manifest_carries_declared_graphics_fixups(self) -> None:
+        # The fixups are claims about one payload, so a derived profile carries
+        # the reference's values across rather than re-deriving them.
+        candidate = types.SimpleNamespace(build_id="a" * 40, sha256="b" * 64)
+        metadata = {"version_code": 3000, "version_name": "3.0.0"}
+        reference = {"elf_build_id": "c" * 40, "payload_sha256": "d" * 64}
+        runtime = {"swapchain_fixup": 2, "shader_fixups": True}
+
+        _sidecar, manifest = ANALYZER.output_documents(
+            candidate, metadata, reference, {"elf_build_id": "a" * 40}, {"x": 1}, runtime
+        )
+
+        profile = manifest["profiles"][0]
+        self.assertEqual(profile["swapchain_fixup"], 2)
+        self.assertTrue(profile["shader_fixups"])
+        self.assertNotIn("use_new_text_renderer", profile)
+
+    def test_graphics_fixups_are_validated_and_never_disagreed(self) -> None:
+        build_id = "c" * 40
+
+        def manifest(directory: str, name: str, profile: dict) -> Path:
+            path = Path(directory) / name
+            path.write_text(
+                json.dumps({"schema_version": 1, "profiles": [dict(profile, elf_build_id=build_id)]})
+            )
+            return path
+
+        with tempfile.TemporaryDirectory() as temporary:
+            # A level this runtime does not implement is refused, not clamped,
+            # and a boolean must really be a boolean.
+            for bad in ({"swapchain_fixup": 4}, {"swapchain_fixup": "1"},
+                        {"swapchain_fixup": -1}, {"shader_fixups": "yes"}):
+                path = manifest(temporary, "bad.json", bad)
+                with self.assertRaisesRegex(ANALYZER.AnalyzerError, "graphics fixup"):
+                    ANALYZER.load_reference_runtime_profile([path], build_id)
+
+            agreeing = [
+                manifest(temporary, "a.json",
+                         {"swapchain_fixup": 1, "shader_fixups": True}),
+                manifest(temporary, "b.json",
+                         {"swapchain_fixup": 1, "shader_fixups": True,
+                          "use_new_text_renderer": False}),
+            ]
+            self.assertEqual(
+                ANALYZER.load_reference_runtime_profile(agreeing, build_id),
+                {"swapchain_fixup": 1, "shader_fixups": True,
+                 "use_new_text_renderer": False},
+            )
+
+            disagreeing = manifest(temporary, "c.json", {"swapchain_fixup": 2})
+            with self.assertRaisesRegex(ANALYZER.AnalyzerError, "disagree"):
+                ANALYZER.load_reference_runtime_profile(
+                    [agreeing[0], disagreeing], build_id
+                )
+
 
 @unittest.skipIf(ANALYZER.capstone is None, "Python capstone is unavailable")
 class SignatureSemanticsTest(unittest.TestCase):

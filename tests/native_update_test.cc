@@ -1286,6 +1286,25 @@ TEST_P(PayloadStorePromotionTest, JsonCatalogRejectsInvalidFields) {
     document["profiles"][0]["version_code"] = bad;
     cases.push_back(document.dump());
   }
+  for (const auto& bad :
+       nlohmann::json::array({"1", true, nlohmann::json::array()})) {
+    auto document = valid;
+    document["profiles"][0]["swapchain_fixup"] = bad;
+    cases.push_back(document.dump());
+  }
+  for (const char* field : {"shader_fixups", "use_new_text_renderer"}) {
+    for (const auto& bad :
+         nlohmann::json::array({"true", 1, nlohmann::json::array()})) {
+      auto document = valid;
+      document["profiles"][0][field] = bad;
+      cases.push_back(document.dump());
+    }
+  }
+  for (const auto& bad : nlohmann::json::array({-1, 4})) {
+    auto document = valid;
+    document["profiles"][0]["swapchain_fixup"] = bad;
+    cases.push_back(document.dump());
+  }
   cases.push_back(JsonWithOverflowNumber(
       valid, nlohmann::json::json_pointer("/profiles/0/version_code")));
   cases.push_back(JsonWithOverflowNumber(

@@ -192,6 +192,15 @@ TEST(RuntimeConfigBootstrapTest,
             "# Boolean (default: false): render at physical display-pixel density instead\n  "
             "# of the logical desktop resolution. Enable only for sharper high-DPI output.\n  "
             "high_dpi: false",
+             "# Boolean (default: false): close Nightcap when you leave an "
+             "experience,\n  # instead of staying open on the Roblox home "
+             "screen.\n  close_on_leave: false",
+             "# Boolean (default: false): after you join, look up which region "
+             "the game\n  # server is in and print it in the session log. "
+             "Roblox's own server info is\n  # asked first; otherwise the "
+             "server's address goes to ipinfo.io. Only the\n  # server's "
+             "address is sent, never yours.\n  "
+             "server_location_indicator: false",
            "# HostAbi profile, run two isolated canaries with the selected "
            "graphics\n  "
            "# backend, and promote only on success. An existing current "
@@ -830,6 +839,86 @@ window:
 
   EXPECT_FALSE(loaded);
   EXPECT_NE(loaded.error.find("window.high_dpi"), std::string::npos);
+}
+
+TEST(RuntimeConfigFileTest, LoadsAndExportsCloseOnLeave) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path file = temporary.Write(R"yaml(
+version: 1
+window:
+  close_on_leave: true
+)yaml");
+
+  const RuntimeConfigLoadResult loaded =
+      LoadRuntimeConfig(MapEnvironment(), file);
+
+  ASSERT_TRUE(loaded) << loaded.error;
+  EXPECT_TRUE(loaded.config.window().close_on_leave);
+
+  unsetenv("MOCKTAIL_WIN_CLOSE_ON_LEAVE");
+  std::string error;
+  ASSERT_TRUE(ExportRuntimeConfigEnvironment(loaded.config, &error)) << error;
+  ASSERT_NE(getenv("MOCKTAIL_WIN_CLOSE_ON_LEAVE"), nullptr);
+  EXPECT_STREQ(getenv("MOCKTAIL_WIN_CLOSE_ON_LEAVE"), "1");
+  unsetenv("MOCKTAIL_WIN_CLOSE_ON_LEAVE");
+
+  // Absent means off, so a session that never asked for it stays put.
+  const RuntimeConfig defaults = RuntimeConfig::FromEnvironment(MapEnvironment());
+  EXPECT_FALSE(defaults.window().close_on_leave);
+}
+
+TEST(RuntimeConfigFileTest, LoadsAndExportsTheServerLocationIndicator) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path file = temporary.Write(R"yaml(
+version: 1
+integrations:
+  server_location_indicator: true
+)yaml");
+
+  const RuntimeConfigLoadResult loaded =
+      LoadRuntimeConfig(MapEnvironment(), file);
+
+  ASSERT_TRUE(loaded) << loaded.error;
+  EXPECT_TRUE(loaded.config.server_location().enabled);
+
+  unsetenv("MOCKTAIL_SERVER_LOCATION_INDICATOR");
+  std::string error;
+  ASSERT_TRUE(ExportRuntimeConfigEnvironment(loaded.config, &error)) << error;
+  ASSERT_NE(getenv("MOCKTAIL_SERVER_LOCATION_INDICATOR"), nullptr);
+  EXPECT_STREQ(getenv("MOCKTAIL_SERVER_LOCATION_INDICATOR"), "1");
+  unsetenv("MOCKTAIL_SERVER_LOCATION_INDICATOR");
+
+  // Nothing is looked up unless the user asked for it.
+  EXPECT_FALSE(
+      RuntimeConfig::FromEnvironment(MapEnvironment())
+          .server_location()
+          .enabled);
+
+  const std::filesystem::path invalid = temporary.Write(R"yaml(
+version: 1
+integrations:
+  server_location_indicator: perhaps
+)yaml");
+  const RuntimeConfigLoadResult rejected =
+      LoadRuntimeConfig(MapEnvironment(), invalid);
+  EXPECT_FALSE(rejected);
+  EXPECT_NE(rejected.error.find("integrations.server_location_indicator"),
+            std::string::npos);
+}
+
+TEST(RuntimeConfigFileTest, RejectsInvalidCloseOnLeavePolicy) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path file = temporary.Write(R"yaml(
+version: 1
+window:
+  close_on_leave: sometimes
+)yaml");
+
+  const RuntimeConfigLoadResult loaded =
+      LoadRuntimeConfig(MapEnvironment(), file);
+
+  EXPECT_FALSE(loaded);
+  EXPECT_NE(loaded.error.find("window.close_on_leave"), std::string::npos);
 }
 
 TEST(RuntimeConfigFileTest, RejectsUnsafeAudioInputDevice) {

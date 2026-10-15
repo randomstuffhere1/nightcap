@@ -53,6 +53,21 @@ struct FmodOutputDeviceBridgeProfile {
   }
 };
 
+// Optional, exact-build graphics fixups. Every field is absent by default and
+// a profile that omits them keeps the host's stock behavior, so a fixup can
+// only ever apply to the exact payload it was verified against.
+struct GraphicsFixupProfile {
+  // Monotone ladder of conservative swapchain workarounds; 0 is stock and
+  // every level includes the ones below it. See SwapchainFixupLevel.
+  int swapchain_fixup = 0;
+  // Arms the Vulkan shader interposition path so payload-specific shader
+  // fixups have a seam to run in.
+  bool shader_fixups = false;
+  // Leaves text drawing to the client's own text renderer instead of the host
+  // text overlay.
+  bool use_new_text_renderer = false;
+};
+
 struct BuildProfile {
   std::string version_name;
   int version_code = 0;
@@ -70,8 +85,14 @@ struct BuildProfile {
   // output-device virtual slots and restores them during controlled teardown;
   // executable guest code is never modified.
   std::optional<FmodOutputDeviceBridgeProfile> fmod_output_device_bridge;
+  GraphicsFixupProfile graphics_fixups;
   std::string reason;
 };
+
+// The highest swapchain_fixup value a manifest may declare. A profile asking
+// for more is rejected rather than silently clamped, so a manifest can never
+// describe a level this runtime does not implement.
+inline constexpr int kMaximumSwapchainFixupLevel = 3;
 
 struct ProfileLookupResult {
   std::optional<BuildProfile> profile;

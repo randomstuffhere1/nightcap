@@ -1240,6 +1240,22 @@ VkResult VKAPI_CALL ProfiledCreateShaderModule(
   return result;
 }
 
+// A payload-scoped shader fixup is published by the Build-ID-scoped
+// compatibility profile as MOCKTAIL_SHADER_FIXUPS, so it only ever applies to
+// the exact payload it was verified against. Read once: the wrappers below run
+// on guest-created threads.
+bool ShaderFixupsEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("MOCKTAIL_SHADER_FIXUPS");
+    if (value == nullptr || value[0] == '\0') {
+      return false;
+    }
+    return std::strcmp(value, "0") != 0 && std::strcmp(value, "off") != 0 &&
+           std::strcmp(value, "false") != 0;
+  }();
+  return enabled;
+}
+
 // Seeds a new pipeline cache from the stored blob, and adopts the cache so it
 // is written back when the engine destroys it. The seeded bytes are what turn
 // a first visit to an experience into a cached one: without them every launch
@@ -1267,19 +1283,37 @@ VkResult VKAPI_CALL CachedCreatePipelineCache(
   const std::uintptr_t key = reinterpret_cast<std::uintptr_t>(device);
   AdapterState& state = State();
   std::vector<std::uint8_t> seed;
+  // A payload-scoped shader fixup prefers this host's strictly-keyed store
+  // over a seed the client brought: a blob the payload kept across a GPU or
+  // driver change is a known source of pipeline creation failures, and the
+  // store's key carries both, so its blob cannot be stale for this device.
+  bool prefer_stored_seed = false;
   {
     std::lock_guard<std::mutex> lock(state.pipeline_cache_mutex);
     mocktail::graphics::PipelineCacheStore* store =
         state.pipeline_caches.StoreFor(key);
-    if (store != nullptr && store->enabled() && !caller_seeded &&
-        store->has_seed()) {
+    if (store != nullptr && store->enabled() && store->has_seed() &&
+        ShaderFixupsEnabled()) {
+      prefer_stored_seed = true;
+    }
+    if (store != nullptr && store->enabled() &&
+        (prefer_stored_seed || !caller_seeded) && store->has_seed()) {
       seed = store->seed();
     }
   }
+  if (prefer_stored_seed) {
+    static std::atomic<bool> logged{false};
+    if (!logged.exchange(true, std::memory_order_relaxed)) {
+      std::fprintf(stderr,
+                   "  [vulkan] shader fixups: using the host-keyed pipeline "
+                   "cache instead of the payload's own seed\n");
+    }
+  }
+  const bool client_seed_used = caller_seeded && !prefer_stored_seed;
 
   VkPipelineCacheCreateInfo seeded_info{};
   const VkPipelineCacheCreateInfo* host_info = create_info;
-  if (!caller_seeded && !seed.empty() && create_info != nullptr) {
+  if (!client_seed_used && !seed.empty() && create_info != nullptr) {
     seeded_info = *create_info;
     seeded_info.pInitialData = seed.data();
     seeded_info.initialDataSize = seed.size();
@@ -1292,7 +1326,7 @@ VkResult VKAPI_CALL CachedCreatePipelineCache(
     std::lock_guard<std::mutex> lock(state.pipeline_cache_mutex);
     if (mocktail::graphics::PipelineCacheStore* store =
             state.pipeline_caches.StoreFor(key);
-        store != nullptr && store->enabled() && !caller_seeded) {
+        store != nullptr && store->enabled() && !client_seed_used) {
       store->Adopt(adopted);
     }
   }
@@ -1303,7 +1337,7 @@ VkResult VKAPI_CALL CachedCreatePipelineCache(
                 : 0);
   // Which path supplied the cache data, so a trace says whether the store ran
   // or the client seeded the driver itself: 0 none, 1 caller, 2 store.
-  scope.Arg("source", caller_seeded ? 1 : (seed.empty() ? 0 : 2));
+  scope.Arg("source", client_seed_used ? 1 : (seed.empty() ? 0 : 2));
   scope.Arg("result", result);
   return result;
 }
@@ -1394,7 +1428,11 @@ PFN_vkVoidFunction ProfileAdapterProc(const char* name) {
   if (std::strcmp(name, "vkDestroyPipelineCache") == 0) {
     return reinterpret_cast<PFN_vkVoidFunction>(CachedDestroyPipelineCache);
   }
-  if (mocktail::graphics::ActiveProfileTrace() == nullptr) {
+  // A payload-scoped shader fixup keeps the shader and pipeline entrypoints
+  // wrapped even with no trace running, so those wrappers are the seam a
+  // payload-specific shader fixup runs in.
+  if (mocktail::graphics::ActiveProfileTrace() == nullptr &&
+      !ShaderFixupsEnabled()) {
     return nullptr;
   }
   if (std::strcmp(name, "vkCreateGraphicsPipelines") == 0) {
@@ -2103,7 +2141,12 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
   VkSwapchainCreateInfoKHR host_info = *create_info;
   const mocktail::graphics::PresentModePolicy present_policy =
       mocktail::graphics::CachedPresentModePolicy();
-  if (present_policy != mocktail::graphics::PresentModePolicy::kHostDefault) {
+  const mocktail::graphics::SwapchainFixupLevel fixup =
+      mocktail::graphics::CachedSwapchainFixupLevel();
+  // The surface is queried for the present policy, and from fixup level 1 on so
+  // the extent the client asks for can be clamped to what the surface reports.
+  if (present_policy != mocktail::graphics::PresentModePolicy::kHostDefault ||
+      fixup >= mocktail::graphics::SwapchainFixupLevel::kClampExtent) {
     PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR host_caps = nullptr;
     PFN_vkGetPhysicalDeviceSurfacePresentModesKHR host_modes_query = nullptr;
     {
@@ -2114,7 +2157,8 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     }
     const VkPhysicalDevice physical_device =
         HostDispatchForDevice(device).physical_device;
-    if (host_modes_query != nullptr && physical_device != VK_NULL_HANDLE) {
+    if (present_policy != mocktail::graphics::PresentModePolicy::kHostDefault &&
+        host_modes_query != nullptr && physical_device != VK_NULL_HANDLE) {
       std::uint32_t host_count = 0;
       if (host_modes_query(physical_device, create_info->surface, &host_count,
                            nullptr) == VK_SUCCESS &&
@@ -2144,13 +2188,40 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
       }
     }
     VkSurfaceCapabilitiesKHR capabilities{};
-    if (host_caps != nullptr && physical_device != VK_NULL_HANDLE &&
+    const bool have_capabilities =
+        host_caps != nullptr && physical_device != VK_NULL_HANDLE &&
         host_caps(physical_device, create_info->surface, &capabilities) ==
-            VK_SUCCESS) {
+            VK_SUCCESS;
+    if (have_capabilities &&
+        fixup >= mocktail::graphics::SwapchainFixupLevel::kClampExtent) {
+      const VkExtent2D clamped = mocktail::graphics::ClampSwapchainExtent(
+          host_info.imageExtent, capabilities.minImageExtent,
+          capabilities.maxImageExtent, fixup);
+      if (clamped.width != host_info.imageExtent.width ||
+          clamped.height != host_info.imageExtent.height) {
+        static std::atomic<bool> extent_logged{false};
+        if (!extent_logged.exchange(true, std::memory_order_relaxed)) {
+          std::fprintf(stderr,
+                       "  [vulkan] swapchain fixup level %d clamped extent "
+                       "%ux%u to %ux%u\n",
+                       static_cast<int>(fixup), host_info.imageExtent.width,
+                       host_info.imageExtent.height, clamped.width,
+                       clamped.height);
+        }
+        host_info.imageExtent = clamped;
+      }
+    }
+    // The image floor is policy work from level 2 on, so it is left alone
+    // while a stock host-default policy owns the swapchain.
+    if (have_capabilities &&
+        (present_policy !=
+             mocktail::graphics::PresentModePolicy::kHostDefault ||
+         fixup >= mocktail::graphics::SwapchainFixupLevel::kImageFloor)) {
       const std::uint32_t preferred =
           mocktail::graphics::PreferSwapchainMinImageCount(
               present_policy, create_info->minImageCount,
-              capabilities.minImageCount, capabilities.maxImageCount);
+              capabilities.minImageCount, capabilities.maxImageCount,
+              static_cast<int>(fixup));
       if (preferred != host_info.minImageCount) {
         host_info.minImageCount = preferred;
         static std::atomic<bool> logged{false};
@@ -2166,12 +2237,11 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
       }
     }
   }
-  const VkResult result =
-      mocktail::graphics::CreateSwapchainWithPresentModeFallback(
-          host_info, create_info->presentMode,
-          [&](const VkSwapchainCreateInfoKHR& attempt) {
-            return host_create(device, &attempt, allocator, swapchain);
-          });
+  const VkResult result = mocktail::graphics::CreateSwapchainWithFixupFallbacks(
+      host_info, create_info->presentMode, fixup,
+      [&](const VkSwapchainCreateInfoKHR& attempt) {
+        return host_create(device, &attempt, allocator, swapchain);
+      });
   if (result != VK_SUCCESS) {
     return result;
   }

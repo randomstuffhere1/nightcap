@@ -55,6 +55,9 @@ ELF_BUILD_ID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 PAYLOAD_ID_PATTERN = re.compile(r"^[1-9][0-9]*-[0-9a-f]{40}$")
 RVA_PATTERN = re.compile(r"^0x[1-9a-f][0-9a-f]*$")
+# Mirrors compat::kMaximumSwapchainFixupLevel: a manifest may not declare a
+# swapchain fixup level the runtime does not implement.
+MAXIMUM_SWAPCHAIN_FIXUP_LEVEL = 3
 
 ELF_HEADER = struct.Struct("<16sHHIQQQIHHHHHH")
 PROGRAM_HEADER = struct.Struct("<IIQQQQQQ")
@@ -1379,6 +1382,28 @@ def load_reference_runtime_profile(
                     profile["user_game_settings_fullscreen_setter_rva"],
                     "reference fullscreen setter",
                 )
+            # Graphics fixups are claims about one payload rather than
+            # something the binary can be asked for, so a derived profile
+            # carries the reference's values across unchanged.
+            for field in ("shader_fixups", "use_new_text_renderer"):
+                if field not in profile:
+                    continue
+                if type(profile[field]) is not bool:
+                    raise AnalyzerError(
+                        f"reference graphics fixup {field} has an invalid type"
+                    )
+                discovered[field] = profile[field]
+            if "swapchain_fixup" in profile:
+                level = profile["swapchain_fixup"]
+                if (
+                    type(level) is not int
+                    or not 0 <= level <= MAXIMUM_SWAPCHAIN_FIXUP_LEVEL
+                ):
+                    raise AnalyzerError(
+                        "reference graphics fixup swapchain_fixup has an "
+                        "invalid level"
+                    )
+                discovered["swapchain_fixup"] = level
             if "fmod_output_device_bridge" in profile:
                 bridge = profile["fmod_output_device_bridge"]
                 fields = {
@@ -1602,7 +1627,11 @@ def derive_runtime_compatibility(
     fallback: ElfImage | None = None,
 ) -> dict[str, Any]:
     source = load_reference_runtime_profile(manifests, reference.build_id)
-    result: dict[str, Any] = {}
+    result: dict[str, Any] = {
+        field: source[field]
+        for field in ("swapchain_fixup", "shader_fixups", "use_new_text_renderer")
+        if field in source
+    }
     fullscreen = source.get("user_game_settings_fullscreen_setter_rva")
     if fullscreen is not None:
         if not has_fullscreen_setter_contract(reference, fullscreen):

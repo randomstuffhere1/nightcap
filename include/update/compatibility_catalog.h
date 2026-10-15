@@ -10,10 +10,21 @@
 
 namespace mocktail::update {
 
+// Optional, exact-build graphics fixups. Absent on every shipped profile: a
+// profile has to opt in, and the runtime keeps its stock behavior otherwise.
+// Kept here so the updater rejects a manifest whose fixup fields have the
+// wrong type, before such a manifest can reach a runtime.
+struct SupportedPayloadGraphicsFixups {
+  int swapchain_fixup = 0;
+  bool shader_fixups = false;
+  bool use_new_text_renderer = false;
+};
+
 struct SupportedPayloadProfile {
   std::string version_name;
   std::uint64_t version_code = 0;
   std::string elf_build_id;
+  SupportedPayloadGraphicsFixups graphics_fixups;
 };
 
 struct CompatibilityCatalogResult {

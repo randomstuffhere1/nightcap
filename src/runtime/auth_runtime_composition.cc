@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdint>
@@ -768,7 +769,19 @@ void ClearSensitiveString(std::string* value) {
 
 bool PersistRobloxCookie(const std::filesystem::path& path,
                          std::string_view cookie_value) {
-  if (cookie_value.empty()) {
+  // A value that is only whitespace would be persisted and then read back as an
+  // empty session, which is exactly the state that cannot be used again.
+  std::size_t first = 0;
+  while (first < cookie_value.size() &&
+         std::isspace(static_cast<unsigned char>(cookie_value[first])) != 0) {
+    ++first;
+  }
+  std::size_t last = cookie_value.size();
+  while (last > first &&
+         std::isspace(static_cast<unsigned char>(cookie_value[last - 1])) != 0) {
+    --last;
+  }
+  if (first == last) {
     return false;
   }
   std::string formatted;
@@ -874,8 +887,14 @@ AuthRuntimeComposition ComposeAuthRuntime(
       credential.empty() ? std::string_view(cookie.value) : credential.view(),
       allow_guest);
 
+  // A cookie that is structurally unusable never reaches Roblox, so it has no
+  // HTTP status to recover on. To the user it is the same situation as a
+  // rejected one: the saved session no longer works. Both retire the managed
+  // credential and start over, so a malformed, truncated, or hand-edited
+  // cookie file cannot leave Nightcap unable to start.
   if (session.status == services::AuthSessionStatus::kInvalid &&
-      (session.http_status == 401 || session.http_status == 403) &&
+      (session.http_status == 401 || session.http_status == 403 ||
+       session.http_status == 0) &&
       IsAutomaticallyRecoverableSource(cookie.source)) {
     std::string reset_error;
     if (cookie.source == CookieSource::kManagedFile &&

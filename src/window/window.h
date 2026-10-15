@@ -26,6 +26,11 @@ bool Init(int width, int height, const char* title);
 // Returns false after the user requests quit.
 bool PumpEvents();
 
+// Asks for the same clean exit a closed window asks for. Callable from any
+// thread: the request is latched and consumed by the next PumpEvents() on the
+// main thread, so no teardown ever runs on the thread that asked for it.
+void RequestQuit();
+
 // Paces SDL polling at 240 Hz without smoothing raw input. Returns the
 // nanoseconds actually spent in SDL_DelayPrecise (0 if the tick already
 // missed the slot or SDL still has events).

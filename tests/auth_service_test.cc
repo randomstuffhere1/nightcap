@@ -75,6 +75,25 @@ TEST(AuthServiceTest, RedactsOnlyExactRejectedSecurityCookieSegments) {
   EXPECT_FALSE(AuthService::HasRoblosecurityCookie(redacted));
 }
 
+TEST(AuthServiceTest, RetiresAnEmptySecurityCookieByName) {
+  const std::string cookies = ".ROBLOSECURITY=\nRBXEventTrackerV2=browserid=1\n";
+  std::string redacted = "must be cleared";
+
+  // An empty session is invalid, not absent (see
+  // EmptyCookieIsNotMistakenForMissingGuestCredentials), so it is recovered by
+  // retiring it. That needs the name alone: there is no value to match on.
+  ASSERT_TRUE(
+      AuthService::RedactRejectedRoblosecurity(cookies, "", &redacted));
+
+  EXPECT_EQ(redacted,
+            std::string(std::string_view(".ROBLOSECURITY=").size(), ' ') +
+                "\nRBXEventTrackerV2=browserid=1\n");
+  EXPECT_EQ(redacted.size(), cookies.size());
+  EXPECT_FALSE(AuthService::HasRoblosecurityCookie(redacted));
+  // The unrelated cookie is untouched.
+  EXPECT_NE(redacted.find("RBXEventTrackerV2=browserid=1"), std::string::npos);
+}
+
 TEST(AuthServiceTest, RejectsCleanupWhenEffectiveCredentialChanged) {
   std::string redacted = "must be cleared";
 

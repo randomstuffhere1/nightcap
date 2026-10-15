@@ -150,6 +150,9 @@ static std::atomic<int> g_real_swap_count{0};
 // Set by the render thread at its first frame; the main thread shows the
 // window, because SDL window calls belong to the main thread.
 static std::atomic<bool> g_show_window_requested{false};
+// Latched by RequestQuit() from any thread and folded into g_state by the next
+// PumpEvents(), which is the only place the quit flag is read.
+static std::atomic<bool> g_quit_requested{false};
 static std::atomic<uint64_t> g_first_present_ticks_ns{0};
 static InputPumpPacer g_input_pump_pacer;
 static PresentLifecycleGate g_present_lifecycle;
@@ -1721,6 +1724,10 @@ bool SwapBuffers() {
         dlsym(RTLD_DEFAULT, "mocktail_text_overlay_query"));
     source.copy = reinterpret_cast<decltype(source.copy)>(
         dlsym(RTLD_DEFAULT, "mocktail_text_overlay_copy"));
+    source.host_query = reinterpret_cast<decltype(source.host_query)>(
+        dlsym(RTLD_DEFAULT, "mocktail_host_overlay_query"));
+    source.host_copy = reinterpret_cast<decltype(source.host_copy)>(
+        dlsym(RTLD_DEFAULT, "mocktail_host_overlay_copy"));
     g_gles_text_overlay =
         std::make_unique<graphics::GlesTextOverlayCompositor>(source);
   }
@@ -2437,7 +2444,17 @@ bool PumpEvents() {
       }
     }
   }
+  // A quit requested from another thread takes effect here, on the main thread,
+  // and takes the same exit the closed window takes.
+  if (g_quit_requested.exchange(false, std::memory_order_acq_rel)) {
+    fprintf(stderr, "  [window] clean exit requested by the runtime\n");
+    g_state.quit_requested = true;
+  }
   return !g_state.quit_requested;
+}
+
+void RequestQuit() {
+  g_quit_requested.store(true, std::memory_order_release);
 }
 
 bool UnthrottledPresentationRequested() {

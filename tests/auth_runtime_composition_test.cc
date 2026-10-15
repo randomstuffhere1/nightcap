@@ -575,6 +575,156 @@ TEST(AuthRuntimeCompositionTest,
   EXPECT_EQ(restart_http.request_count, 0);
 }
 
+TEST(AuthRuntimeCompositionTest,
+     EmptyManagedCookieIsRetiredAndStartsGuestInsteadOfAborting) {
+  TempDirectory directory;
+  MapEnvironment environment;
+  environment.Set("HOME", directory.path().string());
+  environment.Set("MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP", "1");
+  const RuntimePaths paths = PathsFor(environment, directory);
+  // The shape that bricked startup: a `.ROBLOSECURITY=` with nothing after it.
+  // There is no value to match it by during retirement, which used to fail the
+  // whole cleanup and take startup down with it.
+  const std::string remaining = "RBXEventTrackerV2=browserid=123456\n";
+  const std::string empty_cookie = ".ROBLOSECURITY=";
+  ASSERT_TRUE(WriteFile(paths.cookie_file(), empty_cookie + "\n" + remaining));
+  FakeHttpClient http;
+  services::AuthService auth_service(http);
+
+  const AuthRuntimeComposition composition =
+      ComposeAuthRuntime(environment, paths, auth_service);
+
+  ASSERT_TRUE(composition) << composition.error;
+  EXPECT_EQ(composition.status, AuthRuntimeStatus::kGuest);
+  // Recovered, so there is no error left to report; the retired flag is what
+  // tells the caller a session was discarded.
+  EXPECT_TRUE(composition.error.empty());
+  EXPECT_TRUE(composition.rejected_credential_retired);
+  // Nothing was sent anywhere: the cookie could not authenticate in the first
+  // place.
+  EXPECT_EQ(http.request_count, 0);
+  // The unusable cookie is blanked and the tracker cookie survives, so the next
+  // start sees no session at all instead of the same broken one again.
+  EXPECT_EQ(ReadFile(paths.cookie_file()),
+            std::string(empty_cookie.size(), ' ') + "\n" + remaining);
+}
+
+TEST(AuthRuntimeCompositionTest,
+     EmptyManagedCookieStillFailsClosedWithoutAGuestSession) {
+  TempDirectory directory;
+  MapEnvironment environment;
+  environment.Set("HOME", directory.path().string());
+  const RuntimePaths paths = PathsFor(environment, directory);
+  ASSERT_TRUE(WriteFile(paths.cookie_file(), ".ROBLOSECURITY=\n"));
+  FakeHttpClient http;
+  services::AuthService auth_service(http);
+
+  const AuthRuntimeComposition composition =
+      ComposeAuthRuntime(environment, paths, auth_service);
+
+  EXPECT_FALSE(composition);
+  EXPECT_EQ(composition.status, AuthRuntimeStatus::kInvalidCredentials);
+  EXPECT_EQ(composition.error, "invalid .ROBLOSECURITY cookie");
+  // It is still retired, so the next start is not stuck on it again.
+  EXPECT_TRUE(composition.rejected_credential_retired);
+  EXPECT_EQ(ReadFile(paths.cookie_file()),
+            std::string(std::string_view(".ROBLOSECURITY=").size(), ' ') + "\n");
+}
+
+TEST(AuthRuntimeCompositionTest, RejectsPersistingAWhitespaceOnlySession) {
+  TempDirectory directory;
+  MapEnvironment environment;
+  environment.Set("HOME", directory.path().string());
+  const RuntimePaths paths = PathsFor(environment, directory);
+
+  // Persisting this would produce a file that reads back as an empty session.
+  for (const char* value : {"", " ", "\n", "  \t "}) {
+    SCOPED_TRACE(value);
+    EXPECT_FALSE(PersistRobloxCookie(paths.cookie_file(), value));
+  }
+  EXPECT_FALSE(RuntimePaths::Exists(paths.cookie_file()));
+  EXPECT_TRUE(PersistRobloxCookie(paths.cookie_file(), "real-token"));
+  EXPECT_NE(ReadFile(paths.cookie_file()).find("real-token"), std::string::npos);
+}
+
+TEST(AuthRuntimeCompositionTest,
+     UnusableManagedCookieIsRetiredAndStartsGuestInsteadOfAborting) {
+  TempDirectory directory;
+  MapEnvironment environment;
+  environment.Set("HOME", directory.path().string());
+  environment.Set("MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP", "1");
+  const RuntimePaths paths = PathsFor(environment, directory);
+  // A cookie value carrying whitespace and a non-ASCII byte never reaches
+  // Roblox, so there is no HTTP status to recover on. It used to be fatal.
+  const std::string remaining_cookies = "RBXEventTrackerV2=browserid=123456\n";
+  const std::string unusable = ".ROBLOSECURITY=abc def\xc3\xa9\n";
+  ASSERT_TRUE(WriteFile(paths.cookie_file(), unusable + remaining_cookies));
+  FakeHttpClient http;
+  services::AuthService auth_service(http);
+
+  const AuthRuntimeComposition composition =
+      ComposeAuthRuntime(environment, paths, auth_service);
+
+  ASSERT_TRUE(composition) << composition.error;
+  EXPECT_EQ(composition.status, AuthRuntimeStatus::kGuest);
+  EXPECT_EQ(composition.http_status, 0);
+  EXPECT_TRUE(composition.rejected_credential_retired);
+  // Nothing was sent anywhere: the cookie was unusable before a request.
+  EXPECT_EQ(http.request_count, 0);
+  // The unusable value is blanked in place, and the unrelated cookie survives.
+  EXPECT_EQ(ReadFile(paths.cookie_file()),
+            std::string(unusable.size() - 1, ' ') + "\n" +
+                remaining_cookies);
+}
+
+TEST(AuthRuntimeCompositionTest,
+     UnusableManagedCookieStillFailsClosedWithoutAGuestSession) {
+  TempDirectory directory;
+  MapEnvironment environment;
+  environment.Set("HOME", directory.path().string());
+  const RuntimePaths paths = PathsFor(environment, directory);
+  const std::string unusable_value = ".ROBLOSECURITY=abc def\n";
+  ASSERT_TRUE(WriteFile(paths.cookie_file(), unusable_value));
+  FakeHttpClient http;
+  services::AuthService auth_service(http);
+
+  const AuthRuntimeComposition composition =
+      ComposeAuthRuntime(environment, paths, auth_service);
+
+  EXPECT_FALSE(composition);
+  EXPECT_EQ(composition.status, AuthRuntimeStatus::kInvalidCredentials);
+  EXPECT_EQ(composition.error, "invalid .ROBLOSECURITY cookie");
+  // It is still retired, so the next start is not stuck on it again.
+  EXPECT_TRUE(composition.rejected_credential_retired);
+  EXPECT_EQ(ReadFile(paths.cookie_file()),
+            std::string(unusable_value.size() - 1, ' ') + "\n");
+}
+
+TEST(AuthRuntimeCompositionTest,
+     UnusableExplicitCookieFileIsLeftAloneAndFailsClosed) {
+  TempDirectory directory;
+  const std::filesystem::path explicit_cookie =
+      directory.path() / "explicit-cookie";
+  const std::string unusable = ".ROBLOSECURITY=abc def\n";
+  ASSERT_TRUE(WriteFile(explicit_cookie, unusable));
+  MapEnvironment environment;
+  environment.Set("HOME", directory.path().string());
+  environment.Set("MOCKTAIL_COOKIE_FILE", explicit_cookie.string());
+  environment.Set("MOCKTAIL_ALLOW_NO_COOKIE_LUA_APP", "1");
+  FakeHttpClient http;
+  services::AuthService auth_service(http);
+
+  const AuthRuntimeComposition composition = ComposeAuthRuntime(
+      environment, PathsFor(environment, directory), auth_service);
+
+  // A credential the user supplied stays theirs: it is reported, never
+  // rewritten and never silently replaced by a guest session.
+  EXPECT_FALSE(composition);
+  EXPECT_EQ(composition.status, AuthRuntimeStatus::kInvalidCredentials);
+  EXPECT_FALSE(composition.rejected_credential_retired);
+  EXPECT_EQ(ReadFile(explicit_cookie), unusable);
+}
+
 TEST(AuthRuntimeCompositionTest, Http403ClearsManagedCookieAndStartsGuest) {
   TempDirectory directory;
   MapEnvironment environment;

@@ -144,6 +144,7 @@ enum class UiStyle {
   kProgress,
 };
 
+
 std::string ValidMessage(std::string_view message) {
   if (message.empty() ||
       !g_utf8_validate(message.data(), static_cast<gssize>(message.size()),
@@ -193,8 +194,9 @@ bool InitializeUi(UiStyle style) {
                                      ADW_COLOR_SCHEME_FORCE_DARK);
   if (style == UiStyle::kDialog) {
     InstallDialogStyle(display);
-  } else {
+  } else if (style == UiStyle::kProgress) {
     InstallProgressStyle(display);
+  } else {
   }
   return true;
 }
@@ -470,6 +472,7 @@ std::string ValidProgressMessage(std::string_view message) {
   }
   return std::string(message);
 }
+
 
 gboolean OnProgressWindowClose(GtkWindow*, gpointer user_data) {
   auto* state = static_cast<ProgressState*>(user_data);

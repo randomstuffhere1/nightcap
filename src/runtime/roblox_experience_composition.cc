@@ -1675,6 +1675,8 @@ Status RobloxExperienceComposition::DrainLaunchRequests() {
   }
 
   std::shared_ptr<RobloxFreshGameLaunchController> returned_controller;
+  bool switched_by_the_host = false;
+  bool had_a_running_game = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (lua_app_return_pending_ && !launch_in_progress_ &&
@@ -1682,6 +1684,11 @@ Status RobloxExperienceComposition::DrainLaunchRequests() {
       // Consume first so a concurrent callback can set a new observation.
       lua_app_return_pending_ = false;
       returned_controller = controller_;
+      // Read both before the block below clears them: a queued switch leaves
+      // the experience too, and only a leave the host did not ask for is the
+      // player choosing to leave.
+      switched_by_the_host = controlled_switch_waiting_for_return_;
+      had_a_running_game = game_active_;
     }
   }
   if (returned_controller != nullptr) {
@@ -1699,6 +1706,9 @@ Status RobloxExperienceComposition::DrainLaunchRequests() {
       presence_request_.reset();
       playing_presence_published_ = false;
       controlled_switch_waiting_for_return_ = false;
+      if (had_a_running_game && !switched_by_the_host) {
+        player_left_experience_ = true;
+      }
     }
     NotifyPresence(RobloxExperiencePresencePhase::kBrowsing, nullptr);
   }
@@ -1984,6 +1994,7 @@ Status RobloxExperienceComposition::Shutdown() {
     playing_presence_published_ = false;
     lua_app_return_pending_ = false;
     controlled_switch_waiting_for_return_ = false;
+    player_left_experience_ = false;
     lua_app_surface_recreation_pending_ = false;
     pending_launch_requests_.clear();
     last_web_join_attempt_id_.clear();
@@ -2083,6 +2094,19 @@ GameSessionSnapshot RobloxExperienceComposition::Snapshot() const {
     controller = controller_;
   }
   return controller != nullptr ? controller->Snapshot() : GameSessionSnapshot{};
+}
+
+bool RobloxExperienceComposition::TakePlayerLeftExperience() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const bool left = player_left_experience_;
+  player_left_experience_ = false;
+  return left;
+}
+
+std::string RobloxExperienceComposition::ActiveGameInstanceId() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return presence_request_.has_value() ? presence_request_->game_instance_id
+                                       : std::string();
 }
 
 void RobloxExperienceComposition::NotifyPresence(

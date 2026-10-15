@@ -736,6 +736,70 @@ TEST(RobloxExperienceCompositionTest,
 }
 
 TEST(RobloxExperienceCompositionTest,
+     ReportsAPlayerLeaveOnlyWhenTheHostDidNotAskForIt) {
+  jnivm::VM vm;
+  Probe probe{&vm};
+  probe.publish_during_subscribe = true;
+  g_probe = &probe;
+  for (const char* class_name : {
+           "com/roblox/engine/jni/NativeGLInterface",
+           "android/view/Surface",
+           "com/roblox/engine/jni/model/PlatformParams",
+           "android/app/Activity",
+           "com/roblox/engine/jni/autovalue/AutoValue_StartGameParams",
+           "com/roblox/engine/jni/autovalue/StartAppParams",
+           "com/roblox/universalapp/messagebus/MessageBus",
+           "com/roblox/universalapp/messagebus/Connection",
+           "com/roblox/engine/jni/memstorage/MemStorage",
+           "com/roblox/engine/jni/memstorage/Connection",
+           "com/roblox/engine/jni/memstorage/Callback",
+       }) {
+    vm.RegisterClass(class_name);
+  }
+  RobloxExperienceComposition composition(
+      {vm.GetJavaVM(), &vm, Prepare}, {GetLaunchId, Subscribe, Disconnect},
+      {GetWebViewOpenId, GetWebViewHandleWindowCloseId, GetWebViewProtocolName,
+       GetWebViewAvailabilityId, GetWebViewMessageId, InitializeWebViewProtocol,
+       Subscribe, Disconnect, SetRequestHandler, ClearNativeRequestHandler,
+       PublishRaw, BroadcastDataModelFocus, GetWebViewMutateId,
+       GetWebViewCloseId, SignalWebViewJavascriptCallback,
+       UpdateCookieSetHandler},
+      BrowserServiceSymbols(), PermissionsSymbols(),
+      {Foreground, Start, Update, PauseGame, ResumeGame, Leave, PauseApp,
+       DestroyApp, UpdateApp, StartApp, CallMessagesFromMainThread},
+      JniFactory(&probe), {&probe, RegisterObserver, ClearObserver});
+  RobloxLuaAppExperienceReadiness readiness;
+  readiness.principal = {GameSessionPrincipalKind::kAuthenticated, 4, "42",
+                         "https://www.roblox.com"};
+  readiness.surface = {7, 0x1234, 1280, 720};
+  readiness.username = "typed-user";
+
+  ASSERT_TRUE(composition.InitializePlatformProtocols().ok());
+  ASSERT_TRUE(composition.OnLuaAppReady(readiness).ok());
+  DrainUntilPresented(&composition);
+  ASSERT_EQ(probe.starts.load(), 1);
+  // Nothing has left yet, so the observation stays clear.
+  EXPECT_FALSE(composition.TakePlayerLeftExperience());
+
+  // The guest coming home from a running game, with nothing queued behind it,
+  // is the player leaving the experience themselves.
+  composition.NotifyLuaAppDidReturn();
+  for (int attempt = 0; attempt < 1000; ++attempt) {
+    ASSERT_TRUE(composition.DrainLaunchRequests().ok());
+    if (composition.Snapshot().state == GameSessionState::kReturnedToLuaApp) {
+      break;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_TRUE(composition.TakePlayerLeftExperience());
+  // Consumed once, so a later check cannot close the window a second time.
+  EXPECT_FALSE(composition.TakePlayerLeftExperience());
+
+  EXPECT_TRUE(composition.Shutdown().ok());
+  g_probe = nullptr;
+}
+
+TEST(RobloxExperienceCompositionTest,
      ConsumesControlledStartAndSwitchesActiveGame) {
   char directory_pattern[] = "/tmp/mocktail-composition-launch-test-XXXXXX";
   char* launch_directory = mkdtemp(directory_pattern);
@@ -837,6 +901,9 @@ TEST(RobloxExperienceCompositionTest,
   ASSERT_EQ(probe.starts.load(), 2);
   EXPECT_EQ(probe.started_place, 17580461965);
   EXPECT_EQ(probe.join_request_type, 3);
+  // Switching servers leaves the experience too, but the host asked for it, so
+  // it must never read as the player leaving.
+  EXPECT_FALSE(composition.TakePlayerLeftExperience());
 
   EXPECT_TRUE(composition.LeaveGame().ok());
   EXPECT_EQ(probe.leaves, 2);

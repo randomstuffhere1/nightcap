@@ -12,7 +12,9 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+#include <utility>
 
+#include "compat/build_profile.h"
 #include "compat/guest_abi.h"
 
 namespace mocktail::update {
@@ -90,6 +92,35 @@ CompatibilityCatalogResult LoadCompatibilityCatalog(
       result.error = "compatibility profile flags have invalid types";
       return result;
     }
+    // The fixups are optional, so an absent key is a stock runtime; a present
+    // one must carry the declared type and a level this runtime implements.
+    SupportedPayloadGraphicsFixups fixups;
+    if (profile.contains("swapchain_fixup") &&
+        !profile["swapchain_fixup"].is_null()) {
+      if (!profile["swapchain_fixup"].is_number_integer() ||
+          profile["swapchain_fixup"].get<int>() < 0 ||
+          profile["swapchain_fixup"].get<int>() >
+              compat::kMaximumSwapchainFixupLevel) {
+        result.error = "compatibility profile declares an unknown "
+                       "swapchain_fixup level";
+        return result;
+      }
+      fixups.swapchain_fixup = profile["swapchain_fixup"].get<int>();
+    }
+    for (const auto& [name, destination] :
+         {std::pair<const char*, bool*>{"shader_fixups",
+                                        &fixups.shader_fixups},
+          {"use_new_text_renderer", &fixups.use_new_text_renderer}}) {
+      if (!profile.contains(name) || profile[name].is_null()) {
+        continue;
+      }
+      if (!profile[name].is_boolean()) {
+        result.error = "compatibility profile graphics fixups have invalid "
+                       "types";
+        return result;
+      }
+      *destination = profile[name].get<bool>();
+    }
     if (profile.value("status", "") != "supported" ||
         !profile.value("default_allowed", false) ||
         profile.value("allow_legacy_binary_patches", true)) {
@@ -118,6 +149,7 @@ CompatibilityCatalogResult LoadCompatibilityCatalog(
     supported.version_name = profile["version_name"].get<std::string>();
     supported.version_code = profile["version_code"].get<std::uint64_t>();
     supported.elf_build_id = profile["elf_build_id"].get<std::string>();
+    supported.graphics_fixups = fixups;
     std::transform(supported.elf_build_id.begin(), supported.elf_build_id.end(),
                    supported.elf_build_id.begin(), [](unsigned char value) {
                      return static_cast<char>(std::tolower(value));

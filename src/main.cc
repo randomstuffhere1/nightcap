@@ -157,9 +157,16 @@ void PromptFirstLaunchSignIn(
 
   std::cout << "\n======================================================\n"
             << "  First-Time Setup: Roblox Sign-In\n"
-            << "======================================================\n"
-            << "  [auth] no saved session found; opening desktop sign-in window...\n"
-            << "  [auth] tip: you can use Quick Log In (QR code) or username/password\n"
+            << "======================================================\n";
+  if (composition->rejected_credential_retired) {
+    std::cout << "  [auth] saved session discarded; opening desktop sign-in "
+                 "window...\n";
+  } else {
+    std::cout << "  [auth] no saved session found; opening desktop sign-in "
+                 "window...\n";
+  }
+  std::cout << "  [auth] tip: you can use Quick Log In (QR code) or "
+               "username/password\n"
             << "  [auth] (close the sign-in window to play as guest)\n\n";
 
   struct FirstLaunchContext {
@@ -1043,6 +1050,15 @@ int main(int argc, char* argv[]) {
         std::cerr << " (HTTP " << composition.http_status << ')';
       }
       std::cerr << '\n';
+      if (composition.status ==
+          mocktail::runtime::AuthRuntimeStatus::kInvalidCredentials) {
+        // A saved session the host cannot retire, with guest sessions not
+        // allowed, is the only way an invalid cookie still stops startup.
+        std::cerr << "  [auth] the supplied Roblox session was rejected and "
+                     "cannot be replaced automatically.\n"
+                  << "  [auth] sign in again, or unset MOCKTAIL_COOKIE_FILE "
+                     "and MOCKTAIL_ROBLOX_COOKIES to sign in fresh.\n";
+      }
       return EXIT_FAILURE;
     }
     composition.jni_vm->SetPlatformIdentity(jnivm::PlatformIdentity{
