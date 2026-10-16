@@ -97,9 +97,12 @@ mod imp {
     #[inline]
     fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
         // SSE2 is part of the x86-64 baseline, so the intrinsic is available
-        // wherever this module compiles; it is declared safe for exactly that
-        // reason.
-        let out = arch::__cpuid_count(leaf, subleaf);
+        // wherever this module compiles. Rust 1.95 split the intrinsic into a
+        // safe wrapper and an unsafe one, and the safe name is the one called
+        // here, so the block is what older toolchains (the workspace MSRV is
+        // 1.83, and distribution rustc is older still) need.
+        #[allow(unused_unsafe)]
+        let out = unsafe { arch::__cpuid_count(leaf, subleaf) };
         (out.eax, out.ebx, out.ecx, out.edx)
     }
 }
