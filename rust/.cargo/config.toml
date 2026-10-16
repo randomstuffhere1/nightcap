@@ -26,7 +26,12 @@ replace-with = "vendored-sources"
 [source.vendored-sources]
 directory = "vendor"
 
-# Cross builds. Native consumers use the host default; the rustup target for the
-# cross triple is a documented prerequisite in README "Building".
-[target.aarch64-unknown-linux-gnu]
-linker = "aarch64-linux-gnu-gcc"
+# The linker for aarch64 is deliberately not pinned here. This config is read on
+# native aarch64 builds too, where the host compiler is the right one, and a
+# hardcoded aarch64-linux-gnu-gcc made cargo fail on them with "linker not
+# found". A cross build sets it instead:
+#
+#   CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+#
+# The rustup target for the cross triple is a documented prerequisite in README
+# "Building".

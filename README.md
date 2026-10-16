@@ -286,9 +286,11 @@ into a staticlib that links into the `libvulkan.so` stub and the kernel tests).
 A Rust toolchain is also required, 1.83 or newer; `rust/rust-toolchain.toml`
 selects the channel for rustup-managed installs, and the distribution packages
 below carry one. The crates are vendored under `rust/vendor`, so no build path
-needs network access. Cross-compiling to `aarch64` additionally needs that
-target installed (`rustup target add aarch64-unknown-linux-gnu`) and
-`aarch64-linux-gnu-gcc` on the linker path.
+needs network access. Cross-compiling to `aarch64` needs that target installed
+(`rustup target add aarch64-unknown-linux-gnu`) plus
+`aarch64-linux-gnu-gcc` on the linker path, and
+`CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc` set for
+the build, since a native aarch64 build uses the host compiler instead.
 `-DMOCKTAIL_BUILD_RUST_KERNELS=OFF` builds against a prebuilt archive given in
 `-DMOCKTAIL_RUST_PREBUILT=/path/to/libmocktail_rs.a`.
 
