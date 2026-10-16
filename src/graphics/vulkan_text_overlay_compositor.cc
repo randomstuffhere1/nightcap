@@ -210,9 +210,6 @@ struct VulkanTextOverlayCompositor::Impl {
 
   std::mutex mutex;
   std::atomic<bool> has_active_overlay{false};
-  // Diagnostics for the swapchain image clear; see TextOverlaySwapchainClearStats.
-  std::atomic<std::uint64_t> images_cleared{0};
-  std::atomic<std::uint64_t> clear_submit_failures{0};
   std::vector<std::unique_ptr<DeviceState>> devices;
   OverlayMayPresentFn overlay_may_present =
       reinterpret_cast<OverlayMayPresentFn>(
@@ -646,193 +643,6 @@ struct VulkanTextOverlayCompositor::Impl {
     has_active_overlay.store(active, std::memory_order_release);
   }
 
-  // Clears every image of a freshly created swapchain to opaque black.
-  //
-  // A swapchain image's contents are undefined until something writes them. On
-  // entering or leaving fullscreen the guest tears its render targets down and
-  // rebuilds them, and for the frame or two before the rebuild lands it can
-  // present an image it has not fully written. What the compositor then puts on
-  // screen is whatever the driver left in that memory, which is what the brief
-  // pink and green flash on fullscreen was: uninitialised image contents, not a
-  // colour conversion problem.
-  //
-  // Clearing once at creation removes the class of artefact entirely. It costs
-  // one submission per swapchain creation, which is a resize, not a frame, and
-  // it is the only point at which the images are known to be untouched.
-  //
-  // Best effort throughout. Any failure here leaves the previous behaviour,
-  // which is a brief flash, rather than failing swapchain creation the guest
-  // cannot recover from.
-  void ClearSwapchainImages(DeviceState* device,
-                            const std::vector<VkImage>& images) {
-    if (device == nullptr || images.empty() || device->vulkan == nullptr ||
-        device->get_device_proc_addr == nullptr ||
-        device->queue_submit == nullptr) {
-      return;
-    }
-    auto* get_queue = reinterpret_cast<PFN_vkGetDeviceQueue>(
-        device->get_device_proc_addr(device->device, "vkGetDeviceQueue"));
-    auto* allocate = reinterpret_cast<PFN_vkAllocateCommandBuffers>(
-        device->get_device_proc_addr(device->device, "vkAllocateCommandBuffers"));
-    auto* begin = reinterpret_cast<PFN_vkBeginCommandBuffer>(
-        device->get_device_proc_addr(device->device, "vkBeginCommandBuffer"));
-    auto* end = reinterpret_cast<PFN_vkEndCommandBuffer>(
-        device->get_device_proc_addr(device->device, "vkEndCommandBuffer"));
-    auto* clear = reinterpret_cast<PFN_vkCmdClearColorImage>(
-        device->get_device_proc_addr(device->device, "vkCmdClearColorImage"));
-    auto* barrier = reinterpret_cast<PFN_vkCmdPipelineBarrier>(
-        device->get_device_proc_addr(device->device, "vkCmdPipelineBarrier"));
-    auto* free_buffers =
-        reinterpret_cast<PFN_vkFreeCommandBuffers>(
-            device->get_device_proc_addr(device->device, "vkFreeCommandBuffers"));
-    auto* destroy_pool = reinterpret_cast<PFN_vkDestroyCommandPool>(
-        device->get_device_proc_addr(device->device, "vkDestroyCommandPool"));
-    auto* create_pool = reinterpret_cast<PFN_vkCreateCommandPool>(
-        device->get_device_proc_addr(device->device, "vkCreateCommandPool"));
-    if (get_queue == nullptr || create_pool == nullptr ||
-        allocate == nullptr || begin == nullptr || end == nullptr ||
-        clear == nullptr || barrier == nullptr || free_buffers == nullptr ||
-        destroy_pool == nullptr) {
-      return;
-    }
-
-    VkQueue queue = VK_NULL_HANDLE;
-    get_queue(device->device, device->graphics_queue_family, 0, &queue);
-    if (queue == VK_NULL_HANDLE) {
-      return;
-    }
-
-    VkCommandPoolCreateInfo pool_info{};
-    pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    pool_info.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
-    pool_info.queueFamilyIndex = device->graphics_queue_family;
-    VkCommandPool pool = VK_NULL_HANDLE;
-    if (create_pool(device->device, &pool_info, nullptr, &pool) != VK_SUCCESS ||
-        pool == VK_NULL_HANDLE) {
-      return;
-    }
-
-    // One command buffer for all images: each is transitioned out of undefined
-    // and back again, so the clear itself cannot be hoisted into one barrier
-    // around the lot.
-    VkCommandBufferAllocateInfo allocate_info{};
-    allocate_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocate_info.commandPool = pool;
-    allocate_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocate_info.commandBufferCount = 1;
-    VkCommandBuffer command_buffer = VK_NULL_HANDLE;
-    if (allocate(device->device, &allocate_info, &command_buffer) !=
-            VK_SUCCESS ||
-        command_buffer == VK_NULL_HANDLE) {
-      destroy_pool(device->device, pool, nullptr);
-      return;
-    }
-
-    VkCommandBufferBeginInfo begin_info{};
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    // One-time submit: the pool is transient and this is not drawn from again.
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    bool recorded = begin(command_buffer, &begin_info) == VK_SUCCESS;
-    if (recorded) {
-      for (VkImage image : images) {
-        VkImageMemoryBarrier to_transfer{};
-        to_transfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        // Undefined rather than eTransferSrcOptimized: the contents of a
-        // swapchain image are undefined until written, and that is the point.
-        to_transfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        to_transfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        to_transfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_transfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        to_transfer.image = image;
-        to_transfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        to_transfer.srcAccessMask = 0;
-        to_transfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1,
-                &to_transfer);
-
-        VkClearColorValue color{};
-        // Opaque black. Alpha 1 so the window is not transparent for the frame
-        // before the guest's own blend state takes over.
-        color.float32[0] = 0.0f;
-        color.float32[1] = 0.0f;
-        color.float32[2] = 0.0f;
-        color.float32[3] = 1.0f;
-        VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        clear(command_buffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-              &color, 1, &range);
-
-        VkImageMemoryBarrier to_undefined = to_transfer;
-        to_undefined.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        to_undefined.newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        to_undefined.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        to_undefined.dstAccessMask = 0;
-        barrier(command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, nullptr, 0, nullptr,
-                1, &to_undefined);
-      }
-      recorded = end(command_buffer) == VK_SUCCESS;
-    }
-
-    bool submitted = false;
-    if (recorded) {
-      VkSubmitInfo submit{};
-      submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-      submit.commandBufferCount = 1;
-      submit.pCommandBuffers = &command_buffer;
-      // The device's queue_mutex is what serialises compositor submits against
-      // the guest's on the same queue; taking it here keeps this clear ordered
-      // against the guest's own use of these images. Taken directly rather than
-      // through SharedQueueMutex because no registered QueueState exists yet --
-      // this runs at swapchain registration, before the first present.
-      std::lock_guard<std::mutex> queue_lock(device->queue_mutex);
-      submitted = device->queue_submit(queue, 1, &submit, VK_NULL_HANDLE) ==
-                  VK_SUCCESS;
-      if (submitted && device->queue_wait_idle != nullptr) {
-        // The images must not be presented before the clear has landed.
-        device->queue_wait_idle(queue);
-      }
-      if (submitted) {
-        images_cleared.fetch_add(images.size(), std::memory_order_relaxed);
-      }
-    }
-    if (!submitted) {
-      clear_submit_failures.fetch_add(1, std::memory_order_relaxed);
-      static std::atomic<bool> warned{false};
-      if (!warned.exchange(true, std::memory_order_relaxed)) {
-        std::fprintf(stderr,
-                     "  [overlay] swapchain image clear did not submit; "
-                     "first frames after a resize may show driver contents\n");
-      }
-    }
-
-    free_buffers(device->device, pool, 1, &command_buffer);
-    destroy_pool(device->device, pool, nullptr);
-  }
-
-  // The diagnostic accessor at the bottom of this file has to find the
-  // counters, and Impl is private to the class. Registered on construction and
-  // removed on destruction; the list is tiny (one compositor per adapter) and
-  // only ever read by a test or a diagnostic.
-  static std::mutex& LiveImplsMutex() {
-    static std::mutex mutex;
-    return mutex;
-  }
-  static std::vector<Impl*>& LiveImpls() {
-    static std::vector<Impl*> impls;
-    return impls;
-  }
-  void TrackLive() {
-    std::lock_guard<std::mutex> lock(LiveImplsMutex());
-    LiveImpls().push_back(this);
-  }
-  void UntrackLive() {
-    std::lock_guard<std::mutex> lock(LiveImplsMutex());
-    LiveImpls().erase(
-        std::remove(LiveImpls().begin(), LiveImpls().end(), this),
-        LiveImpls().end());
-  }
-
   std::mutex* LookupSharedQueueMutex(VkQueue queue) {
     QueueState* queue_state = nullptr;
     DeviceState* device = FindQueue(queue, &queue_state);
@@ -899,17 +709,12 @@ struct VulkanTextOverlayCompositor::Impl {
 };
 
 VulkanTextOverlayCompositor::VulkanTextOverlayCompositor()
-    : impl_(new (std::nothrow) Impl) {
-  if (impl_ != nullptr) {
-    impl_->TrackLive();
-  }
-}
+    : impl_(new (std::nothrow) Impl) {}
 
 VulkanTextOverlayCompositor::~VulkanTextOverlayCompositor() {
   if (impl_ == nullptr) {
     return;
   }
-  impl_->UntrackLive();
   {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     for (const auto& device : impl_->devices) {
@@ -1083,51 +888,40 @@ bool VulkanTextOverlayCompositor::RegisterSwapchain(
     return false;
   }
 
-  Impl::DeviceState* state = nullptr;
-  {
-    std::lock_guard<std::mutex> lock(impl_->mutex);
-    state = impl_->FindDevice(device);
-    if (state == nullptr || state->vulkan == nullptr ||
-        !GraphicsFamilyCanUseSwapchain(state->graphics_queue_family,
-                                       create_info)) {
-      return false;
-    }
-    std::lock_guard<std::mutex> overlay_lock(state->overlay_mutex);
-    if (impl_->FindSwapchain(state, swapchain) != nullptr) {
-      return true;
-    }
-
-    std::unique_ptr<Impl::SwapchainState> candidate(new (std::nothrow)
-                                                        Impl::SwapchainState);
-    if (candidate == nullptr) {
-      return false;
-    }
-    candidate->swapchain = swapchain;
-    candidate->old_swapchain = create_info.oldSwapchain;
-    candidate->format = create_info.imageFormat;
-    candidate->extent = create_info.imageExtent;
-    candidate->usage = create_info.imageUsage;
-    candidate->images.reserve(image_count);
-    for (std::uint32_t index = 0; index < image_count; ++index) {
-      if (images[index] == VK_NULL_HANDLE) {
-        impl_->DestroySwapchainResources(state, candidate.get(), false);
-        return false;
-      }
-      Impl::ImageState image;
-      image.image = images[index];
-      candidate->images.push_back(image);
-    }
-
-    state->swapchains.push_back(std::move(candidate));
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  Impl::DeviceState* state = impl_->FindDevice(device);
+  if (state == nullptr || state->vulkan == nullptr ||
+      !GraphicsFamilyCanUseSwapchain(state->graphics_queue_family,
+                                     create_info)) {
+    return false;
+  }
+  std::lock_guard<std::mutex> overlay_lock(state->overlay_mutex);
+  if (impl_->FindSwapchain(state, swapchain) != nullptr) {
+    return true;
   }
 
-  // Clear the images after both the registry and overlay locks are released,
-  // and after the swapchain is registered so this cannot race a present that
-  // finds it missing. This submits and waits on the queue; doing that while
-  // holding the registry lock would block the present path, which takes the
-  // same locks, behind a queue wait.
-  impl_->ClearSwapchainImages(
-      state, std::vector<VkImage>(images, images + image_count));
+  std::unique_ptr<Impl::SwapchainState> candidate(new (std::nothrow)
+                                                      Impl::SwapchainState);
+  if (candidate == nullptr) {
+    return false;
+  }
+  candidate->swapchain = swapchain;
+  candidate->old_swapchain = create_info.oldSwapchain;
+  candidate->format = create_info.imageFormat;
+  candidate->extent = create_info.imageExtent;
+  candidate->usage = create_info.imageUsage;
+  candidate->images.reserve(image_count);
+  for (std::uint32_t index = 0; index < image_count; ++index) {
+    if (images[index] == VK_NULL_HANDLE) {
+      impl_->DestroySwapchainResources(state, candidate.get(), false);
+      return false;
+    }
+    Impl::ImageState image;
+    image.image = images[index];
+    candidate->images.push_back(image);
+  }
+
+  state->swapchains.push_back(std::move(candidate));
   return true;
 }
 
@@ -1492,25 +1286,6 @@ VkResult VulkanTextOverlayCompositor::QueuePresent(
     }
   }
   return present_result;
-}
-
-void VulkanTextOverlayCompositor::AccumulateSwapchainClearStats(
-    SwapchainClearStats* out) {
-  if (out == nullptr) {
-    return;
-  }
-  std::lock_guard<std::mutex> lock(Impl::LiveImplsMutex());
-  for (Impl* impl : Impl::LiveImpls()) {
-    out->images_cleared += impl->images_cleared.load(std::memory_order_relaxed);
-    out->submit_failures +=
-        impl->clear_submit_failures.load(std::memory_order_relaxed);
-  }
-}
-
-SwapchainClearStats TextOverlaySwapchainClearStats() {
-  SwapchainClearStats stats;
-  VulkanTextOverlayCompositor::AccumulateSwapchainClearStats(&stats);
-  return stats;
 }
 
 }  // namespace graphics

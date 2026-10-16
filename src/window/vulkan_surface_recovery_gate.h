@@ -3,6 +3,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 namespace mocktail {
@@ -19,22 +21,31 @@ struct VulkanSurfaceRecoveryRequest {
 // remains invalid can request another rebind after a bounded retry interval.
 class VulkanSurfaceRecoveryGate final {
  public:
-  // The retry interval starts here and doubles up to kRetryIntervalNs.
-  //
-  // A single flat interval cannot be right for both cases this gate serves. A
-  // resize converges in a couple of frames, so waiting a second between
-  // attempts made the window take a second to respond -- which is what it did,
-  // because during a resize no present succeeds, so the "presented since the
-  // last rebind" escape in TakeRebindRequest never opens and every attempt
-  // after the first fell through to the interval. But a swapchain that is
-  // genuinely broken must not be rebound at frame rate either.
-  //
-  // Backing off from a frame to a second gives the resize case what it needs
-  // and still bounds the pathological one: four attempts reach the old interval
-  // within about 120 ms, so a stuck surface costs a handful of extra rebinds
-  // once and then settles back to one per second.
-  static constexpr uint64_t kInitialRetryIntervalNs = 16000000ULL;
   static constexpr uint64_t kRetryIntervalNs = 1000000000ULL;
+
+  // TEMPORARY diagnostic override, not a fix.
+  //
+  // MOCKTAIL_SURFACE_RECOVERY_UNTHROTTLED=1 removes the retry interval
+  // entirely, so any newly reported out-of-date result rebinds immediately
+  // instead of waiting out the remaining second.
+  //
+  // This exists because a resize was reported as taking about a second, and the
+  // interval is the only one-second quantity in the surface path -- so it is
+  // worth being able to eliminate it without a rebuild. Evidence so far says it
+  // will change nothing: across a resize session this gate logged zero
+  // out-of-date results, because the resize reaches the guest as a plain
+  // surface rebind (141 events in, 141 delivered, 2 us each) and never goes
+  // through WSI recovery. If this makes no difference, the interval is not the
+  // cause and the toggle should be deleted rather than left in.
+  static uint64_t RetryIntervalNs() {
+    static const uint64_t interval = [] {
+      const char* value = std::getenv("MOCKTAIL_SURFACE_RECOVERY_UNTHROTTLED");
+      const bool unthrottled = value != nullptr && value[0] != '\0' &&
+                               std::strcmp(value, "0") != 0;
+      return unthrottled ? uint64_t{0} : kRetryIntervalNs;
+    }();
+    return interval;
+  }
 
   VulkanSurfaceRecoveryGate() = default;
   VulkanSurfaceRecoveryGate(const VulkanSurfaceRecoveryGate&) = delete;
@@ -51,7 +62,6 @@ class VulkanSurfaceRecoveryGate final {
     handled_out_of_date_count_ = 0;
     present_count_at_last_rebind_ = 0;
     last_rebind_ticks_ns_ = 0;
-    retry_interval_ns_ = kInitialRetryIntervalNs;
     active_.store(true, std::memory_order_release);
     return true;
   }
@@ -64,7 +74,6 @@ class VulkanSurfaceRecoveryGate final {
     handled_out_of_date_count_ = 0;
     present_count_at_last_rebind_ = 0;
     last_rebind_ticks_ns_ = 0;
-    retry_interval_ns_ = kInitialRetryIntervalNs;
   }
 
   void NotifyOutOfDate() {
@@ -100,36 +109,18 @@ class VulkanSurfaceRecoveryGate final {
         present_count != present_count_at_last_rebind_;
     const bool retry_due =
         last_rebind_ticks_ns_ == 0 || now_ticks_ns < last_rebind_ticks_ns_ ||
-        now_ticks_ns - last_rebind_ticks_ns_ >= retry_interval_ns_;
+        now_ticks_ns - last_rebind_ticks_ns_ >= RetryIntervalNs();
     if (!presented_since_last_rebind && !retry_due) {
       return false;
     }
 
-    // Captured before it is overwritten below: the first grant of a session has
-    // no previous attempt to back off from, so it must leave the interval at
-    // its initial value rather than doubling it.
-    const bool first_grant = last_rebind_ticks_ns_ == 0;
     request->observed_error_count = out_of_date_count;
     request->coalesced_error_count =
         out_of_date_count - handled_out_of_date_count_;
-    request->retry = !first_grant && !presented_since_last_rebind;
+    request->retry = last_rebind_ticks_ns_ != 0 && !presented_since_last_rebind;
     handled_out_of_date_count_ = out_of_date_count;
     present_count_at_last_rebind_ = present_count;
     last_rebind_ticks_ns_ = now_ticks_ns;
-    // A successful present is evidence the surface was healthy, so the next
-    // out-of-date starts over from the short interval. Without that, one
-    // unlucky stretch of broken presents would leave every later resize
-    // waiting a second.
-    if (presented_since_last_rebind) {
-      retry_interval_ns_ = kInitialRetryIntervalNs;
-    } else if (!first_grant) {
-      // Clamped after doubling, not before: doubling 512 ms by itself would land
-      // on 1024 ms, just past the cap, and the interval has to be a ceiling.
-      retry_interval_ns_ =
-          retry_interval_ns_ >= kRetryIntervalNs / 2
-              ? kRetryIntervalNs
-              : retry_interval_ns_ * 2;
-    }
     return true;
   }
 
@@ -141,8 +132,6 @@ class VulkanSurfaceRecoveryGate final {
   uint64_t handled_out_of_date_count_ = 0;
   uint64_t present_count_at_last_rebind_ = 0;
   uint64_t last_rebind_ticks_ns_ = 0;
-  // Doubles per failed attempt up to kRetryIntervalNs; see the constant's note.
-  uint64_t retry_interval_ns_ = kInitialRetryIntervalNs;
 };
 
 }  // namespace window
