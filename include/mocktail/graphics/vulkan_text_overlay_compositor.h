@@ -8,6 +8,21 @@
 namespace mocktail {
 namespace graphics {
 
+// How many swapchain images have been cleared to opaque black, and how many
+// clear attempts failed to submit.
+//
+// A swapchain image's contents are undefined until something writes them, so a
+// frame presented before the guest has rebuilt its render targets at a new
+// extent shows driver contents rather than an image. That was the brief pink
+// and green flash on fullscreen. RegisterSwapchain clears each image once at
+// creation to remove the class of artefact; these counters are how a test
+// observes that the clear ran, and how the field can tell whether it is
+// working on a given driver.
+struct SwapchainClearStats {
+  std::uint64_t images_cleared = 0;
+  std::uint64_t submit_failures = 0;
+};
+
 // Registered Vulkan objects remain caller-owned and must be unregistered
 // before host destruction. Unsupported registrations fall back cleanly.
 class VulkanTextOverlayCompositor final {
@@ -57,10 +72,18 @@ class VulkanTextOverlayCompositor final {
   VkResult QueuePresent(VkQueue queue, const VkPresentInfoKHR* present_info,
                         PFN_vkQueuePresentKHR fallback);
 
+  // Aggregate of the swapchain image clear counters across every live
+  // compositor. Static because the counters live in the private Impl.
+  static void AccumulateSwapchainClearStats(SwapchainClearStats* out);
+
  private:
   struct Impl;
   Impl* impl_ = nullptr;
 };
+
+SwapchainClearStats TextOverlaySwapchainClearStats();
+
+
 
 }  // namespace graphics
 }  // namespace mocktail
