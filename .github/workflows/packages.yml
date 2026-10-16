@@ -588,9 +588,16 @@ jobs:
               printf '\n'
             fi
             printf '### Unreleased changelog\n\n'
+            # Changelog bullets are already "- " at column 0 and wrap with a
+            # two-space indent, so only headings need rewriting and indented
+            # lines have to stay as they are or they become their own bullets.
             awk '/^## \[Unreleased\]/{found=1; next}
                  /^## \[/{if (found) exit}
-                 found && NF {print "- " $0}' CHANGELOG.md | head -60
+                 found && NF {
+                   if ($0 ~ /^  /) { print; next }
+                   if ($0 ~ /^### /) { printf "#### %s\n", substr($0, 5); next }
+                   print
+                 }' CHANGELOG.md | head -60
             printf '\n### Install\n\n'
             cat <<'EOF'
           | Artifact | x86_64 | aarch64 |
