@@ -170,7 +170,7 @@ jobs:
               test -x dist/Nightcap-x86_64.AppImage
               test -s dist/Nightcap-x86_64.AppImage.zsync
             '
-          sudo chown -R "$(id -u):$(id -g)" .ccache
+          sudo chown -R "$(id -u):$(id -g)" .ccache dist
 
       - name: Smoke-test AppImage without FUSE
         shell: bash
@@ -280,7 +280,7 @@ jobs:
                 --transform "s,^\\./,Nightcap-x86_64-portable/," \
                 -C dist/nightcap-portable .
             '
-          sudo chown -R "$(id -u):$(id -g)" .ccache
+          sudo chown -R "$(id -u):$(id -g)" .ccache dist
           test -s dist/Nightcap-x86_64-portable.tar.zst
 
       - name: Upload portable tarball
@@ -345,7 +345,7 @@ jobs:
               cp /workspace/packaging/arch/*.pkg.tar.zst dist/arch/
               pacman -Qp dist/arch/*.pkg.tar.zst >/dev/null
             '
-          sudo chown -R "$(id -u):$(id -g)" .ccache
+          sudo chown -R "$(id -u):$(id -g)" .ccache dist
           mv dist/arch/*.pkg.tar.zst "dist/nightcap-nightly-x86_64.pkg.tar.zst"
           test -s dist/nightcap-nightly-x86_64.pkg.tar.zst
 
@@ -426,7 +426,7 @@ jobs:
                 -G DEB -B dist/deb
               dpkg-deb --info dist/deb/*.deb >/dev/null
             '
-          sudo chown -R "$(id -u):$(id -g)" .ccache
+          sudo chown -R "$(id -u):$(id -g)" .ccache dist
           mv dist/deb/*.deb "dist/nightcap-nightly_${{ matrix.debarch }}.deb"
           test -s "dist/nightcap-nightly_${{ matrix.debarch }}.deb"
 
@@ -507,7 +507,7 @@ jobs:
                 -G RPM -B dist/rpm
               rpm --query --package --info dist/rpm/*.rpm >/dev/null
             '
-          sudo chown -R "$(id -u):$(id -g)" .ccache
+          sudo chown -R "$(id -u):$(id -g)" .ccache dist
           mv dist/rpm/*.rpm "dist/nightcap-nightly-${{ matrix.rpmarch }}.rpm"
           test -s "dist/nightcap-nightly-${{ matrix.rpmarch }}.rpm"
 
