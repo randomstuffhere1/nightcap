@@ -65,7 +65,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      UPINFO: gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|${{ env.TAG }}|Nightcap-x86_64.AppImage.zsync
+      # Written out rather than interpolated from the workflow-level TAG: the
+      # env context is not available inside a job-level env block, and a
+      # reference there fails the whole workflow at parse time.
+      UPINFO: gh-releases-zsync|${{ github.repository_owner }}|${{ github.event.repository.name }}|nightly|Nightcap-x86_64.AppImage.zsync
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
