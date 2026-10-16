@@ -1691,16 +1691,16 @@ extern "C" bool mocktail_window_has_presented_frame() {
 // number changes, so a stale value here does not merely report the wrong size:
 // it silently stops the guest from ever resizing again.
 //
-// Both cached sources can go stale across a mode change, because both are
+// Both cached sources can be stale across a mode change, because both are
 // refreshed from the guest rather than from SDL:
 //
-//   * g_state.width is written on startup and on surface events, and those
-//     events are driven by the guest's own idea of the window.
+//   * g_state.width is written on startup and on surface events, both driven by
+//     the guest's own idea of the window.
 //   * g_window_surface_lifecycle's snapshot is only replaced when the guest
 //     delivers a typed surface event.
 //
-// A fullscreen change resizes the SDL window immediately, but the guest does
-// not necessarily push a new surface event for it. Measured, with
+// A fullscreen change resizes the SDL window immediately, but the guest does not
+// necessarily push a new surface event for it. Measured, with
 // MOCKTAIL_TRACE_FULLSCREEN=1: nine fullscreen transitions and one swapchain
 // creation, with the swapchain left at the fullscreen extent while the window
 // alternated between 1368x768 and 991x588. Every present returned VK_SUCCESS,
@@ -1709,7 +1709,7 @@ extern "C" bool mocktail_window_has_presented_frame() {
 // what shows up as garbage for a frame or two around the transition.
 //
 // SDL_GetWindowSizeInPixels is queried live, so it reflects the mode change the
-// moment it happens. It is also the call the startup path uses to seed
+// moment it happens. It is also the same call the startup path uses to seed
 // g_state.width, so the units are identical.
 int WindowPixelWidth() {
   if (g_state.sdl_window != nullptr) {
@@ -2082,15 +2082,6 @@ void MaybeRequestResizeReadiness() {
           g_state.resize_target_logical_height, request.width, request.height);
 }
 
-// Off by default; the resize path prints several lines per event when on.
-bool ResizeTraceEnabled() {
-  static const bool enabled = [] {
-    const char* value = GetEnvNonEmpty("MOCKTAIL_TRACE_RESIZE");
-    return value != nullptr && !StringEquals(value, "0");
-  }();
-  return enabled;
-}
-
 bool FullscreenShortcutEnabled() {
   // Latched, like WindowTraceEnabled and SdlEventTraceEnabled above. This is
   // consulted for every SDL event -- every mouse motion included -- so a getenv
@@ -2105,10 +2096,10 @@ bool FullscreenShortcutEnabled() {
 
 // Asks the Vulkan adapter to drain the queue ahead of a surface extent change.
 //
-// Resolved by name rather than linked: mocktail_window links GraphicsFoundation,
-// not the Vulkan adapter, and the two talk through dlsym(RTLD_DEFAULT) in the
-// other direction already. Absent means this build has no direct-Vulkan
-// adapter, which is not an error.
+// Resolved by name rather than linked: mocktail_window links
+// GraphicsFoundation, not the Vulkan adapter, and the two talk through
+// dlsym(RTLD_DEFAULT) in the other direction already. Absent means this build
+// has no direct-Vulkan adapter, which is not an error.
 void QuiesceGraphicsBeforeSurfaceChange() {
   using QuiesceFn = void (*)();
   static const auto quiesce = [] {
@@ -2451,22 +2442,6 @@ bool PumpEvents() {
     const bool converted =
         platform::ConvertSdlEvent(g_state.sdl_window, event, &platform_event);
     if (is_window_event && g_window_surface_lifecycle.active()) {
-      if (ResizeTraceEnabled() &&
-          (event.type == SDL_EVENT_WINDOW_RESIZED ||
-           event.type == SDL_EVENT_WINDOW_MOVED ||
-           event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
-           event.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ||
-           event.type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN)) {
-        int trace_w = 0;
-        int trace_h = 0;
-        SDL_GetWindowSizeInPixels(g_state.sdl_window, &trace_w, &trace_h);
-        std::fprintf(stderr,
-                     "  [resize-trace] sdl_event type=%u ticks_ns=%llu "
-                     "pixels=%dx%d\n",
-                     static_cast<unsigned>(event.type),
-                     static_cast<unsigned long long>(SDL_GetTicksNS()), trace_w,
-                     trace_h);
-      }
       int pixel_width = 0;
       int pixel_height = 0;
       SDL_GetWindowSizeInPixels(g_state.sdl_window, &pixel_width,

@@ -75,3 +75,14 @@ Start WiVRn or SteamVR/ALVR, connect your headset, then run:
 ```bash
 ./build/mocktail -vr
 ```
+
+## Why does the window flash coloured lines when I go fullscreen?
+
+Only if your display is running a **non-native mode**. It is a compositor
+artifact, not a Nightcap one, and the fix is on your display's side.
+
+Set the output to its native resolution:
+
+```bash
+kscreen-doctor output.<name>.mode.<n>   # kscreen-doctor output to list them
+```

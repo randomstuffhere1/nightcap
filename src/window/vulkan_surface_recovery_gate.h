@@ -3,8 +3,6 @@
 
 #include <atomic>
 #include <cstdint>
-#include <cstdlib>
-#include <cstring>
 #include <mutex>
 
 namespace mocktail {
@@ -22,30 +20,6 @@ struct VulkanSurfaceRecoveryRequest {
 class VulkanSurfaceRecoveryGate final {
  public:
   static constexpr uint64_t kRetryIntervalNs = 1000000000ULL;
-
-  // TEMPORARY diagnostic override, not a fix.
-  //
-  // MOCKTAIL_SURFACE_RECOVERY_UNTHROTTLED=1 removes the retry interval
-  // entirely, so any newly reported out-of-date result rebinds immediately
-  // instead of waiting out the remaining second.
-  //
-  // This exists because a resize was reported as taking about a second, and the
-  // interval is the only one-second quantity in the surface path -- so it is
-  // worth being able to eliminate it without a rebuild. Evidence so far says it
-  // will change nothing: across a resize session this gate logged zero
-  // out-of-date results, because the resize reaches the guest as a plain
-  // surface rebind (141 events in, 141 delivered, 2 us each) and never goes
-  // through WSI recovery. If this makes no difference, the interval is not the
-  // cause and the toggle should be deleted rather than left in.
-  static uint64_t RetryIntervalNs() {
-    static const uint64_t interval = [] {
-      const char* value = std::getenv("MOCKTAIL_SURFACE_RECOVERY_UNTHROTTLED");
-      const bool unthrottled = value != nullptr && value[0] != '\0' &&
-                               std::strcmp(value, "0") != 0;
-      return unthrottled ? uint64_t{0} : kRetryIntervalNs;
-    }();
-    return interval;
-  }
 
   VulkanSurfaceRecoveryGate() = default;
   VulkanSurfaceRecoveryGate(const VulkanSurfaceRecoveryGate&) = delete;
@@ -109,7 +83,7 @@ class VulkanSurfaceRecoveryGate final {
         present_count != present_count_at_last_rebind_;
     const bool retry_due =
         last_rebind_ticks_ns_ == 0 || now_ticks_ns < last_rebind_ticks_ns_ ||
-        now_ticks_ns - last_rebind_ticks_ns_ >= RetryIntervalNs();
+        now_ticks_ns - last_rebind_ticks_ns_ >= kRetryIntervalNs;
     if (!presented_since_last_rebind && !retry_due) {
       return false;
     }

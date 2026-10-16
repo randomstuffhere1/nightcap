@@ -2,8 +2,6 @@
 
 #include <gtest/gtest.h>
 
-#include <cstdlib>
-#include <cstring>
 #include <thread>
 #include <vector>
 
@@ -100,26 +98,6 @@ TEST(VulkanSurfaceRecoveryGateTest, AcceptsConcurrentRenderThreadEvidence) {
   ASSERT_TRUE(gate.TakeRebindRequest(100, &request));
   EXPECT_EQ(request.observed_error_count, 4000u);
   EXPECT_EQ(request.coalesced_error_count, 4000u);
-}
-
-// The TEMPORARY unthrottled override. This exists so the one-second retry
-// interval can be eliminated without a rebuild while it is being ruled out as
-// the cause of a reported one-second resize. If it turns out not to be the
-// cause -- which the evidence so far suggests, since this gate logs zero
-// out-of-date results during a resize -- the override and this test both go.
-TEST(VulkanSurfaceRecoveryGateTest, DefaultIntervalIsTheFullSecond) {
-  EXPECT_EQ(VulkanSurfaceRecoveryGate::kRetryIntervalNs, 1000000000ULL);
-  // Off unless the environment asks for it, so a stale value in the
-  // environment cannot silently change the gate for an unrelated run.
-  const char* override_value =
-      std::getenv("MOCKTAIL_SURFACE_RECOVERY_UNTHROTTLED");
-  if (override_value == nullptr || override_value[0] == '\0' ||
-      std::strcmp(override_value, "0") == 0) {
-    EXPECT_EQ(VulkanSurfaceRecoveryGate::RetryIntervalNs(),
-              VulkanSurfaceRecoveryGate::kRetryIntervalNs);
-  } else {
-    EXPECT_EQ(VulkanSurfaceRecoveryGate::RetryIntervalNs(), 0u);
-  }
 }
 
 }  // namespace
