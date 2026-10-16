@@ -157,6 +157,38 @@ yay -S nightcap-git
 
 Nightcap is in no other distribution repository.
 
+### Nightly builds
+
+A prerelease called [`nightly`](https://github.com/randomstuffhere1/nightcap/releases/tag/nightly)
+carries every artifact built from the same commit, once a day from `main`:
+
+| Artifact | x86_64 | aarch64 |
+| --- | --- | --- |
+| `Nightcap-x86_64.AppImage` (with a `.zsync`) | yes | no |
+| `Nightcap-x86_64-portable.tar.zst` | yes | no |
+| `.pkg.tar.zst` | yes | no |
+| `.deb` | yes | yes |
+| `.rpm` | yes | yes |
+
+Each asset has a `.sha256` beside it, and `SHA256SUMS` lists the lot.
+
+```bash
+curl -LO https://github.com/randomstuffhere1/nightcap/releases/download/nightly/Nightcap-x86_64.AppImage
+chmod +x Nightcap-x86_64.AppImage
+./Nightcap-x86_64.AppImage
+```
+
+The tarball is a self-contained bundle with its own JRE and WebKit, so it runs
+on a distro that has neither. `appimageupdate Nightcap-x86_64.AppImage` picks
+up later builds.
+
+aarch64 has no AppImage, tarball or pacman package yet. The portable packager
+still assumes x86-64, and Docker Hub dropped arm64 from the Arch base image the
+pacman package is built in. The `.deb` and `.rpm` cover aarch64 for now.
+
+Treat these as builds from an untested commit. Use a tagged release for normal
+play.
+
 Or build and install from source using the steps under
 [Building](#building).
 
