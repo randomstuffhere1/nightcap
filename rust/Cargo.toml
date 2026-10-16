@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = ["crates/mocktail-rs-kernels"]
+
+# Build optimization: this crate is linked into the libvulkan.so stub and into
+# standalone test binaries, so the output has to stay small and has to never
+# unwinding across the C ABI (the C++ side is built -fno-exceptions).
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+# debuginfo is the dominant bloat in target/; the shipped staticlib carries none.
+debug = false
+strip = "symbols"
+# Required: a Rust panic must not unwind into the C++ caller.
+panic = "abort"
+incremental = false
+
+[profile.dev]
+debug = false
+incremental = false
+# Level 1 rather than the default 0: the resample kernel is on the texture upload
+# path, and an unoptimized build of it is slow enough to misread when profiling a
+# Debug build. This does not change the Release numbers anything ships with.
+opt-level = 1
+
+[workspace.package]
+version = "0.3.4"
+edition = "2021"
+rust-version = "1.83"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+rayon = "1.12"

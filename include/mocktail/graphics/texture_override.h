@@ -40,6 +40,11 @@ void ResampleRgba(const std::uint8_t* source, std::uint32_t source_width,
                   std::uint32_t width, std::uint32_t height,
                   std::uint8_t* destination);
 
+// Whether ResampleRgba should run through the Rust kernel library.
+// Read once from MOCKTAIL_RUST_KERNELS and cached. See the definition in
+// texture_override.cc for why this is an A/B switch and not a feature flag.
+bool RustResampleEnabled();
+
 // Replacement textures keyed by the hash of a texture's level-0 compressed
 // bytes. An override lives at <override_dir>/<hash>.png. With a dump
 // directory, every level-0 texture seen is written once as

@@ -189,6 +189,18 @@ Vulkan, EGL, libplacebo, fontconfig, libcurl, OpenSSL, libelf, libyaml, libpng,
 minizip, Capstone 5, utf8proc, nlohmann/json, GTK4, libadwaita 1.6+, and
 WebKitGTK 6.0.
 
+The texture kernels live in Rust (`rust/`, built by `cmake/MocktailRust.cmake`
+into a staticlib that links into the `libvulkan.so` stub and the kernel tests).
+A Rust toolchain from rustup is also required, and the crates are vendored under
+`rust/vendor`, so no build path needs network access. Cross-compiling to
+`aarch64` additionally needs that target installed
+(`rustup target add aarch64-unknown-linux-gnu`) and `aarch64-linux-gnu-gcc` on
+the linker path. `-DMOCKTAIL_BUILD_RUST_KERNELS=OFF` builds against a prebuilt
+archive given in `-DMOCKTAIL_RUST_PREBUILT=/path/to/libmocktail_rs.a`.
+
+Cargo's build output is redirected into `build/rust-target`, so it is gitignored
+and `make clean` removes it along with the rest of the build tree.
+
 See the [FreeBSD Guide](packaging/freebsd/README.md) for setup and launch instructions.
 
 <details>

@@ -227,6 +227,10 @@ endif()
 
 find_package(OpenSSL REQUIRED)
 
+# Rust kernel workspace. Included before the consumers so Mocktail::RustKernels
+# exists by the time stub_vulkan and the test targets link it.
+include(${CMAKE_SOURCE_DIR}/cmake/MocktailRust.cmake)
+
 include(${CMAKE_SOURCE_DIR}/cmake/MocktailPlatformGraphics.cmake)
 foreach(foundation_target IN ITEMS
     mocktail_platform_sdl

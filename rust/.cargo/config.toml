@@ -1,0 +1,32 @@
+# Cargo configuration for the Mocktail Rust workspace.
+#
+# Three things, all of which exist to keep the build small and reproducible:
+#
+# 1. `source.crates-io.replace-with`. Crates are vendored under rust/vendor (see
+#    VENDOR.md) rather than fetched at build time, so no build path -- the
+#    flatpak SDK, the anylinux image, a fresh clone, CI -- needs network access
+#    or a matching Cargo.lock it did not commit.
+#
+# 2. `rustflags.strip=debuginfo`. The crate profile is also `debug = false`, but
+#    the cargo archive still carries the prebuilt std rlib's .debug_* sections
+#    (Rust's own dist std is compiled with debuginfo on). That was 2.6 MiB of
+#    sections inside an 7.8 MiB archive. CMake strips the archive after the
+#    build as well; this keeps the unstripped copy lean too.
+#
+# 3. No `-C target-cpu`. One baseline artifact has to run on every host, with
+#    the fast paths selected by `is_x86_feature_detected!` and
+#    `#[target_feature]` instead. See crates/mocktail-rs-kernels.
+
+[build]
+rustflags = ["-C", "strip=debuginfo"]
+
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+# Cross builds. Native consumers use the host default; the rustup target for the
+# cross triple is a documented prerequisite in README "Building".
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"

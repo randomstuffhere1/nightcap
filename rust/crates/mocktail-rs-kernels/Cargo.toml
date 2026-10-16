@@ -1,0 +1,30 @@
+[package]
+name = "mocktail-rs-kernels"
+description = "Hot kernels and work runner for the Mocktail Vulkan stub"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# A staticlib links into both the shared stub_vulkan target and the standalone
+# test executables without an extra .so to ship or RPATH.
+[lib]
+name = "mocktail_rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+# Vendored under rust/vendor (see rust/.cargo/config.toml).
+#
+# Declared here and used by nothing until phase 5 replaces the work runner, so
+# it is compiled by cargo but linked by nobody: the archive only gives the linker
+# members something references. Verified with `nm` -- zero rayon symbols reach
+# the shipped images while the dependency is unused.
+rayon = { workspace = true }
+
+[features]
+default = ["rayon-pool"]
+# Replaces the rayon-backed work runner with the plain serial fallback. Used to
+# A/B the pool in the field without two builds.
+serial-pool = []
+rayon-pool = []

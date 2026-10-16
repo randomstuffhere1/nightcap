@@ -603,31 +603,34 @@ add_executable(etc2_decoder_test
 target_include_directories(etc2_decoder_test PRIVATE
   ${PROJECT_SOURCE_DIR}/include
 )
-target_link_libraries(etc2_decoder_test PRIVATE GTest::gtest_main Threads::Threads)
+target_link_libraries(etc2_decoder_test PRIVATE GTest::gtest_main
+  Threads::Threads Mocktail::RustKernels)
 mocktail_apply_compile_options(etc2_decoder_test)
 
 pkg_check_modules(LIBPNG REQUIRED IMPORTED_TARGET libpng)
 
 add_executable(texture_override_test
   texture_override_test.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/mocktail_rs_bridge.cc
   ${PROJECT_SOURCE_DIR}/src/graphics/texture_override.cc
 )
 target_include_directories(texture_override_test PRIVATE
   ${PROJECT_SOURCE_DIR}/include
 )
 target_link_libraries(texture_override_test PRIVATE GTest::gtest_main
-  PkgConfig::LIBPNG)
+  PkgConfig::LIBPNG Mocktail::RustKernels Threads::Threads)
 mocktail_apply_compile_options(texture_override_test)
 
 add_executable(texture_resample_test
   texture_resample_test.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/mocktail_rs_bridge.cc
   ${PROJECT_SOURCE_DIR}/src/graphics/texture_override.cc
 )
 target_include_directories(texture_resample_test PRIVATE
   ${PROJECT_SOURCE_DIR}/include
 )
 target_link_libraries(texture_resample_test PRIVATE GTest::gtest_main
-  PkgConfig::LIBPNG)
+  PkgConfig::LIBPNG Mocktail::RustKernels Threads::Threads)
 mocktail_apply_compile_options(texture_resample_test)
 
 add_executable(chrome_trace_writer_test
@@ -646,14 +649,46 @@ add_executable(vulkan_etc2_emulation_test
   ${PROJECT_SOURCE_DIR}/src/graphics/vulkan_etc2_emulation.cc
   ${PROJECT_SOURCE_DIR}/src/graphics/chrome_trace_writer.cc
   ${PROJECT_SOURCE_DIR}/src/graphics/etc2_decoder.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/mocktail_rs_bridge.cc
   ${PROJECT_SOURCE_DIR}/src/graphics/texture_override.cc
 )
 target_include_directories(vulkan_etc2_emulation_test PRIVATE
   ${PROJECT_SOURCE_DIR}/include
 )
 target_link_libraries(vulkan_etc2_emulation_test PRIVATE GTest::gtest_main
-  Threads::Threads PkgConfig::LIBPNG)
+  Threads::Threads PkgConfig::LIBPNG Mocktail::RustKernels)
 mocktail_apply_compile_options(vulkan_etc2_emulation_test)
+
+# Differential test against the Rust kernels. Compiles the C++ oracle and links
+# the Rust library, so a ported kernel that changes a single texel fails here.
+add_executable(kernel_parity_test
+  kernel_parity_test.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/etc2_decoder.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/texture_override.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/mocktail_rs_bridge.cc
+)
+target_include_directories(kernel_parity_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(kernel_parity_test PRIVATE GTest::gtest_main
+  PkgConfig::LIBPNG Mocktail::RustKernels Threads::Threads)
+mocktail_apply_compile_options(kernel_parity_test)
+
+# A timing harness, not a correctness test: nothing here asserts, and it is
+# deliberately not registered with ctest so CI does not run it. See
+# tests/kernel_benchmark.cc.
+add_executable(kernel_benchmark
+  kernel_benchmark.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/etc2_decoder.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/mocktail_rs_bridge.cc
+  ${PROJECT_SOURCE_DIR}/src/graphics/texture_override.cc
+)
+target_include_directories(kernel_benchmark PRIVATE
+  ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(kernel_benchmark PRIVATE
+  PkgConfig::LIBPNG Mocktail::RustKernels Threads::Threads)
+mocktail_apply_compile_options(kernel_benchmark)
 
 add_executable(vulkan_pipeline_cache_test
   vulkan_pipeline_cache_test.cc

@@ -337,6 +337,135 @@ Only experiences that upload compressed textures are affected. A trace of a
 session in a place that used none recorded no `etc2 decode` slices at all, so
 on such a place this setting cannot matter in either direction.
 
+### Which resampler runs, and what it is worth
+
+`ResampleRgba` -- the box filter that widens textures -- has two implementations:
+a C++ one in `src/graphics/texture_override.cc` and a Rust one in
+`rust/crates/mocktail-rs-kernels`. They are bit-for-bit identical, and
+`kernel_parity_test` proves it by running both over every mode, stride and
+dimension combination and comparing the destinations byte for byte.
+
+`MOCKTAIL_RUST_KERNELS=off` selects the C++ one; anything else, including unset,
+runs the Rust one. The first upload of a session prints which is live and what
+SIMD class the host has:
+
+```
+  [vulkan] resample: rust kernel, simd 2 (MOCKTAIL_RUST_KERNELS=off selects the C++ kernel)
+```
+
+`simd` is 0 portable, 1 SSE2, 2 SSSE3, 3 AVX2, 4 NEON. Detection is CPUID rather
+than `std::is_x86_feature_detected!`, which would pull `std_detect` into every
+image that links the kernel. It is read once and cached in an atomic: CPUID is a
+serialising instruction costing around a hundred cycles, and the first version
+called it per block, which made the EAC alpha merge *four times slower* than the
+C++ it was meant to beat -- 329 us against 1529 us for 16384 blocks, measured.
+
+The AVX2 level needs `XGETBV`, which is not in the x86-64 baseline and lowers to
+a libgcc helper when called from ordinary code, dragging about 400 KB of `std`
+backtrace machinery into every image that links a kernel. Wrapping the query in
+a `#[target_feature(enable = "xsave")]` function inlines it as the instruction
+it is and keeps that out of the link: `libvulkan.so` grew by 264 bytes.
+
+Measured on one 4-core machine, `taskset -c 2 build/tests/kernel_benchmark`, best
+of nine trials of a hundred iterations, against the C++ path forced off:
+
+| case | C++ | Rust | |
+| --- | --- | --- | --- |
+| 64x64 -> 64x64 | 28.5 us | 15.3 us | **1.89x** |
+| 64x64 -> 128x128 (x2) | 60.9 us | 23.8 us | **2.56x** |
+| 64x64 -> 256x256 (x4) | 133.4 us | 34.2 us | **3.91x** |
+| 32x32 -> 128x128 (x4) | 33.6 us | 9.7 us | **3.47x** |
+| 128x128 -> 256x256 (x2) | 251.0 us | 90.3 us | **2.78x** |
+| 256x256 -> 1024x1024 (x4) | 2199 us | 632 us | **3.48x** |
+
+The integer upscales are the ones that matter, because that is what
+`small_texture_upscale` produces. They are the fastest cases, not the slowest:
+the Rust path recognises an integer replicate and writes runs of texels with
+whole registers, where the C++ read a column table per destination pixel.
+
+The largest case gained least of all earlier -- 1.21x -- because at 1024x1024 it
+writes 4 MiB per call and takes 13.6 million cache misses, which is memory
+bandwidth rather than arithmetic. It now reads 3.48x anyway, so the previous
+figure was measuring something other than the ceiling: that column was timing
+the C++ path twice. See the benchmarking note below.
+
+### The ETC2/EAC kernels
+
+`DecodeEtcImageBlockRows` has its EAC alpha merge and its whole R11/RG11 family
+in Rust (`MOCKTAIL_RUST_ETC=off` selects the C++), also checked bit-for-bit by
+`kernel_parity_test`:
+
+| case | C++ | Rust | |
+| --- | --- | --- | --- |
+| ETC2_RGB8 128x128 | 386 us | 380 us | 1.01x |
+| ETC2_RGBA8 128x128 | 592 us | 497 us | **1.19x** |
+| ETC2_RGBA8 64x64 | 142 us | 118 us | **1.20x** |
+| EAC_R11 64x64 | 96 us | 37 us | **2.56x** |
+| EAC_RG11 64x64 | 169 us | 69 us | **2.45x** |
+| EAC_RG11 256x256 | 2758 us | 1188 us | **2.32x** |
+
+`ETC2_RGB8` is the noise floor and the reason the rest can be believed: it never
+calls into Rust at all, so 1.01x is what a null result looks like here.
+`DecodeRgbBlock` stays in C++ -- its SSSE3 palette shuffle is already as good as
+anything -- and it is what holds the RGB formats near flat.
+
+The R11 family is where the width paid, and the first version of it was *slower
+than the C++* despite being bit-identical. Three things turned that around, in
+descending order of how much they were worth:
+
+* **Raw pointers instead of slices.** `block[i]` in the six-byte index read was
+  six bounds checks per sub-block, where the C++ pointer arithmetic has none.
+  Worth roughly 1.9x on its own.
+* **The 16 indices extracted once per sub-block.** The C++ recomputes
+  `bits >> (45 - texel * 3)` per texel *per channel*, so an RG11 block shifts the
+  same 48-bit field thirty-two times for sixteen texels.
+* **Branchless sign handling in the signed formats.** `value < 0 ? -value : value`
+  followed by a second test to negate is two data-dependent branches per palette
+  entry, and eight entries of mixed sign mispredict often enough to cost more
+  than the arithmetic. An arithmetic shift gives an all-ones mask; two's
+  complement negation is xor-then-add-**one**, since adding the mask itself
+  negates to `-x - 1`, which the parity suite caught.
+
+The alpha palette is eight independent `clamp(base + table[i] * mult, 0, 255)`
+computations, which is what AVX2 is for: one 32-byte table load, a multiply, an
+add, a clamp pair and a pack, replacing thirty-odd scalar ops. The table is
+stored flat rather than `[[i32; 8]; 16]` so that one row *is* one register.
+
+In isolation, against transcribed copies of the C++ kernels, the ported kernels
+measure **1.72x** (alpha merge), **2.14x** (R11), **2.15x** (RG11) and **2.26x**
+(RG11 signed). Whole-image ratios are lower than these because the C++
+`DecodeRgbBlock` and the edge-clamped writes are shared cost that neither side
+can improve on.
+
+The decode pool moved to rayon and reads 1.00x across every batched and
+concurrent case. The C++ `DecodePool` declines when it is busy and lets the
+caller drain the batch itself, which looks bad on paper, but with N caller
+threads on N cores the machine is saturated either way. The change is kept
+because it removes a deliberate thread leak and the fixed 4096-block banding,
+not because it is faster. `MOCKTAIL_RUST_POOL=off` puts the C++ pool back.
+
+### Measuring these numbers, and one way they were wrong
+
+The A/B switches latch the environment on first use, because they are consulted
+per block and `getenv` is a linear scan. A `setenv` after that first call is
+therefore ignored -- and the benchmark that times both variants in one process
+was setting the variable to `off` for the C++ column and `on` for the Rust one.
+Whichever column ran first won, both columns ran the C++ path, and every ETC2
+ratio printed a confident 1.00x against itself. The resampler escaped it only
+because that column called the FFI directly.
+
+`SetRustEtcToggle` and its two siblings install an override that wins over the
+environment for the life of the process, and both the benchmark and the parity
+suite go through those instead. The environment still decides when no override
+is installed, which is the field A/B path, and the parity suite now pins both
+directions so the dispatch decision itself is covered -- comparing the library
+against itself would pass regardless of which side the dispatcher picked.
+
+Treat the ratios as the measurement and the absolute times as this machine's,
+not yours. The box these came from carries a load average around 3 on four
+cores, and the absolute figures move by 10x with it while the ratios hold to
+within a few percent across runs.
+
 ## The pipeline cache
 
 **Read this before assuming shaders are your problem.** They usually are not.

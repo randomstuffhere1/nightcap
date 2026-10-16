@@ -1,5 +1,10 @@
 #include "mocktail/graphics/texture_override.h"
 
+#include "mocktail/graphics/mocktail_rs.h"
+#include "mocktail/graphics/mocktail_rs_bridge.h"
+
+#include "rust_kernel_toggle.h"
+
 #include <png.h>
 
 #include <algorithm>
@@ -7,6 +12,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+
+#include <mutex>
 
 namespace mocktail::graphics {
 
@@ -85,13 +92,42 @@ void ResampleRgba(const std::uint8_t* source, std::uint32_t source_width,
                destination);
 }
 
+// Whether ResampleRgba should run through the Rust kernel library.
+//
+// The Rust and C++ implementations are byte-for-bit equivalent, so this only
+// exists as an A/B switch: MOCKTAIL_RUST_KERNELS=off runs the C++ one, and any
+// other value runs the Rust one. Falling back on a non-zero return keeps the
+// C++ path authoritative if the library ever declines an input it accepts.
+bool RustResampleEnabled() { return internal::ResampleToggle().Enabled(); }
+
+// Reports once, on the first texture uploaded, which resampler is in use and
+// what the host can run it with. Once rather than everywhere, because a texture
+// batch is hundreds of uploads and only the first is interesting.
+void LogResamplerOnce() {
+  static std::once_flag reported;
+  std::call_once(reported, [] {
+    std::fprintf(stderr,
+                 "  [vulkan] resample: %s, simd %d "
+                 "(MOCKTAIL_RUST_KERNELS=off selects the C++ kernel)\n",
+                 RustResampleEnabled() ? "rust kernel" : "c++ kernel",
+                 mocktail::graphics::RustSimdLevel());
+  });
+}
+
 void ResampleRgba(const std::uint8_t* source, std::uint32_t source_width,
                   std::uint32_t source_height, std::size_t source_stride_bytes,
                   std::uint32_t width, std::uint32_t height,
                   std::uint8_t* destination) {
+  LogResamplerOnce();
   if (source == nullptr || destination == nullptr || width == 0 ||
       height == 0 || source_width == 0 || source_height == 0 ||
       source_stride_bytes < static_cast<std::size_t>(source_width) * 4) {
+    return;
+  }
+  if (RustResampleEnabled() &&
+      mocktail_rs_resample_rgba(source, source_width, source_height,
+                                source_stride_bytes, width, height,
+                                destination) == 0) {
     return;
   }
   // Source box of destination column x is [columns[2x], columns[2x + 1]).

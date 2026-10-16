@@ -95,6 +95,15 @@ vgcore.*
 !/third_party/mcpelauncher-linker/core/liblog/
 !/third_party/mcpelauncher-linker/core/libziparchive/
 
+# Rust kernel workspace
+#
+# The build redirects CARGO_TARGET_DIR at ${CMAKE_BINARY_DIR}/rust-target (see
+# cmake/MocktailRust.cmake), which lives inside the ignored build tree and is
+# removed by `make clean`. This entry only covers a hand-run `cargo build` from
+# rust/, which is otherwise a 50 MB surprise in the repo root. rust/vendor is
+# committed on purpose -- that is the offline crate supply.
+/rust/target/
+
 # Reverse-engineering output
 *.i64
 *.id0

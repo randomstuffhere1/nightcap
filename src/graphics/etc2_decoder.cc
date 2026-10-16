@@ -1,4 +1,7 @@
 #include "mocktail/graphics/etc2_decoder.h"
+#include "mocktail/graphics/mocktail_rs.h"
+
+#include "rust_kernel_toggle.h"
 
 #include <algorithm>
 #include <array>
@@ -325,6 +328,12 @@ constexpr std::uint64_t kBlocksPerBand = 4096;
 // pooled worker costs microseconds, so the floor only has to cover that.
 constexpr std::uint64_t kParallelMinimumBlocks = 4096;
 
+// Whether the ETC2/EAC kernels should run through the Rust library.
+//
+// Bit-for-bit equivalent to the C++ below (kernel_parity_test proves it), so
+// this is an A/B switch: MOCKTAIL_RUST_ETC=off selects the C++ path.
+bool RustEtcEnabled() { return internal::EtcToggle().Enabled(); }
+
 bool ImageFits(EtcFormat format, const std::uint8_t* source,
                std::size_t source_bytes, std::uint32_t width,
                std::uint32_t height, const std::uint8_t* destination,
@@ -381,6 +390,15 @@ struct DecodeBandQueue {
   }
 };
 
+// The original hand-rolled pool, kept as the reference implementation and the
+// `serial-pool` fallback.
+//
+// It declines when the pool is already busy (see RunOnDecodeWorkers), parks its
+// threads on a condition variable per batch, and never joins them, so it leaks
+// at exit. Rust's rayon pool replaces it; this stays so the two can be compared
+// in the field with MOCKTAIL_RUST_POOL=off, and so the serial-pool build has
+// something to run.
+//
 // Decode workers outlive the batches that use them: creating and joining a
 // thread per batch costs more than decoding a small one. The threads park on
 // a condition variable and are never joined, so the pool is leaked at exit.
@@ -535,8 +553,22 @@ void RunOnDecodeWorkers(void (*run)(void*), void* context,
   if (run == nullptr) {
     return;
   }
-  // The pool declines when it is already busy; the caller drains the whole
-  // batch itself then, exactly as a single-threaded batch does.
+  // Rust owns the pool by default. The important difference from DecodePool
+  // below is that rayon steals rather than declining, so a second concurrent
+  // batch does not serialise onto its caller -- which for texture upload is the
+  // thread that also has to submit the frame.
+  //
+  // MOCKTAIL_RUST_POOL=off selects the C++ pool, so the two can be compared in
+  // the field without two builds.
+  if (internal::PoolToggle().Enabled()) {
+    // A non-zero return means the pool declined, and the caller drains the whole
+    // batch itself then, exactly as a single-threaded batch does.
+    if (mocktail_rs_run_work(run, context, worker_count) != 0) {
+      run(context);
+    }
+    return;
+  }
+
   if (!DecodePool::Instance().Run(run, context, worker_count)) {
     run(context);
   }
@@ -581,21 +613,27 @@ bool DecodeEtcImageBlockRows(EtcFormat format, const std::uint8_t* source,
           DecodeRgbBlock(block, format == EtcFormat::kEtc2Rgb8A1, cols);
         } else {
           DecodeRgbBlock(block + 8, false, cols);
-          const std::uint64_t alpha_bits = ReadEacBits(block);
-          const int alpha_base = block[0];
-          const int alpha_multiplier = block[1] >> 4;
-          const auto& alpha_table = kEacModifiers[block[1] & 15];
-          std::uint8_t alpha_palette[8];
-          for (int i = 0; i < 8; ++i) {
-            alpha_palette[i] =
-                Clamp255(alpha_base + alpha_table[i] * alpha_multiplier);
-          }
-          for (int texel = 0; texel < 16; ++texel) {
-            cols[texel] =
-                (cols[texel] & 0x00FFFFFF) |
-                (static_cast<std::uint32_t>(
-                     alpha_palette[EacIndexFromBits(alpha_bits, texel)])
-                 << 24);
+          // The colour half stays in C++ (already SSSE3); the alpha merge is a
+          // per-texel palette lookup and goes to Rust. Falling back on a
+          // non-zero return keeps this correct if the library declines.
+          if (!(RustEtcEnabled() &&
+                mocktail_rs_eac_merge_alpha(cols, block) == 0)) {
+            const std::uint64_t alpha_bits = ReadEacBits(block);
+            const int alpha_base = block[0];
+            const int alpha_multiplier = block[1] >> 4;
+            const auto& alpha_table = kEacModifiers[block[1] & 15];
+            std::uint8_t alpha_palette[8];
+            for (int i = 0; i < 8; ++i) {
+              alpha_palette[i] =
+                  Clamp255(alpha_base + alpha_table[i] * alpha_multiplier);
+            }
+            for (int texel = 0; texel < 16; ++texel) {
+              cols[texel] =
+                  (cols[texel] & 0x00FFFFFF) |
+                  (static_cast<std::uint32_t>(
+                       alpha_palette[EacIndexFromBits(alpha_bits, texel)])
+                   << 24);
+            }
           }
         }
 
@@ -638,27 +676,56 @@ bool DecodeEtcImageBlockRows(EtcFormat format, const std::uint8_t* source,
         const bool is_signed = format == EtcFormat::kEacR11Signed ||
                                format == EtcFormat::kEacRg11Signed;
         const int channels = static_cast<int>(texel_bytes / 2);
-        std::uint64_t channel_bits[2] = {0, 0};
-        std::uint16_t channel_palette[2][8];
-        for (int c = 0; c < channels; ++c) {
-          const std::uint8_t* cb = block + c * 8;
-          channel_bits[c] = ReadEacBits(cb);
-          const int mult = cb[1] >> 4;
-          const int* table = kEacModifiers[cb[1] & 15];
-          for (int i = 0; i < 8; ++i) {
-            channel_palette[c][i] =
-                DecodeR11Modifier(cb, mult, table, i, is_signed);
+        // The whole R11/RG11 family is per-texel with no vectorisation in C++,
+        // so the block decode goes to Rust. The edge-clamped write stays here,
+        // because the Rust side produces column-major texels and the bounds are
+        // a property of the image, not the block.
+        // Interior blocks are the overwhelming majority, and for them the four
+        // texels of a row are contiguous, so the block can be laid out in
+        // registers and written a row at a time. The edge path below still
+        // needs the bounds-clamped scatter, so it stays.
+        if (interior && RustEtcEnabled() &&
+            mocktail_rs_decode_r11_block_interior(
+                static_cast<int>(format), block, block_bytes,
+                destination + (by * 4 * width + bx * 4) * texel_bytes,
+                width * texel_bytes) == 0) {
+          continue;
+        }
+
+        std::uint16_t block_values[16 * 2];
+        const bool rust_decoded =
+            RustEtcEnabled() &&
+            mocktail_rs_decode_r11_block(static_cast<int>(format), block,
+                                         block_bytes, block_values) == 0;
+        if (!rust_decoded) {
+          std::uint64_t channel_bits[2] = {0, 0};
+          std::uint16_t channel_palette[2][8];
+          for (int c = 0; c < channels; ++c) {
+            const std::uint8_t* cb = block + c * 8;
+            channel_bits[c] = ReadEacBits(cb);
+            const int mult = cb[1] >> 4;
+            const int* table = kEacModifiers[cb[1] & 15];
+            for (int i = 0; i < 8; ++i) {
+              channel_palette[c][i] =
+                  DecodeR11Modifier(cb, mult, table, i, is_signed);
+            }
+          }
+          for (int texel = 0; texel < 16; ++texel) {
+            for (int channel = 0; channel < channels; ++channel) {
+              block_values[texel * channels + channel] =
+                  channel_palette[channel][EacIndexFromBits(
+                      channel_bits[channel], texel)];
+            }
           }
         }
+        (void)is_signed;
         for (std::uint32_t y = 0; y < 4 && by * 4 + y < height; ++y) {
           for (std::uint32_t x = 0; x < 4 && bx * 4 + x < width; ++x) {
             const int texel = static_cast<int>(x * 4 + y);
             std::uint8_t* out =
                 destination + ((by * 4 + y) * width + bx * 4 + x) * texel_bytes;
             for (int channel = 0; channel < channels; ++channel) {
-              const std::uint16_t value =
-                  channel_palette[channel][EacIndexFromBits(channel_bits[channel],
-                                                            texel)];
+              const std::uint16_t value = block_values[texel * channels + channel];
               out[channel * 2] = static_cast<std::uint8_t>(value);
               out[channel * 2 + 1] = static_cast<std::uint8_t>(value >> 8);
             }
