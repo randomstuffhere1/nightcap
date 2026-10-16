@@ -156,30 +156,34 @@ for expected in \
     '--env GH_TOKEN' \
     'MOCKTAIL_ANYLINUX_SYSTEM_INSTALL=1' \
     '--appimage-extract-and-run mocktail_updater status' \
-    'APPIMAGE=dist/Nightcap-nightly-x86_64.AppImage' \
-    '|continuous|Nightcap-nightly-x86_64.AppImage.zsync' \
+    'APPIMAGE=dist/Nightcap-x86_64.AppImage' \
+    '|nightly|Nightcap-x86_64.AppImage.zsync' \
     '--env UPINFO' \
-    'test -s dist/Nightcap-nightly-x86_64.AppImage.zsync' \
+    'test -s dist/Nightcap-x86_64.AppImage.zsync' \
     '--appimage-updateinformation' \
-    'Nightcap-nightly-x86_64.AppImage.zsync|' \
+    'Nightcap-x86_64.AppImage.zsync|' \
     'github-actions[bot]' \
-    'gh release upload continuous'; do
+    'gh release upload' \
+    'MOCKTAIL_ANDROID_BUILD_TOOLS_ROOT' \
+    '--mode standalone' \
+    'Nightcap-x86_64-portable.tar.zst' \
+    'nightcap-nightly-x86_64.pkg.tar.zst' \
+    'nightcap-nightly_amd64.deb' \
+    'nightcap-nightly_arm64.deb' \
+    'nightcap-nightly-aarch64.rpm' \
+    'SHA256SUMS' \
+    'ubuntu-26.04-arm'; do
   grep -Fq -- "${expected}" "${WORKFLOW}" ||
-    Fail "nightly AppImage workflow is missing: ${expected}"
+    Fail "nightly workflow is missing: ${expected}"
 done
 
 # The nightly runs on a schedule and on demand. Per-commit triggers would
-# rebuild a full AppImage for every push and pull request. The DEB, RPM and
-# pacman packages are built by the Makefile but are not published from here;
-# upstream ships those for unmodified Mocktail.
+# rebuild every artifact for each push and pull request.
 for unexpected in \
     'push:' \
-    'pull_request:' \
-    '-G DEB' \
-    '-G RPM' \
-    'makepkg --dir'; do
+    'pull_request:'; do
   if grep -Fq -- "${unexpected}" "${WORKFLOW}"; then
-    Fail "nightly AppImage workflow should not contain: ${unexpected}"
+    Fail "nightly workflow should not contain: ${unexpected}"
   fi
 done
 
