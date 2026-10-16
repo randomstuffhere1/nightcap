@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <deque>
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
@@ -1562,12 +1563,27 @@ constexpr VkPipelineStageFlags kEtc2WaitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 // touching those buffers. std::vector's move steals the pointer rather than
 // copying it, so a pWaitSemaphoreValues captured before an emplace_back is
 // still valid after it.
+//
+// One thing the deque did provide and cannot be given up: `timelines` holds its
+// VkTimelineSemaphoreSubmitInfo by value, and `&timeline` goes straight into
+// the rewritten VkSubmitInfo's pNext. That is an address *of an element*, not of
+// heap data the element owns, so unlike the nested vectors above it does not
+// survive the outer vector reallocating underneath it -- and a submit with more
+// than one ETC2 rewrite in it reallocates on the second one. The rewritten
+// struct would then carry a pNext into freed memory, which the driver follows,
+// which is what showed up as pink and green garbage across the frame on a
+// fullscreen transition.
+//
+// So the container is std::deque again, because a deque never invalidates
+// references to existing elements when it grows. It is the one member that
+// needs it, and it costs two allocations rather than the twelve the original
+// six deques did.
 struct Etc2SubmitRewrite {
   std::vector<std::vector<VkSemaphore>> wait_semaphores;
   std::vector<std::vector<VkPipelineStageFlags>> wait_stages;
   std::vector<std::vector<std::uint64_t>> wait_values;
   std::vector<std::vector<std::uint64_t>> signal_values;
-  std::vector<VkTimelineSemaphoreSubmitInfo> timelines;
+  std::deque<VkTimelineSemaphoreSubmitInfo> timelines;
   std::vector<std::vector<VkSemaphoreSubmitInfo>> wait_infos;
   std::vector<VkSubmitInfo> rewritten;
   std::vector<VkSubmitInfo2> rewritten2;
