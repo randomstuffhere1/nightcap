@@ -296,7 +296,8 @@ int mocktail_pthread_attr_destroy(MocktailBionicPthreadAttr* attr) {
 
 int mocktail_pthread_attr_setstacksize(MocktailBionicPthreadAttr* attr,
                                        size_t stack_size) {
-  if (attr == nullptr || stack_size < PTHREAD_STACK_MIN) {
+  if (attr == nullptr ||
+      stack_size < static_cast<size_t>(PTHREAD_STACK_MIN)) {
     return EINVAL;
   }
   attr->stack_size = stack_size;
