@@ -8,6 +8,7 @@
 #include <array>
 #include <cerrno>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <unordered_set>
 
@@ -35,6 +36,22 @@ bool ParseBoolean(const yaml_node_t* node, bool* value) {
     return true;
   }
   return false;
+}
+
+// A plain decimal count of hours. 0 is meaningful here (ask every launch), so a
+// missing or unparseable value is an error rather than a silent default.
+bool ParseHours(const yaml_node_t* node, std::int64_t* value) {
+  const std::string text = Scalar(node);
+  if (text.empty()) return false;
+  for (const char character : text) {
+    if (character < '0' || character > '9') return false;
+  }
+  errno = 0;
+  char* end = nullptr;
+  const long long parsed = std::strtoll(text.c_str(), &end, 10);
+  if (errno != 0 || end == nullptr || *end != '\0' || parsed < 0) return false;
+  *value = static_cast<std::int64_t>(parsed);
+  return true;
 }
 
 bool ReadFile(const std::filesystem::path& path, std::string* contents,
@@ -163,6 +180,19 @@ UpdateConfigResult LoadUpdateConfig(const std::filesystem::path& path) {
     } else if (key == "launch_after_update") {
       if (!ParseBoolean(value, &result.config.launch_after_update)) {
         result.error = "updates.launch_after_update must be true or false";
+        break;
+      }
+    } else if (key == "check_interval_hours") {
+      if (!ParseHours(value, &result.config.check_interval_hours)) {
+        result.error =
+            "updates.check_interval_hours must be a whole number of hours "
+            "(0 asks the provider on every launch)";
+        break;
+      }
+    } else if (key == "reverify_library_on_launch") {
+      if (!ParseBoolean(value, &result.config.reverify_library_on_launch)) {
+        result.error =
+            "updates.reverify_library_on_launch must be true or false";
         break;
       }
     } else if (key == "source") {

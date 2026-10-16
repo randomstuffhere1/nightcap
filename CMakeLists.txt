@@ -310,6 +310,7 @@ add_library(mocktail_update STATIC
   src/update/compatibility_catalog.cc
   src/update/http_download.cc
   src/update/host_abi_deriver.cc
+  src/update/launch_cache.cc
   src/update/payload_integrity.cc
   src/update/payload_store.cc
   src/update/readiness_canary.cc
@@ -404,6 +405,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/server_location.cc
   src/runtime/single_instance_lock.cc
   src/runtime/startup_state_machine.cc
+  src/runtime/startup_trace.cc
   src/runtime/supported_launch_policy.cc
   src/runtime/support_bundle.cc
   src/runtime/system_proxy.cc
@@ -486,6 +488,7 @@ mocktail_apply_compile_options(mocktail_settings)
 
 add_library(mocktail_services STATIC
   src/services/http_client.cc
+  src/services/auth_identity_cache.cc
   src/services/auth_service.cc
   src/services/browser_tracker_service.cc
   src/services/client_settings_service.cc

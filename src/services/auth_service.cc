@@ -2,11 +2,16 @@
 
 #define JSON_NOEXCEPTION 1
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+
+#include "services/auth_identity_cache.h"
 
 namespace mocktail {
 namespace services {
@@ -15,6 +20,19 @@ namespace {
 constexpr std::string_view kCookieName = ".ROBLOSECURITY";
 constexpr std::string_view kAuthenticatedUserUrl =
     "https://users.roblox.com/v1/users/authenticated";
+
+// How long a resolved identity stays usable, in minutes. Overridable per
+// process so a user (or a test) can turn the reuse off without editing config.
+// A non-positive value means resolve over HTTP every time.
+std::int64_t IdentityCacheIntervalMinutes() {
+  const char* value = std::getenv("MOCKTAIL_AUTH_IDENTITY_CACHE_MINUTES");
+  if (value == nullptr || value[0] == '\0') return 60;
+  errno = 0;
+  char* end = nullptr;
+  const long long parsed = std::strtoll(value, &end, 10);
+  if (errno != 0 || end == nullptr || *end != '\0') return 60;
+  return static_cast<std::int64_t>(parsed);
+}
 
 bool IsCookieDelimiter(char ch) {
   return ch == ';' || ch == '\r' || ch == '\n' || ch == '\t';
@@ -250,6 +268,26 @@ AuthSession AuthService::ResolveSession(std::string_view cookie_header,
   request.headers.push_back("Accept: application/json");
   request.headers.push_back("Cookie: .ROBLOSECURITY=" +
                             std::string(cookie.value));
+
+  // The account behind this cookie is the same one as last time, so a record
+  // keyed by a hash of the cookie can answer without the round-trip. The key
+  // means a different or rotated session misses, and only a successful
+  // resolution is ever written, so a rejected cookie is never answered from here.
+  const std::string cookie_digest = AuthCookieDigest(cookie.value);
+  const std::int64_t interval = IdentityCacheIntervalMinutes();
+  if (!cookie_digest.empty() && interval > 0) {
+    CachedAuthIdentity cached;
+    if (ReadCachedAuthIdentity(&cached) &&
+        cached.cookie_digest == cookie_digest &&
+        CachedAuthIdentityFresh(cached, interval, AuthCacheNowEpoch())) {
+      session.identity.user_id = cached.user_id;
+      session.identity.username = cached.username;
+      session.identity.display_name = cached.display_name;
+      session.status = AuthSessionStatus::kAuthenticated;
+      return session;
+    }
+  }
+
   HttpResponse response = http_client_.Get(request);
   session.http_status = response.status_code;
   if (!response.transport_ok) {
@@ -264,6 +302,17 @@ AuthSession AuthService::ResolveSession(std::string_view cookie_header,
       return session;
     }
     session.status = AuthSessionStatus::kAuthenticated;
+    if (!cookie_digest.empty()) {
+      CachedAuthIdentity record;
+      record.cookie_digest = cookie_digest;
+      record.user_id = session.identity.user_id;
+      record.username = session.identity.username;
+      record.display_name = session.identity.display_name;
+      record.checked_at_epoch = AuthCacheNowEpoch();
+      // A failure here costs the next launch one round-trip and nothing else.
+      std::string error;
+      (void)WriteCachedAuthIdentity(record, &error);
+    }
   } else if (response.status_code == 401 || response.status_code == 403) {
     session.status = AuthSessionStatus::kInvalid;
     session.error = "authentication rejected";

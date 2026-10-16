@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "mocktail/graphics/angle_probe.h"
+#include "runtime/startup_trace.h"
 #include "mocktail/graphics/gles_text_overlay_compositor.h"
 #include "mocktail/graphics/present_mode_policy.h"
 #include "mocktail/platform/display_refresh_capabilities.h"
@@ -1877,6 +1878,9 @@ void NoteVulkanPresent() {
   ShowIfHidden();
   if (present_count == 1) {
     fprintf(stderr, "  [window] first Roblox Vulkan frame presented\n");
+    // The last mark before the first frame is the time to first frame, so this
+    // is the end of the startup timeline.
+    mocktail::runtime::StartupTraceMark("first-present");
   }
   if (present_count == 1 || present_count % 240 == 0) {
     fprintf(stderr, "  [perf] present_sample frame=%d monotonic_ns=%llu\n",

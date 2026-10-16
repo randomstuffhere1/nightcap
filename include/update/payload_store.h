@@ -42,10 +42,14 @@ using ManifestWriteFault =
 
 class PayloadStore final {
  public:
+  // `reverify_library` forces VerifyCurrent to re-hash libroblox.so even when a
+  // receipt says the file is unchanged. The default trusts a matching receipt,
+  // which is what keeps a relaunch from re-reading 118 MiB.
   PayloadStore(std::filesystem::path root,
                std::filesystem::path compatibility_manifest,
                std::filesystem::path runtime_binary = {},
-               ManifestWriteFault manifest_write_fault = {});
+               ManifestWriteFault manifest_write_fault = {},
+               bool reverify_library = false);
 
   PayloadStoreResult Stage(const std::filesystem::path& prepared_payload);
   PayloadStoreResult Promote(std::string_view payload_id);
@@ -69,6 +73,7 @@ class PayloadStore final {
   std::filesystem::path compatibility_manifest_;
   std::filesystem::path runtime_binary_;
   ManifestWriteFault manifest_write_fault_;
+  bool reverify_library_ = false;
 };
 
 }  // namespace mocktail::update

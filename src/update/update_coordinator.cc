@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <optional>
@@ -26,6 +27,7 @@
 #include "update/apkpure_provider.h"
 #include "update/compatibility_catalog.h"
 #include "update/host_abi_deriver.h"
+#include "update/launch_cache.h"
 #include "update/payload_integrity.h"
 #include "update/payload_store.h"
 #include "update/readiness_canary.h"
@@ -636,6 +638,7 @@ std::vector<std::string> ReferencePayloadIds(
 std::string CollectSupersededPayloads(PayloadStore* store,
                                       const std::vector<std::string>& keep) {
   if (TraceFlagEnabled("MOCKTAIL_KEEP_OLD_PAYLOADS")) return {};
+  StageTimer timer("collect-garbage");
   const PayloadGarbageResult collected = store->CollectGarbage(keep);
   if (!collected || collected.removed.empty()) return {};
   return "; freed " +
@@ -723,8 +726,10 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
     result.error = "native updater supports only the direct APK providers";
     return result;
   }
-  const CompatibilityCatalogResult catalog =
-      LoadCompatibilityCatalog(paths.compatibility_manifest);
+  const CompatibilityCatalogResult catalog = [&] {
+    StageTimer timer("load-catalog");
+    return LoadCompatibilityCatalog(paths.compatibility_manifest);
+  }();
   if (!catalog) {
     result.error = catalog.error;
     return result;
@@ -736,8 +741,12 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
   }
 
   PayloadStore store(paths.data_root, paths.compatibility_manifest,
-                     paths.runtime_binary);
-  const PayloadStoreResult current = store.VerifyCurrent();
+                     paths.runtime_binary, {},
+                     configured.config.reverify_library_on_launch);
+  const PayloadStoreResult current = [&] {
+    StageTimer timer("verify-current");
+    return store.VerifyCurrent();
+  }();
   PayloadStoreResult installed = current;
   if (!current && !current.payload_id.empty() &&
       !current.host_abi_profile.empty() &&
@@ -769,17 +778,51 @@ UpdateResult RunUpdate(const UpdatePaths& paths, const UpdateRequest& request) {
   std::optional<ProviderVersion> latest_version;
   if (request.check_latest) {
     Progress(request.progress_fd, "Checking Roblox...");
+    // A launch inside the configured interval reuses the last successful answer
+    // instead of waiting on a network round-trip. A stale, missing, or unreadable
+    // record just falls through to the provider below, so this can only ever make
+    // the check cheaper, never skip it for good.
+    VersionCheckCache cached_version;
+    const bool cache_fresh =
+        configured.config.check_interval_hours > 0 &&
+        ReadVersionCheckCache(paths.data_root, &cached_version) &&
+        VersionCheckCacheFresh(cached_version,
+                                configured.config.check_interval_hours,
+                                CacheNowEpoch());
     const ProviderVersion latest = [&] {
+      if (cache_fresh) {
+        StageTimer timer("check-latest-cached");
+        ProviderVersion cached;
+        cached.version_name = cached_version.version_name;
+        cached.version_code = cached_version.version_code;
+        return cached;
+      }
       StageTimer timer("check-latest");
       return provider.CheckLatest();
     }();
     if (latest) {
+      if (!cache_fresh) {
+        std::string cache_error;
+        VersionCheckCache record;
+        record.version_name = latest.version_name;
+        record.version_code = latest.version_code;
+        record.checked_at_epoch = CacheNowEpoch();
+        if (!WriteVersionCheckCache(paths.data_root, record, &cache_error)) {
+          std::cerr << "  [update] cannot record version check: " << cache_error
+                    << '\n';
+        }
+      }
       latest_version = latest;
       if (current && SameVersion(current, latest)) {
         result.payload_id = current.payload_id;
         result.message = "latest Roblox " + latest.version_name + " (" +
                          std::to_string(latest.version_code) +
                          ") is already canary-approved";
+        if (cache_fresh) {
+          result.message += "; answered from the " +
+                            std::to_string(configured.config.check_interval_hours) +
+                            "h version cache";
+        }
         result.message += CollectSupersededPayloads(
             &store, ReferencePayloadIds(paths, catalog.profiles));
         return result;

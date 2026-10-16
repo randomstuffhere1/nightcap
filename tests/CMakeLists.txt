@@ -112,6 +112,12 @@ target_compile_definitions(native_update_test PRIVATE
   MOCKTAIL_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
 
+add_executable(launch_cache_test launch_cache_test.cc)
+target_link_libraries(launch_cache_test PRIVATE
+  Mocktail::Update
+  GTest::gtest_main
+)
+
 add_executable(compatibility_catalog_test compatibility_catalog_test.cc)
 target_link_libraries(compatibility_catalog_test PRIVATE
   Mocktail::Update
@@ -154,6 +160,12 @@ target_link_libraries(server_location_test PRIVATE
   # The resolver reports through the host overlay, which lives with the other
   # overlays in the input runtime.
   Mocktail::InputRuntime
+  GTest::gtest_main
+)
+
+add_executable(startup_trace_test startup_trace_test.cc)
+target_link_libraries(startup_trace_test PRIVATE
+  Mocktail::Runtime
   GTest::gtest_main
 )
 

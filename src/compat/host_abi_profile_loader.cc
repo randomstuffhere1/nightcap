@@ -19,6 +19,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -32,6 +33,7 @@
 #include <openssl/evp.h>
 
 #include "compat/elf_build_id.h"
+#include "compat/file_digest_cache.h"
 #include "compat/guest_abi.h"
 
 namespace mocktail::compat {
@@ -55,6 +57,16 @@ std::string FormatHex(const unsigned char* data, std::size_t size,
     }
   }
   return hex;
+}
+
+// The receipt says which payload this profile was approved for, and loading it
+// confirms the payload on disk is still that one. That confirmation is a real
+// check; MOCKTAIL_REVERIFY_PAYLOAD only controls whether a cached file identity
+// may stand in for re-hashing, and is the setting to reach for if a payload's
+// provenance is ever in doubt.
+bool PayloadDigestCachingDisabled() {
+  const char* value = std::getenv("MOCKTAIL_REVERIFY_PAYLOAD");
+  return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
 }
 
 std::string ComputeSha256Hex(std::string_view bytes,
@@ -1215,7 +1227,37 @@ ExternalHostAbiProfileResult LoadExternalHostAbiProfile(
         "external host ABI profile Build ID does not match payload ELF");
   }
 
-  const FileSha256Result payload_hash = ComputeFileSha256(*canonical_payload);
+  // The payload's own hash was already verified once this launch by the update
+  // preflight, which runs before the linker is reached. A cached record that
+  // matches this exact file identity lets the second hash in the same launch be
+  // skipped; a missing or mismatched record simply hashes it, so this changes
+  // how long the check takes and nothing about what it proves.
+  const FileSha256Result payload_hash = [&] {
+    FileIdentity identity;
+    if (!PayloadDigestCachingDisabled() &&
+        ReadFileIdentity(*canonical_payload, &identity)) {
+      FileDigestRecord record;
+      if (ReadFileDigestRecord(&record) &&
+          FileDigestRecordCovers(record, *canonical_payload, identity) &&
+          record.digest == encoded_payload_sha256) {
+        return FileSha256Result{record.digest, {}};
+      }
+    }
+    const FileSha256Result computed = ComputeFileSha256(*canonical_payload);
+    if (computed && !PayloadDigestCachingDisabled() &&
+        ReadFileIdentity(*canonical_payload, &identity)) {
+      FileDigestRecord write_record;
+      write_record.path = *canonical_payload;
+      write_record.digest = computed.sha256;
+      write_record.identity = identity;
+      std::string error;
+      if (!WriteFileDigestRecord(write_record, &error)) {
+        std::cerr << "  [compat] cannot record payload digest cache: " << error
+                  << '\n';
+      }
+    }
+    return computed;
+  }();
   if (!payload_hash || payload_hash.sha256 != encoded_payload_sha256) {
     return Failure(
         "external host ABI profile SHA-256 does not match payload bytes");

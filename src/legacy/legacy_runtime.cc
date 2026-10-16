@@ -74,6 +74,7 @@
 #include "runtime/asset_overlay_names.h"
 #include "runtime/roblox_app_lifecycle.h"
 #include "runtime/server_location.h"
+#include "runtime/startup_trace.h"
 #include "runtime/roblox_capability_resolver.h"
 #include "runtime/roblox_platform_web_symbols.h"
 #include "runtime/roblox_experience_composition.h"
@@ -1650,6 +1651,7 @@ size_t GetEngineStackSize() {
 void PrintStage(int stage, const char* description) {
   std::cout << "[stage " << stage << "] " << description << '\n'
             << std::flush;
+  mocktail::runtime::StartupTraceMark(description);
 }
 
 
@@ -3111,6 +3113,7 @@ jobject BuildStartGameParams(JNIEnv* env, jobject platform_params,
                             jobject vr_context, const char* launch_data_env,
                             const jnivm::RobloxAuthIdentity& identity) {
   std::cout << "  [engine] BuildStartGameParams begin\n" << std::flush;
+  mocktail::runtime::StartupTraceMark("build-start-game-params-begin");
   if (!env) {
     std::cerr << "  [engine] BuildStartGameParams: env is null\n" << std::flush;
     return nullptr;
@@ -6046,6 +6049,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
       ::close(fd);
     }
   }
+  mocktail::runtime::StartupTraceMark("elf-import-scan-end");
 
   // Load synthetic libraries only after the import map is complete.
   linker::RegisterBionicPthreadKeyRuntimeForLibc();
@@ -6102,6 +6106,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
   }
 
   PrintStage(5, "Invoking JNI_OnLoad in libroblox.so");
+  mocktail::runtime::StartupTraceMark("libroblox-load-and-ctors-end");
 
   auto* jni_onload =
       reinterpret_cast<JniOnLoadFn>(
@@ -7305,6 +7310,7 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
     }
     std::cout << "  [engine] legacy startup call sequence returned\n"
               << std::flush;
+    mocktail::runtime::StartupTraceMark("engine-start-calls-returned");
   }
 
   std::cout << "\n======================================================\n"

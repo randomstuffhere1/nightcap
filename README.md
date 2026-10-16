@@ -264,6 +264,10 @@ To build and install the Flatpak from source, install `flatpak-builder` and run
 `FLATPAK_JOBS=N` to `make flatpak`, or set `MOCKTAIL_FLATPAK_JOBS=N` for
 `scripts/build_flatpak.sh`, to change that.
 
+To see where startup time actually goes, run `make startup-timeline`. It prints
+a per-phase median across a few launches; see [Startup](docs/PERFORMANCE.md#startup)
+for what the phases are and which ones the caches shorten.
+
 To run the same checks as CI before each commit and push, install
 [lefthook](https://github.com/evilmartians/lefthook) and run once:
 

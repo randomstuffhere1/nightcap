@@ -546,6 +546,117 @@ governed by the in-game cap rather than by presentation. `off` selects
 If the frame rate is higher than your refresh rate, the extra frames are work
 you cannot see. Lower the in-game cap to your refresh rate first.
 
+## Startup
+
+Startup is dominated by work that is the same on every launch, not by the
+engine. Measure it before changing anything:
+
+```bash
+make startup-timeline          # opens a window; exits shortly after the first frame
+```
+
+That runs the client a few times with `MOCKTAIL_STARTUP_TRACE=1`, which makes
+each phase boundary print its own cost:
+
+```
+  [startup] update-preflight-begin 33 ms (total 33 ms)
+  [startup] update-preflight-end 206 ms (total 239 ms)
+```
+
+The `total` is measured from the top of `main()`, so the last line before the
+first presented frame is the time to first frame. The script prints the median
+across runs, because the per-phase numbers move with machine load while the
+ranking does not. `MOCKTAIL_FULL_TRACE` enables this alongside the update
+coordinator's own stage timings.
+
+Measured on a 4-core i7-7600U carrying some other load, with the payload warm
+in page cache, Roblox 2.742.1059. "Before" is the same tree before this work;
+"after" is with the caches populated, which is what every launch after the first
+one looks like:
+
+| phase | before | after (Debug) | after (Release) |
+| --- | --- | --- | --- |
+| update preflight | 1340 ms | 206 ms | 203 ms |
+| payload compatibility check | 326 ms | 4 ms | 2 ms |
+| BrowserTracker bootstrap | 478 ms | 8 ms | 1 ms |
+| auth identity resolve | 540 ms | 12 ms | 81 ms |
+| **time to first frame** | **5962 ms** | **~4100 ms** | **3543 ms** |
+
+A first launch with no caches still pays the full verification: about 6.0 s in
+Debug, of which the preflight alone is 1.3 s. That is the cost of actually
+hashing the payload and asking the provider, done once.
+
+What is left of the host side is about 300 ms, of which ~200 ms is spawning the
+GTK progress window before the updater starts. `MOCKTAIL_DISABLE_UPDATE_PROGRESS=1`
+takes that to 10 ms and is the quickest way to see the rest; it also means no
+progress window during a real download.
+
+### What the caches are, and what they are not
+
+Three of those phases were the same work repeated on every launch. Each now has
+a small record under the data root, and each is an accelerator only: a missing,
+stale, malformed, or mismatched record means the original work happens exactly
+as before. None of them is consulted while staging, promoting, or rolling back a
+payload -- `VerifyPreparedPayload` still hashes the library, both APKs, and the
+whole asset tree on those paths.
+
+* **`.library-verify.json`** (the update preflight) records the size, inode, and
+  both mtime fields of `libroblox.so` at the moment its SHA-256 was compared
+  against the payload metadata. An unchanged file skips a 118 MiB hash. A file
+  that was touched in any way misses and is hashed again.
+* **`.version-check.json`** caches the provider's latest-version answer for
+  `updates.check_interval_hours` (default 6). The trade is that a newly
+  published Roblox build can take that long to be noticed automatically;
+  `make update-auto` checks immediately, and `updates.check_interval_hours: 0`
+  turns it off.
+* **`.file-digest.json`** does the same for the second hash in the host ABI
+  profile loader, which would otherwise re-read the same 118 MiB in the same
+  launch.
+* **`.auth-identity.json`** caches the resolved account, keyed by a SHA-256 of
+  the `.ROBLOSECURITY` value so the record holds no usable credential. A
+  different or rotated cookie misses, and only a successful resolution is ever
+  recorded -- a rejected session is never answered from the cache. Tune with
+  `MOCKTAIL_AUTH_IDENTITY_CACHE_MINUTES` (default 60, `0` always resolves over
+  HTTP).
+
+To force every check back on:
+
+```bash
+MOCKTAIL_REVERIFY_PAYLOAD=1 MOCKTAIL_AUTH_IDENTITY_CACHE_MINUTES=0 mocktail
+```
+
+or in `config.yaml`:
+
+```yaml
+updates:
+  reverify_library_on_launch: true
+  check_interval_hours: 0
+```
+
+### One bug worth naming
+
+The BrowserTracker phase was not slow because it had to be. `main()` was
+handing `EnsureInitialized` the managed credential file (`auth/roblox.cookie`),
+which carries a `.ROBLOSECURITY` value and no `RBXEventTrackerV2` cookie. That
+guaranteed a miss, so every launch POSTed to the tracker endpoint -- and since
+the file was still treated as owned, a successful POST would have written the
+tracker cookie back into the credential file. Only an explicitly supplied
+`MOCKTAIL_COOKIE_FILE` replaces the default jar now.
+
+### The largest remaining host cost
+
+About 200 ms of what is left is not the updater at all: `RunPayloadUpdatePreflight`
+spawns `mocktail_failure_dialog --progress-monitor` -- a GTK application -- before
+it spawns the updater, and the GTK start-up is the whole 200 ms. The updater
+itself, warm, takes 10 ms.
+
+Opening that window only when there is an update to show progress for would take
+it to nothing, but the decision needs the configured check interval, which only
+the updater parses. Doing it properly means having the updater report whether it
+is about to download something, rather than having the launcher guess from a
+second read of the same config. That is worth doing, and it is not worth doing
+casually: it touches the path that downloads and promotes a payload.
+
 ## Measuring
 
 Shift+F4 in game shows Roblox's own scheduler jobs, with a millisecond cost and

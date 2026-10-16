@@ -17,13 +17,16 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include <set>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "update/candidate_approval.h"
 #include "update/compatibility_catalog.h"
+#include "update/launch_cache.h"
 #include "update/payload_integrity.h"
 
 namespace mocktail::update {
@@ -628,6 +631,58 @@ bool PersistPayloadSha256(const std::filesystem::path& root,
                      error);
 }
 
+// Re-hashing a 118 MiB libroblox.so on every launch is most of what the update
+// preflight costs, and it is the same bytes every time. A receipt recording the
+// file's identity at the moment its hash was compared lets an unchanged payload
+// skip straight past it.
+//
+// This is a launch-time accelerator and nothing more. VerifyPreparedPayload is
+// untouched and still hashes the library, both APKs, and the whole asset tree
+// on every stage, promote, and rollback. `reverify` forces the hash even when a
+// receipt matches, which is the setting to reach for if a payload's provenance
+// is ever in doubt.
+bool VerifyCurrentLibrary(const std::filesystem::path& root,
+                          std::string_view payload_id,
+                          const std::filesystem::path& payload_directory,
+                          std::string_view expected_sha256, bool reverify,
+                          std::string* error) {
+  const std::filesystem::path library = payload_directory / "libroblox.so";
+  LibraryFingerprint fingerprint;
+  const bool fingerprinted = !reverify &&
+                             ReadLibraryFingerprint(library, &fingerprint);
+  if (fingerprinted) {
+    LibraryVerifyReceipt receipt;
+    if (ReadLibraryVerifyReceipt(root, &receipt) &&
+        LibraryReceiptCovers(receipt, payload_id, expected_sha256, fingerprint)) {
+      return true;
+    }
+  }
+
+  const std::string actual = HashRegularFile(library, error);
+  if (!error->empty()) return false;
+  if (actual != expected_sha256) {
+    *error = "current payload library hash mismatch";
+    return false;
+  }
+  // Only a receipt that proves the hash was just compared is worth writing.
+  if (!fingerprinted &&
+      !ReadLibraryFingerprint(library, &fingerprint)) {
+    return true;
+  }
+  LibraryVerifyReceipt receipt;
+  receipt.payload_id = std::string(payload_id);
+  receipt.library_sha256 = std::string(expected_sha256);
+  receipt.fingerprint = fingerprint;
+  std::string write_error;
+  if (!WriteLibraryVerifyReceipt(root, receipt, &write_error)) {
+    // The hash matched, so this launch is verified either way; the next one
+    // simply pays for the hash again.
+    std::cerr << "  [update] cannot record payload verification receipt: "
+              << write_error << '\n';
+  }
+  return true;
+}
+
 constexpr const char* kPreviousRecovery = ".previous_good-recovery.json";
 constexpr const char* kAbsentRecovery = ".previous_good-recovery.absent";
 
@@ -737,11 +792,13 @@ bool PublishActivation(const std::filesystem::path& root,
 PayloadStore::PayloadStore(std::filesystem::path root,
                            std::filesystem::path compatibility_manifest,
                            std::filesystem::path runtime_binary,
-                           ManifestWriteFault manifest_write_fault)
+                           ManifestWriteFault manifest_write_fault,
+                           bool reverify_library)
     : root_(std::move(root)),
       compatibility_manifest_(std::move(compatibility_manifest)),
       runtime_binary_(std::move(runtime_binary)),
-      manifest_write_fault_(std::move(manifest_write_fault)) {}
+      manifest_write_fault_(std::move(manifest_write_fault)),
+      reverify_library_(reverify_library) {}
 
 PayloadStoreResult PayloadStore::Stage(
     const std::filesystem::path& prepared_payload) {
@@ -908,12 +965,9 @@ PayloadStoreResult PayloadStore::VerifyCurrent() {
   if (!PopulateInspectedResult(root_, manifest, &result, &payload)) {
     return result;
   }
-  const std::string library_sha256 =
-      HashRegularFile(result.payload_directory / "libroblox.so", &result.error);
-  if (!result.error.empty() ||
-      library_sha256 != payload.metadata.library_sha256) {
-    if (result.error.empty())
-      result.error = "current payload library hash mismatch";
+  if (!VerifyCurrentLibrary(root_, result.payload_id, result.payload_directory,
+                            payload.metadata.library_sha256,
+                            reverify_library_, &result.error)) {
     return result;
   }
   std::string support_error;

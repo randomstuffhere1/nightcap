@@ -623,7 +623,10 @@ bool ExportRuntimePathEnvironment(const RuntimePaths& paths,
          SetEnvironmentDefault("MOCKTAIL_TEXTURE_OVERRIDE_DIR",
                                paths.config_root() / "textures", error) &&
          SetEnvironmentDefault("MOCKTAIL_ASSET_OVERLAY_DIR",
-                               paths.asset_overlay_dir(), error);
+                               paths.asset_overlay_dir(), error) &&
+         // The payload digest cache in compat/ keys off this, so it has to be
+         // published before anything looks for a record under it.
+         SetEnvironmentDefault("MOCKTAIL_DATA_ROOT", paths.data_root(), error);
 }
 
 bool PrepareManagedPayloadWorkingDirectory(const RuntimePaths& paths,

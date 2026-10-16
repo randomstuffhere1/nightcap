@@ -151,6 +151,9 @@ run-smoke: export MOCKTAIL_AUTO_EXIT_AFTER_PRESENT_MS = 3000
 run-smoke: release-runtime ## Run the short Vulkan lifecycle readiness gate
 	@./scripts/real_bringup_smoke.sh C
 
+startup-timeline: release-runtime ## Time startup per phase and print a median timeline (opens a window)
+	@./scripts/startup_timeline.sh
+
 run-unlimited: export MOCKTAIL_FRAME_RATE_LIMIT = unlimited
 run-unlimited: export MOCKTAIL_VSYNC = off
 run-unlimited: export MOCKTAIL_AUTO_EXIT_AFTER_PRESENT_MS = 5000

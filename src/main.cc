@@ -54,6 +54,7 @@
 #include "runtime/runtime_paths.h"
 #include "runtime/session_log.h"
 #include "runtime/single_instance_lock.h"
+#include "runtime/startup_trace.h"
 #include "runtime/support_bundle.h"
 #include "runtime/supported_launch_policy.h"
 #include "runtime/system_proxy.h"
@@ -258,6 +259,9 @@ void ConfigureHostDriverEnvironment() {
 }  // namespace
 
 int main(int argc, char* argv[]) {
+  // Before anything else, so the startup timeline starts at the process rather
+  // than at the first phase that happens to report itself.
+  mocktail::runtime::InitStartupTrace();
   ConfigureHostDriverEnvironment();
   const auto process_started_at = std::chrono::system_clock::now();
   mocktail::runtime::CommandLineParseResult command_line =
@@ -695,8 +699,10 @@ int main(int argc, char* argv[]) {
       uses_managed_payload) {
     failure_dialog.SetMessage(
         "Mocktail could not update or verify the Roblox installation.");
+    mocktail::runtime::StartupTraceMark("update-preflight-begin");
     const mocktail::runtime::PayloadUpdatePreflightResult update_preflight =
         mocktail::runtime::RunPayloadUpdatePreflight(environment, paths);
+    mocktail::runtime::StartupTraceMark("update-preflight-end");
     if (!update_preflight) {
       std::cerr << "[FATAL] " << update_preflight.error;
       if (!update_preflight.details.empty()) {
@@ -948,8 +954,10 @@ int main(int argc, char* argv[]) {
               << " vsync=" << runtime_config.config.vsync_mode() << '\n';
   }
 
+  mocktail::runtime::StartupTraceMark("ca-bundle-begin");
   const libc_shim::HostCaBundleResolution ca_bundle =
       libc_shim::ResolveHostCaBundle();
+  mocktail::runtime::StartupTraceMark("ca-bundle-end");
   if (ca_bundle.status == libc_shim::HostCaBundleStatus::kInvalidOverride) {
     std::cerr << "Invalid MOCKTAIL_CA_BUNDLE: expected a readable, non-empty "
                  "absolute regular file\n";
@@ -962,17 +970,21 @@ int main(int argc, char* argv[]) {
     const std::string compatibility_manifest =
         environment.GetOr("MOCKTAIL_COMPATIBILITY_MANIFEST",
                           MOCKTAIL_DEFAULT_COMPATIBILITY_MANIFEST);
+    mocktail::runtime::StartupTraceMark("check-compatibility-begin");
     const mocktail::compat::PayloadCompatibilityResult compatibility =
         mocktail::compat::CheckPayloadCompatibility(
             runtime_config.config.roblox_library_path().string(),
             compatibility_manifest,
             command_line.options.allow_unverified_build);
+    mocktail::runtime::StartupTraceMark("check-compatibility-end");
     if (!compatibility) {
       std::cerr << "[FATAL] " << compatibility.error << '\n';
       return EXIT_FAILURE;
     }
+    mocktail::runtime::StartupTraceMark("fullscreen-bridge-begin");
     const mocktail::Status fullscreen_status =
         fullscreen_bridge.Install(compatibility.profile);
+    mocktail::runtime::StartupTraceMark("fullscreen-bridge-end");
     if (!fullscreen_status.ok()) {
       std::cerr << "[FATAL] Cannot install fullscreen runtime bridge: "
                 << fullscreen_status.message() << '\n';
@@ -993,13 +1005,18 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
       }
     }
+    mocktail::runtime::StartupTraceMark("audio-bridge-begin");
     const mocktail::Status output_device_status =
         output_device_bridge.Install(compatibility.profile);
+    mocktail::runtime::StartupTraceMark("audio-bridge-end");
     if (!output_device_status.ok()) {
       std::cerr << "[FATAL] Cannot install Roblox output-device bridge: "
                 << output_device_status.message() << '\n';
       return EXIT_FAILURE;
     }
+    // Last mark before the HTTP bootstrap below. A gap attributed here belongs
+    // to the compatibility check, the CA bundle, or the two bridge installs.
+    mocktail::runtime::StartupTraceMark("compatibility-bridges-end");
   }
 
   mocktail::legacy::RuntimeDependencies dependencies;
@@ -1009,15 +1026,21 @@ int main(int argc, char* argv[]) {
     std::filesystem::path tracker_cookie_file =
         paths.data_root() / "browser_tracker.cookie";
     bool tracker_cookie_owned = true;
+    // Only an explicitly supplied jar replaces the default. The managed
+    // credential file (paths.cookie_file()) is a .ROBLOSECURITY jar: it carries
+    // no RBXEventTrackerV2, so reading it here found nothing on every launch,
+    // asked the tracker endpoint for an identity anyway, and -- because the file
+    // was still treated as owned -- would have written the tracker cookie back
+    // into the credential file.
     if (environment.HasNonEmpty("MOCKTAIL_COOKIE_FILE")) {
       tracker_cookie_file = environment.GetOr("MOCKTAIL_COOKIE_FILE", "");
       tracker_cookie_owned = false;
-    } else if (mocktail::runtime::RuntimePaths::Exists(paths.cookie_file())) {
-      tracker_cookie_file = paths.cookie_file();
     }
+    mocktail::runtime::StartupTraceMark("browser-tracker-begin");
     const mocktail::services::BrowserTrackerResult browser_tracker_result =
         browser_tracker.EnsureInitialized(app_storage_file, tracker_cookie_file,
                                           tracker_cookie_owned);
+    mocktail::runtime::StartupTraceMark("browser-tracker-end");
     if (!browser_tracker_result) {
       std::cerr << "  [runtime] BrowserTracker bootstrap skipped: "
                 << browser_tracker_result.error;
@@ -1034,9 +1057,11 @@ int main(int argc, char* argv[]) {
                 << " before engine startup\n";
     }
     mocktail::services::AuthService auth_service(*http_client);
+    mocktail::runtime::StartupTraceMark("auth-begin");
     mocktail::runtime::AuthRuntimeComposition composition =
         mocktail::runtime::ComposeAuthRuntime(environment, paths, auth_service,
                                               http_client);
+    mocktail::runtime::StartupTraceMark("auth-end");
     if (!external_launch_request.has_value() &&
         command_line.options.window_mode !=
             mocktail::runtime::WindowMode::kHeadless) {
