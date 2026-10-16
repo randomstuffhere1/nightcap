@@ -7347,12 +7347,21 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
               experience_consumer,
               mocktail::window::MakeWindowResizeReadinessCommitObserver());
     }
+    const bool resize_trace = HasEnvValue("MOCKTAIL_TRACE_RESIZE");
     const auto drain_game_surface_events = [&]() {
       if (surface_bridge == nullptr) {
         return true;
       }
+      const uint64_t drain_started_ns = MonotonicNanos();
       const mocktail::window::WindowGameSurfaceDrainResult result =
           surface_bridge->Drain();
+      if (resize_trace && result.drained_events != 0) {
+        std::fprintf(stderr,
+                     "  [resize-trace] drain events=%zu took %llu us\n",
+                     result.drained_events,
+                     static_cast<unsigned long long>(
+                         (MonotonicNanos() - drain_started_ns) / 1000));
+      }
       if (!result.ok()) {
         std::cerr << "[FATAL] Typed GAME surface bridge rejected an event: "
                   << result.status.message() << '\n';

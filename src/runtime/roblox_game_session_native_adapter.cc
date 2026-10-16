@@ -1,8 +1,10 @@
 #include "runtime/roblox_game_session_native_adapter.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <utility>
 
 #include "runtime/owned_pthread.h"
@@ -428,8 +430,32 @@ Status RobloxGameSessionNativeAdapter::Start(
   return status;
 }
 
+// Resize tracing. The reported symptom was a resize taking about a second to
+// take effect, so the guest call that has to happen for the viewport to follow
+// is timed. Gated because the call is on the main thread and this is a
+// diagnostic, not telemetry.
+bool ResizeTraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("MOCKTAIL_TRACE_RESIZE");
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
+
 Status RobloxGameSessionNativeAdapter::Update(const GameSurface& surface) {
-  return RebindAndInvoke(surface, false);
+  if (!ResizeTraceEnabled()) {
+    return RebindAndInvoke(surface, false);
+  }
+  const auto started = std::chrono::steady_clock::now();
+  Status status = RebindAndInvoke(surface, false);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - started);
+  std::fprintf(stderr,
+               "  [resize-trace] UpdateSurfaceGame surface=%ux%u took %lld us "
+               "ok=%d\n",
+               surface.width, surface.height,
+               static_cast<long long>(elapsed.count()), status.ok() ? 1 : 0);
+  return status;
 }
 
 Status RobloxGameSessionNativeAdapter::Pause() {

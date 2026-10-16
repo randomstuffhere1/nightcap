@@ -2007,6 +2007,15 @@ void MaybeRequestResizeReadiness() {
           g_state.resize_target_logical_height, request.width, request.height);
 }
 
+// Off by default; the resize path prints several lines per event when on.
+bool ResizeTraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = GetEnvNonEmpty("MOCKTAIL_TRACE_RESIZE");
+    return value != nullptr && !StringEquals(value, "0");
+  }();
+  return enabled;
+}
+
 bool FullscreenShortcutEnabled() {
   // Latched, like WindowTraceEnabled and SdlEventTraceEnabled above. This is
   // consulted for every SDL event -- every mouse motion included -- so a getenv
@@ -2336,6 +2345,22 @@ bool PumpEvents() {
     const bool converted =
         platform::ConvertSdlEvent(g_state.sdl_window, event, &platform_event);
     if (is_window_event && g_window_surface_lifecycle.active()) {
+      if (ResizeTraceEnabled() &&
+          (event.type == SDL_EVENT_WINDOW_RESIZED ||
+           event.type == SDL_EVENT_WINDOW_MOVED ||
+           event.type == SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED ||
+           event.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN ||
+           event.type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN)) {
+        int trace_w = 0;
+        int trace_h = 0;
+        SDL_GetWindowSizeInPixels(g_state.sdl_window, &trace_w, &trace_h);
+        std::fprintf(stderr,
+                     "  [resize-trace] sdl_event type=%u ticks_ns=%llu "
+                     "pixels=%dx%d\n",
+                     static_cast<unsigned>(event.type),
+                     static_cast<unsigned long long>(SDL_GetTicksNS()), trace_w,
+                     trace_h);
+      }
       int pixel_width = 0;
       int pixel_height = 0;
       SDL_GetWindowSizeInPixels(g_state.sdl_window, &pixel_width,
