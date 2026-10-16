@@ -81,8 +81,10 @@ readonly FORBIDDEN_TOOL_LOG="${TEMP_DIR}/forbidden-tool.log"
 cat >"${TEMP_DIR}/bin/cmake" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+# Log arguments unquoted rather than %q-escaped, so a generator with a space
+# in it reads "-G Unix Makefiles" the way the dry-run checks normalize it.
 printf 'cmake' >>"${MOCKTAIL_TEST_TOOL_LOG}"
-printf ' %q' "$@" >>"${MOCKTAIL_TEST_TOOL_LOG}"
+printf ' %s' "$@" >>"${MOCKTAIL_TEST_TOOL_LOG}"
 printf '\n' >>"${MOCKTAIL_TEST_TOOL_LOG}"
 exit 0
 EOF
@@ -91,7 +93,7 @@ cat >"${TEMP_DIR}/bin/git" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'git' >>"${MOCKTAIL_TEST_TOOL_LOG}"
-printf ' %q' "$@" >>"${MOCKTAIL_TEST_TOOL_LOG}"
+printf ' %s' "$@" >>"${MOCKTAIL_TEST_TOOL_LOG}"
 printf '\n' >>"${MOCKTAIL_TEST_TOOL_LOG}"
 # Emulate a missing submodule so the smart init path (`status` -> `update`)
 # is exercised under the fake toolchain.

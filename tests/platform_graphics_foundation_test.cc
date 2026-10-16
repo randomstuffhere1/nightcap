@@ -169,7 +169,16 @@ TEST(SdlEventConverterTest, ConvertsFocusWithoutOwningTheSdlQueue) {
 }
 
 TEST(SdlEventConverterTest, PreservesHostWheelDirectionAndPrecision) {
-  ASSERT_TRUE(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy"));
+  // SDL_Init takes the driver from SDL_VIDEODRIVER, and the CI job exports
+  // x11 for this binary. Setting the variable is also the only reliable way to
+  // override it: SDL_SetHint(SDL_HINT_VIDEO_DRIVER) returns false once the
+  // variable exists, because the environment counts as a higher-priority hint.
+  // The converter needs a window object and nothing else, so ask for dummy and
+  // put the environment back afterwards.
+  const char* ambient_driver = std::getenv("SDL_VIDEODRIVER");
+  const std::string saved_driver =
+      ambient_driver == nullptr ? std::string() : std::string(ambient_driver);
+  setenv("SDL_VIDEODRIVER", "dummy", 1);
   ASSERT_TRUE(SDL_Init(SDL_INIT_VIDEO)) << SDL_GetError();
   SDL_Window* window =
       SDL_CreateWindow("Mocktail event converter test", 64, 64,
@@ -198,7 +207,11 @@ TEST(SdlEventConverterTest, PreservesHostWheelDirectionAndPrecision) {
 
   SDL_DestroyWindow(window);
   SDL_Quit();
-  ASSERT_TRUE(SDL_SetHint(SDL_HINT_VIDEO_DRIVER, ""));
+  if (ambient_driver == nullptr) {
+    unsetenv("SDL_VIDEODRIVER");
+  } else {
+    setenv("SDL_VIDEODRIVER", saved_driver.c_str(), 1);
+  }
 }
 
 TEST(SdlEventConverterTest, RejectsInvalidArgumentsAndUnsupportedEvents) {

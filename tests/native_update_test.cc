@@ -621,8 +621,15 @@ TEST(ShippedMetadataTest, DefaultPayloadHasABuiltinProfileAndMatchingReference) 
   ASSERT_TRUE(catalog) << catalog.error;
   const auto preferred = PreferredSupportedProfile(catalog.profiles);
   ASSERT_TRUE(preferred.has_value());
-  EXPECT_EQ(preferred->version_name, "2.738.1397");
-  EXPECT_EQ(preferred->version_code, 3092U);
+  // The catalog carries one supported profile per guest ABI, so the newest one
+  // depends on what this build targets. arm64-v8a has no 2.738.1397 profile.
+  if (compat::kGuestAbi == "x86_64") {
+    EXPECT_EQ(preferred->version_name, "2.738.1397");
+    EXPECT_EQ(preferred->version_code, 3092U);
+  } else {
+    EXPECT_EQ(preferred->version_name, "2.736.1408");
+    EXPECT_EQ(preferred->version_code, 2998U);
+  }
 
   const auto payload = nlohmann::json::parse(
       ReadFile(root / "config/roblox_payload.json"));
