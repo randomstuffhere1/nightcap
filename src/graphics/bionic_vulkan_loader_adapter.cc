@@ -143,6 +143,10 @@ using NoteVulkanCallEndFn = void (*)(std::uint64_t, std::int32_t);
 using NoteSurfaceOutOfDateFn = void (*)();
 using WindowDimensionFn = int (*)();
 
+// Lets the window module drain the queue before it changes the surface extent.
+// Defined in window.cc, which is the side that knows a mode change is coming.
+using QuiesceBeforeSurfaceChangeFn = void (*)();
+
 struct AdapterState {
   struct DeviceDispatch {
     VkDevice device = VK_NULL_HANDLE;
@@ -205,6 +209,13 @@ struct AdapterState {
   std::atomic<NoteVulkanCallBeginFn> note_vulkan_call_begin{nullptr};
   std::atomic<NoteVulkanCallEndFn> note_vulkan_call_end{nullptr};
   std::atomic<NoteSurfaceOutOfDateFn> note_surface_out_of_date{nullptr};
+  std::atomic<QuiesceBeforeSurfaceChangeFn> quiesce_before_surface_change{
+      nullptr};
+  // The queue the guest last submitted rendering work to, so a surface extent
+  // change can drain exactly the queue that is in flight rather than idling the
+  // whole device. Written on every submit and every present, read once per
+  // fullscreen transition.
+  std::atomic<VkQueue> last_submitted_queue{VK_NULL_HANDLE};
   bool extent_translation_logged = false;
   bool present_policy_logged = false;
   bool initialized = false;
@@ -256,6 +267,12 @@ bool EnsureInitialized() {
   state.note_surface_out_of_date.store(
       ResolveProcessFunction<NoteSurfaceOutOfDateFn>(
           "mocktail_window_note_vulkan_surface_out_of_date"),
+      std::memory_order_release);
+  // The window module tells us just before it changes mode, so the drain below
+  // can happen while the render thread is still on the old extent.
+  state.quiesce_before_surface_change.store(
+      ResolveProcessFunction<QuiesceBeforeSurfaceChangeFn>(
+          "mocktail_window_prepare_for_surface_change"),
       std::memory_order_release);
   if (backend_window == nullptr || uses_direct_vulkan == nullptr ||
       !uses_direct_vulkan() || backend_window() == nullptr) {
@@ -2653,6 +2670,51 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueBindSparse(
   return result;
 }
 
+extern "C" void mocktail_graphics_quiesce_before_surface_change() {
+  // Called by the window module immediately before it changes the window mode.
+  //
+  // A swapchain image's contents are undefined until something writes them, and
+  // a mode change makes the surface extent change under a queue that still has
+  // the old extent's work in flight. The guest tears its render targets down and
+  // rebuilds them at the new extent, and for the frame or two before that lands
+  // it can present an image it has not finished writing -- which is what reaches
+  // the screen as coloured garbage.
+  //
+  // Draining first means the queue is quiescent at the moment the extent moves:
+  // no half-written frame survives into the new surface, and the first frame
+  // presented at the new extent is one the guest drew completely.
+  //
+  // This is the *queue*, not the device. It is also called exactly once per
+  // mode change, never per swapchain creation -- idling on swapchain creation
+  // costs a stall per size change, which during a resize drag is one per frame
+  // and turned a 50 ms frame budget into a queue-wide wait each time.
+  AdapterState& state = State();
+  const QuiesceBeforeSurfaceChangeFn notify =
+      state.quiesce_before_surface_change.load(std::memory_order_acquire);
+  if (notify != nullptr) {
+    notify();
+  }
+  const VkQueue queue =
+      state.last_submitted_queue.load(std::memory_order_acquire);
+  if (queue == VK_NULL_HANDLE) {
+    return;
+  }
+  const PFN_vkQueueWaitIdle host_wait =
+      HostDispatchForQueue(queue).queue_wait_idle;
+  if (host_wait == nullptr) {
+    return;
+  }
+  static std::atomic<bool> logged{false};
+  if (!logged.exchange(true, std::memory_order_relaxed)) {
+    std::fprintf(stderr,
+                 "  [fullscreen] drained the graphics queue before changing "
+                 "the surface extent\n");
+  }
+  // Through the compositor, which takes the shared queue lock. Doing it
+  // directly here would race the render thread's present on the same queue.
+  (void)state.text_overlay.QueueWaitIdle(queue, host_wait);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue queue) {
   VulkanCallObservation observation("vkQueueWaitIdle");
   const PFN_vkQueueWaitIdle host_wait =
@@ -2802,6 +2864,7 @@ vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* present_info) {
     observation.SetResult(VK_ERROR_INITIALIZATION_FAILED);
     return VK_ERROR_INITIALIZATION_FAILED;
   }
+  State().last_submitted_queue.store(queue, std::memory_order_release);
   mocktail::graphics::ChromeTraceWriter* const trace =
       mocktail::graphics::ActiveProfileTrace();
   mocktail::graphics::TraceScope scope(trace, "vkQueuePresentKHR", "present");
