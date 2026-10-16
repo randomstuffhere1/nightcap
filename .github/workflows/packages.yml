@@ -552,14 +552,20 @@ jobs:
           test -s release/nightcap-nightly_arm64.deb
           test -s release/nightcap-nightly-x86_64.rpm
           test -s release/nightcap-nightly-aarch64.rpm
-          for asset in release/*; do
-            case "$asset" in
-              *.sha256|*.zsync) continue ;;
-            esac
-            sha256sum "${asset#release/}" >"${asset}.sha256"
-          done
-          (cd release && cat ./*.sha256 >SHA256SUMS)
-          ls -la release
+          (
+            cd release
+            # The zsync file carries its own signature format, so it is not
+            # checksummed here. Every other asset gets a .sha256 beside it,
+            # and SHA256SUMS lists them all.
+            for asset in *; do
+              case "$asset" in
+                *.sha256|*.zsync) continue ;;
+              esac
+              sha256sum "$asset" >"$asset.sha256"
+            done
+            cat ./*.sha256 >SHA256SUMS
+            ls -la
+          )
 
       - name: Write release notes
         shell: bash
