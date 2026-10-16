@@ -15,7 +15,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <map>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -220,15 +219,6 @@ struct AdapterState {
   bool extent_translation_logged = false;
   std::uint32_t last_translated_width = 0;
   std::uint32_t last_translated_height = 0;
-  // The extent each live swapchain was created at, with the bounds it was
-  // clamped to, so a present can tell that the surface has since moved out from
-  // under it. Guarded by `mutex`.
-  struct SwapchainExtent {
-    VkExtent2D extent{};
-    VkExtent2D min_extent{};
-    VkExtent2D max_extent{};
-  };
-  std::map<VkSwapchainKHR, SwapchainExtent> swapchain_extents;
   bool present_policy_logged = false;
   bool initialized = false;
 };
@@ -2224,11 +2214,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     return VK_ERROR_INITIALIZATION_FAILED;
   }
   VkSwapchainCreateInfoKHR host_info = *create_info;
-  // Recorded at the extent the swapchain ends up at, so a later present can tell
-  // the surface has moved. Declared out here because the recording happens after
-  // the fixup block below.
-  VkSurfaceCapabilitiesKHR recorded_capabilities{};
-  bool have_recorded_capabilities = false;
   const mocktail::graphics::PresentModePolicy present_policy =
       mocktail::graphics::CachedPresentModePolicy();
   const mocktail::graphics::SwapchainFixupLevel fixup =
@@ -2282,8 +2267,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
         host_caps != nullptr && physical_device != VK_NULL_HANDLE &&
         host_caps(physical_device, create_info->surface, &capabilities) ==
             VK_SUCCESS;
-    recorded_capabilities = capabilities;
-    have_recorded_capabilities = have_capabilities;
     if (have_capabilities &&
         fixup >= mocktail::graphics::SwapchainFixupLevel::kClampExtent) {
       const VkExtent2D clamped = mocktail::graphics::ClampSwapchainExtent(
@@ -2370,17 +2353,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     (void)State().text_overlay.RegisterSwapchain(
         device, *swapchain, *create_info, images.data(), image_count);
   }
-  {
-    AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
-    AdapterState::SwapchainExtent record;
-    record.extent = host_info.imageExtent;
-    if (have_recorded_capabilities) {
-      record.min_extent = recorded_capabilities.minImageExtent;
-      record.max_extent = recorded_capabilities.maxImageExtent;
-    }
-    state.swapchain_extents[*swapchain] = record;
-  }
   return result;
 }
 
@@ -2390,11 +2362,6 @@ vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain,
   const auto host_destroy = reinterpret_cast<PFN_vkDestroySwapchainKHR>(
       HostDeviceProc(device, "vkDestroySwapchainKHR"));
   State().text_overlay.DestroySwapchain(device, swapchain);
-  {
-    AdapterState& state = State();
-    std::lock_guard<std::mutex> lock(state.mutex);
-    state.swapchain_extents.erase(swapchain);
-  }
   if (host_destroy != nullptr) {
     host_destroy(device, swapchain, allocator);
   }
@@ -2931,79 +2898,6 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfacePresentModesKHR(
   return copied < visible.size() ? VK_INCOMPLETE : VK_SUCCESS;
 }
 
-// True when any swapchain in this present was created at an extent the window
-// no longer has.
-//
-// A real surface reports a meaningful currentExtent only when it wants the
-// application to match it; on Wayland it reports UINT32_MAX and this adapter
-// substitutes the window size instead. That substitution is what makes the
-// comparison possible, and it is why a mismatch is meaningful here rather than
-// an artefact of the guest picking its own size.
-bool SwapchainExtentNoLongerMatchesSurface(const VkPresentInfoKHR* present_info) {
-  if (present_info == nullptr || present_info->pSwapchains == nullptr ||
-      present_info->swapchainCount == 0) {
-    return false;
-  }
-  const WindowDimensionFn window_width =
-      ResolveProcessFunction<WindowDimensionFn>("mocktail_window_width");
-  const WindowDimensionFn window_height =
-      ResolveProcessFunction<WindowDimensionFn>("mocktail_window_height");
-  if (window_width == nullptr || window_height == nullptr) {
-    return false;
-  }
-  const int width = window_width();
-  const int height = window_height();
-  if (width <= 0 || height <= 0) {
-    return false;
-  }
-  AdapterState& state = State();
-  bool stale = false;
-  {
-    std::lock_guard<std::mutex> lock(state.mutex);
-    for (std::uint32_t index = 0; index < present_info->swapchainCount &&
-                               !stale;
-         ++index) {
-      const auto found = state.swapchain_extents.find(present_info->pSwapchains[index]);
-      if (found == state.swapchain_extents.end()) {
-        continue;
-      }
-      // Compare against the window size clamped to the bounds this swapchain
-      // was created under. Without the clamp, a window larger than
-      // maxImageExtent would never match and the guest would rebuild its
-      // swapchain forever, which is a worse failure than the artefact this
-      // reports.
-      const auto clamp = [](int value, const VkExtent2D& low,
-                            const VkExtent2D& high) {
-        const auto lo = static_cast<int>(low.width ? low.width : low.height);
-        const auto hi = static_cast<int>(high.width ? high.width : high.height);
-        if (hi > 0 && value > hi) {
-          return hi;
-        }
-        if (lo > 0 && value < lo) {
-          return lo;
-        }
-        return value;
-      };
-      const int expected_width = clamp(width, found->second.min_extent,
-                                       found->second.max_extent);
-      const int expected_height = clamp(height, found->second.min_extent,
-                                        found->second.max_extent);
-      if (static_cast<int>(found->second.extent.width) != expected_width ||
-          static_cast<int>(found->second.extent.height) != expected_height) {
-        stale = true;
-        if (FullscreenTraceEnabled()) {
-          std::fprintf(stderr,
-                       "  [fs-trace] present reports out-of-date: swapchain "
-                       "is %ux%u, window is %dx%d (wanted %dx%d)\n",
-                       found->second.extent.width, found->second.extent.height,
-                       width, height, expected_width, expected_height);
-        }
-      }
-    }
-  }
-  return stale;
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL
 vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* present_info) {
   VulkanCallObservation observation("vkQueuePresentKHR(adapter)");
@@ -3026,27 +2920,7 @@ vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* present_info) {
   const VkResult result = state.text_overlay.QueuePresent(
       queue, present_info, ObservedHostQueuePresent);
   scope.Arg("result", result);
-  VkResult normalized_result = NormalizeSwapchainResult(result);
-
-  // Report the swapchain as out of date when the surface has moved out from
-  // under it.
-  //
-  // A compositor-driven surface changes size without the guest being told, and
-  // the guest only rebuilds its swapchain when a present comes back
-  // VK_ERROR_OUT_OF_DATE_KHR. Presenting an image sized for the old surface is
-  // undefined, and in practice the compositor scales it: measured, a fullscreen
-  // transition produced twelve transitions and zero swapchain recreations, with
-  // every present returning VK_SUCCESS, so the guest ran on a stale-sized
-  // swapchain indefinitely and nothing it did could correct it.
-  //
-  // currentExtent is what the guest sizes its replacement from, and that is
-  // read live, so the two halves agree: this reports the mismatch, and the
-  // rebuild that follows lands on the size the window actually has.
-  if (normalized_result == VK_SUCCESS || normalized_result == VK_SUBOPTIMAL_KHR) {
-    if (SwapchainExtentNoLongerMatchesSurface(present_info)) {
-      normalized_result = VK_ERROR_OUT_OF_DATE_KHR;
-    }
-  }
+  const VkResult normalized_result = NormalizeSwapchainResult(result);
   if (FullscreenTraceEnabled()) {
     std::fprintf(stderr, "  [fs-trace] present result=%d\n",
                  static_cast<int>(normalized_result));
