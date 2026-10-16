@@ -1897,6 +1897,22 @@ extern "C" void mocktail_window_note_vulkan_surface_out_of_date() {
   NoteVulkanSurfaceOutOfDate();
 }
 
+// Called from the Vulkan adapter immediately before the window mode changes, so
+// the adapter can drain the queue while the render thread is still on the old
+// extent. All it has to do is make sure no host present is mid-flight: the
+// adapter's own QueueWaitIdle goes through the compositor's shared queue lock,
+// and taking the commit gate here means a present in progress is either
+// finished or still to come, never torn across the mode change.
+extern "C" void mocktail_window_prepare_for_surface_change() {
+  HostSurfaceCommitGate::MainThreadScope scope(
+      ProcessHostSurfaceCommitGate());
+  if (!scope.owns_lock()) {
+    std::fprintf(stderr,
+                 "  [fullscreen] a host present was still in flight; draining "
+                 "the queue without it\n");
+  }
+}
+
 bool ShouldIgnoreCloseRequest() {
   const char* explicit_ignore = std::getenv("MOCKTAIL_IGNORE_WINDOW_CLOSE");
   if (explicit_ignore && explicit_ignore[0] != '\0' &&
@@ -2028,6 +2044,23 @@ bool FullscreenShortcutEnabled() {
   return enabled;
 }
 
+// Asks the Vulkan adapter to drain the queue ahead of a surface extent change.
+//
+// Resolved by name rather than linked: mocktail_window links GraphicsFoundation,
+// not the Vulkan adapter, and the two talk through dlsym(RTLD_DEFAULT) in the
+// other direction already. Absent means this build has no direct-Vulkan
+// adapter, which is not an error.
+void QuiesceGraphicsBeforeSurfaceChange() {
+  using QuiesceFn = void (*)();
+  static const auto quiesce = [] {
+    return reinterpret_cast<QuiesceFn>(
+        dlsym(RTLD_DEFAULT, "mocktail_graphics_quiesce_before_surface_change"));
+  }();
+  if (quiesce != nullptr) {
+    quiesce();
+  }
+}
+
 bool RequestFullscreenState(bool fullscreen, const char* reason) {
   if (g_state.sdl_window == nullptr) {
     return false;
@@ -2037,6 +2070,20 @@ bool RequestFullscreenState(bool fullscreen, const char* reason) {
   if (current_fullscreen != fullscreen) {
     // Save the restore rectangle before SDL replaces it with monitor bounds.
     CaptureWindowState();
+    // Drain the graphics queue *before* the extent moves. A swapchain image's
+    // contents are undefined until something writes them, and on a mode change
+    // the guest rebuilds its render targets at the new extent: for the frame or
+    // two before that lands it can present an image it has not finished
+    // writing, and whatever the driver left in that memory is what flashes.
+    //
+    // Idling here rather than at swapchain creation is the point. A swapchain
+    // is recreated once per size change, so during a resize drag that is one
+    // queue-wide stall per frame; a mode change is a single event the user is
+    // already waiting on.
+    //
+    // Best effort: if the Vulkan side is not there, or declines, the mode change
+    // proceeds as it did before rather than failing.
+    QuiesceGraphicsBeforeSurfaceChange();
     HostSurfaceCommitGate::MainThreadScope commit_scope(
         ProcessHostSurfaceCommitGate());
     if (!SDL_SetWindowFullscreen(g_state.sdl_window, fullscreen)) {
