@@ -44,7 +44,8 @@ jobs:
                 nlohmann-json libyaml libelf minizip minizip-ng capstone gtk4 \
                 libadwaita webkitgtk-6.0 libutf8proc fontconfig libglvnd \
                 vulkan-headers zlib libplacebo bubblewrap xdg-dbus-proxy \
-                patchelf jq unzip file ca-certificates dbus zsync rust
+                patchelf jq unzip file ca-certificates dbus zsync rust \
+                ccache mold
 
               ./scripts/install_anylinux_dependencies.sh
 
@@ -156,7 +157,7 @@ jobs:
                 libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
                 libutf8proc-dev libfontconfig1-dev libegl-dev \
                 libvulkan-dev libplacebo-dev zlib1g-dev libpng-dev \
-                rustc cargo
+                rustc cargo ccache mold
               cmake -S . -B build-deb -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
@@ -205,7 +206,7 @@ jobs:
                 webkitgtk6.0-devel utf8proc-devel fontconfig-devel \
                 libglvnd-devel vulkan-headers vulkan-loader-devel \
                 libplacebo-devel zlib-ng-compat-devel libpng-devel \
-                rust cargo
+                rust cargo ccache mold
               cmake -S . -B build-rpm -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DCMAKE_INSTALL_PREFIX=/usr \
@@ -252,7 +253,8 @@ jobs:
                 cmake git ninja pkgconf lld sdl3 sdl3_ttf curl openssl \
                 nlohmann-json libyaml libelf minizip capstone gtk4 \
                 libadwaita webkitgtk-6.0 libutf8proc fontconfig libpng \
-                libplacebo vulkan-headers vulkan-icd-loader libglvnd zlib rust
+                libplacebo vulkan-headers vulkan-icd-loader libglvnd zlib rust \
+                ccache mold
               useradd --create-home builder
               chown -R builder:builder /workspace
               runuser -u builder -- env MOCKTAIL_SOURCE_DIR=/workspace \
