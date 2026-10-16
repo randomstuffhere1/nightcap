@@ -3,6 +3,9 @@
   "runtime": "org.gnome.Platform",
   "runtime-version": "50",
   "sdk": "org.gnome.Sdk",
+  "sdk-extensions": [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+  ],
   "command": "mocktail",
   "separate-locales": false,
   "finish-args": [
@@ -26,7 +29,8 @@
   ],
   "build-options": {
     "strip": true,
-    "no-debuginfo": true
+    "no-debuginfo": true,
+    "append-path": "/usr/lib/sdk/rust-stable/bin"
   },
   "cleanup": [
     "/include",

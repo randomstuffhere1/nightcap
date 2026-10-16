@@ -31,7 +31,13 @@ assert manifest["runtime"] == "org.gnome.Platform"
 assert manifest["runtime-version"] == "50"
 assert manifest["sdk"] == "org.gnome.Sdk"
 assert manifest["command"] == "mocktail"
-assert "sdk-extensions" not in manifest
+# The texture kernels are Rust (rust/, built by cmake/MocktailRust.cmake), so
+# the sandbox needs a toolchain. The ref carries no branch on purpose:
+# flatpak-builder resolves it against the freedesktop base the GNOME runtime
+# is built on, which moves with the runtime.
+assert manifest["sdk-extensions"] == [
+    "org.freedesktop.Sdk.Extension.rust-stable"
+]
 
 finish_args = set(manifest["finish-args"])
 required_permissions = {
@@ -93,6 +99,7 @@ assert "--libdir=lib" in libplacebo_options
 
 assert manifest["build-options"]["strip"] is True
 assert manifest["build-options"]["no-debuginfo"] is True
+assert manifest["build-options"]["append-path"] == "/usr/lib/sdk/rust-stable/bin"
 assert "env" not in manifest["build-options"]
 
 project_sources = modules["mocktail"]["sources"]

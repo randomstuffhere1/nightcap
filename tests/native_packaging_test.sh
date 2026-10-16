@@ -52,6 +52,8 @@ grep -Fq "'sdl3>=3.4'" "${PKGBUILD}" ||
   Fail 'Arch package does not enforce the SDL minimum'
 grep -Fq "'libplacebo'" "${PKGBUILD}" ||
   Fail 'Arch package does not declare the graphics composition dependency'
+grep -Fq "'rust'" "${PKGBUILD}" ||
+  Fail 'Arch package does not declare the Rust toolchain the kernels need'
 grep -Fq 'pkgname=nightcap-git' "${AUR_PKGBUILD}" ||
   Fail 'AUR VCS package name is not stable'
 grep -Fq 'pkgname=nightcap' "${AUR_STABLE_PKGBUILD}" ||
@@ -74,6 +76,10 @@ grep -Fq "provides=('mocktail' 'nightcap')" "${AUR_PKGBUILD}" ||
   Fail 'AUR VCS package does not provide the stable package name'
 grep -Fq "'vulkan-headers'" "${AUR_PKGBUILD}" ||
   Fail 'AUR VCS package does not use the packaged Vulkan headers'
+grep -Fq 'makedepends = rust' "${AUR_STABLE_SRCINFO}" ||
+  Fail 'AUR source package does not declare the Rust toolchain the kernels need'
+grep -Fq 'makedepends = rust' "${AUR_SRCINFO}" ||
+  Fail 'AUR VCS package does not declare the Rust toolchain the kernels need'
 for aur_pkgbuild in "${AUR_STABLE_PKGBUILD}" "${AUR_PKGBUILD}"; do
   if grep -Eq \
       'libjnivm::git\+|vulkan-headers::git\+|git submodule (init|update)' \

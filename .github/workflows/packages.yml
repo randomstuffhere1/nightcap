@@ -69,7 +69,7 @@ jobs:
                 nlohmann-json libyaml libelf minizip minizip-ng capstone gtk4 \
                 libadwaita webkitgtk-6.0 libutf8proc fontconfig libglvnd \
                 vulkan-headers zlib libplacebo bubblewrap xdg-dbus-proxy \
-                patchelf jq unzip file ca-certificates dbus zsync
+                patchelf jq unzip file ca-certificates dbus zsync rust
 
               # Reduced ABI-compatible packages belong only in this builder.
               # The native updater does not require a JRE or Android SDK.

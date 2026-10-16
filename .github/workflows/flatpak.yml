@@ -19,6 +19,7 @@ on:
       - 'packaging/io.github.CoderDayton.nightcap.desktop'
       - 'packaging/io.github.CoderDayton.nightcap.metainfo.xml'
       - 'packaging/io.github.CoderDayton.nightcap.svg'
+      - 'rust/**'
       - 'scripts/assemble_flatpak_pages.sh'
       - 'site/**'
       - 'src/**'

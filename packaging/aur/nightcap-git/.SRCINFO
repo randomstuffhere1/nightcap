@@ -11,6 +11,7 @@ pkgbase = nightcap-git
 	makedepends = ninja
 	makedepends = nlohmann-json
 	makedepends = pkgconf
+	makedepends = rust
 	makedepends = vulkan-headers
 	depends = capstone
 	depends = curl

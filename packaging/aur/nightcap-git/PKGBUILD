@@ -39,6 +39,7 @@ makedepends=(
   'ninja'
   'nlohmann-json'
   'pkgconf'
+  'rust'
   'vulkan-headers'
 )
 optdepends=('gamemode: Feral GameMode integration')

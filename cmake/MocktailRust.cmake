@@ -106,6 +106,7 @@ if(NOT MOCKTAIL_RUST_LIB)
     "${MOCKTAIL_RUST_WORKSPACE}/crates/*/Cargo.toml"
     "${MOCKTAIL_RUST_WORKSPACE}/crates/*/src/*.rs"
     "${MOCKTAIL_RUST_WORKSPACE}/.cargo/config.toml"
+    "${MOCKTAIL_RUST_WORKSPACE}/rust-toolchain.toml"
   )
 
   find_program(MOCKTAIL_OBJCOPY objcopy)

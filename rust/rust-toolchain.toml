@@ -1,0 +1,12 @@
+# Toolchain for the Rust kernel workspace.
+#
+# The workspace's own MSRV is 1.83 (rust/Cargo.toml, workspace.package), and the
+# crates are vendored under rust/vendor, so every build runs `cargo build
+# --locked --offline`. This file only records which toolchain builds it here, so
+# a local build and a CI build agree on rustc.
+#
+# It applies to rustup-managed toolchains. Containers that install a distro
+# Rust (Arch, Fedora, Ubuntu, the Flatpak SDK extension) do not read this file.
+[toolchain]
+channel = "stable"
+profile = "minimal"

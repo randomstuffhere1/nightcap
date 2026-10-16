@@ -36,6 +36,7 @@ makedepends=(
   'lld'
   'ninja'
   'pkgconf'
+  'rust'
 )
 optdepends=('gamemode: Feral GameMode integration')
 options=('!debug' 'strip')

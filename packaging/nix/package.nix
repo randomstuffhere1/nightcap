@@ -8,6 +8,7 @@
   lld,
   ninja,
   pkg-config,
+  rustPlatform,
   vulkan-headers,
   makeWrapper,
 
@@ -74,6 +75,8 @@ stdenv.mkDerivation (finalAttrs: {
     lld
     ninja
     pkg-config
+    rustPlatform.cargo
+    rustPlatform.rustc
     vulkan-headers
     makeWrapper
   ];
