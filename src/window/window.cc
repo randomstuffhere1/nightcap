@@ -1909,8 +1909,11 @@ bool ShouldIgnoreCloseRequest() {
 }
 
 void MaybeQueueInputReadinessSequence() {
-  if (g_state.input_test_sequence_queued ||
-      !StringEquals(GetEnvNonEmpty("MOCKTAIL_INPUT_TEST_CLICK"), "1") ||
+  // Latched: this runs every main-loop tick, and the variable is a test-harness
+  // flag that scripts/real_bringup_smoke.sh exports before launch.
+  static const bool input_test_click =
+      StringEquals(GetEnvNonEmpty("MOCKTAIL_INPUT_TEST_CLICK"), "1");
+  if (g_state.input_test_sequence_queued || !input_test_click ||
       !HasPresentedFrame() || !g_platform_event_observer.HasObserver() ||
       g_state.sdl_window == nullptr) {
     return;
@@ -2005,8 +2008,15 @@ void MaybeRequestResizeReadiness() {
 }
 
 bool FullscreenShortcutEnabled() {
-  const char* value = GetEnvNonEmpty("MOCKTAIL_F11_FULLSCREEN");
-  return value == nullptr || !StringEquals(value, "0");
+  // Latched, like WindowTraceEnabled and SdlEventTraceEnabled above. This is
+  // consulted for every SDL event -- every mouse motion included -- so a getenv
+  // here is a linear scan of the environment on the input path, and the
+  // variable cannot change while the process runs.
+  static const bool enabled = [] {
+    const char* value = GetEnvNonEmpty("MOCKTAIL_F11_FULLSCREEN");
+    return value == nullptr || !StringEquals(value, "0");
+  }();
+  return enabled;
 }
 
 bool RequestFullscreenState(bool fullscreen, const char* reason) {
@@ -2079,9 +2089,12 @@ void MaybeApplyRobloxFullscreenMenuRequest() {
 }
 
 bool HandleFullscreenShortcut(const SDL_Event& event) {
-  if (!FullscreenShortcutEnabled() ||
-      (event.type != SDL_EVENT_KEY_DOWN && event.type != SDL_EVENT_KEY_UP) ||
-      event.key.scancode != SDL_SCANCODE_F11) {
+  // The event type is checked before the flag, so the (now cheap) flag read is
+  // only reached for the two event types that can possibly be the shortcut.
+  // Every other SDL event -- mouse motion included -- returns on the first
+  // term.
+  if ((event.type != SDL_EVENT_KEY_DOWN && event.type != SDL_EVENT_KEY_UP) ||
+      event.key.scancode != SDL_SCANCODE_F11 || !FullscreenShortcutEnabled()) {
     return false;
   }
   if (event.type == SDL_EVENT_KEY_DOWN && !event.key.repeat) {
@@ -2093,9 +2106,13 @@ bool HandleFullscreenShortcut(const SDL_Event& event) {
 }
 
 void MaybeRequestFullscreenReadiness() {
-  const char* mode = GetEnvNonEmpty("MOCKTAIL_FULLSCREEN_READINESS");
-  const bool single_transition = StringEquals(mode, "1");
-  const bool round_trip = StringEquals(mode, "roundtrip");
+  // Latched, for the same reason as MaybeQueueInputReadinessSequence: this is
+  // called every tick from the main loop.
+  static const bool single_transition =
+      StringEquals(GetEnvNonEmpty("MOCKTAIL_FULLSCREEN_READINESS"), "1");
+  static const bool round_trip =
+      StringEquals(GetEnvNonEmpty("MOCKTAIL_FULLSCREEN_READINESS"),
+                   "roundtrip");
   if ((!single_transition && !round_trip) || !HasPresentedFrame()) {
     return;
   }

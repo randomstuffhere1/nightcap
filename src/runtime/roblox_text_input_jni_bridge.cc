@@ -1,5 +1,7 @@
 #include "runtime/roblox_text_input_jni_bridge.h"
 
+#include "mocktail/runtime/secure_clear.h"
+#include <string.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -23,16 +25,7 @@ constexpr std::size_t kMaximumPendingTextCommands = 64;
 constexpr std::size_t kMaximumPendingTextBytes = 4U * 1024U * 1024U;
 constexpr uint32_t kGeometryRefreshPumpInterval = 8;
 
-void SecureClear(std::string* value) {
-  if (value == nullptr) {
-    return;
-  }
-  volatile char* bytes = value->empty() ? nullptr : value->data();
-  for (std::size_t index = 0; index < value->size(); ++index) {
-    bytes[index] = 0;
-  }
-  value->clear();
-}
+void SecureClear(std::string* value) { ::mocktail::runtime::SecureClearTextInPlace(value); }
 
 int RoundedCoordinate(float value) {
   if (!std::isfinite(value) || value <= 0.0F) {

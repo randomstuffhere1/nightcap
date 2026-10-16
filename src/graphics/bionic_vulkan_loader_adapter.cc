@@ -7,12 +7,12 @@
 #include <vulkan/vulkan.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <deque>
 #include <filesystem>
 #include <mutex>
 #include <string>
@@ -1546,14 +1546,29 @@ void ReleaseEtc2PoolCommandBuffers(VkDevice device,
 constexpr VkPipelineStageFlags kEtc2WaitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
 
 // Holds the arrays a rewritten submit points at, so they outlive the call.
-// Deques keep earlier elements addressable as later ones are appended.
+// The scratch a rewritten submit is assembled into. One of these is
+// constructed per vkQueueSubmit* call, on the render thread, before anything is
+// known about whether there is any ETC2 work to rewrite -- so on the common
+// path it is built and destroyed for nothing.
+//
+// Vectors rather than deques, which this used to be, because a default-
+// constructed std::deque allocates its map and one node: six members cost
+// twelve mallocs and twelve frees per submit call. Vectors allocate nothing
+// until they are appended to, which the rewrite path always does and the
+// no-work path never does. The reason it was a deque -- keeping earlier
+// elements addressable as later ones are appended -- does not apply, because
+// what the rewritten VkSubmitInfo points at is the *inner* vector's heap
+// buffer, and reallocating the outer vector moves the inner vectors without
+// touching those buffers. std::vector's move steals the pointer rather than
+// copying it, so a pWaitSemaphoreValues captured before an emplace_back is
+// still valid after it.
 struct Etc2SubmitRewrite {
-  std::deque<std::vector<VkSemaphore>> wait_semaphores;
-  std::deque<std::vector<VkPipelineStageFlags>> wait_stages;
-  std::deque<std::vector<std::uint64_t>> wait_values;
-  std::deque<std::vector<std::uint64_t>> signal_values;
-  std::deque<VkTimelineSemaphoreSubmitInfo> timelines;
-  std::deque<std::vector<VkSemaphoreSubmitInfo>> wait_infos;
+  std::vector<std::vector<VkSemaphore>> wait_semaphores;
+  std::vector<std::vector<VkPipelineStageFlags>> wait_stages;
+  std::vector<std::vector<std::uint64_t>> wait_values;
+  std::vector<std::vector<std::uint64_t>> signal_values;
+  std::vector<VkTimelineSemaphoreSubmitInfo> timelines;
+  std::vector<std::vector<VkSemaphoreSubmitInfo>> wait_infos;
   std::vector<VkSubmitInfo> rewritten;
   std::vector<VkSubmitInfo2> rewritten2;
 };
@@ -1632,18 +1647,27 @@ const VkSubmitInfo2* PrepareEtc2Submit2(std::uint32_t submit_count,
     return submits;
   }
   bool rewritten_any = false;
+  // Gathers the command buffers into contiguous memory because PrepareSubmit
+  // takes a (pointer, count) pair and the guest's layout is an array of
+  // structs. A small stack buffer keeps the common case off the heap: a submit
+  // with more command buffers than this falls back to a vector.
+  constexpr std::uint32_t kInlineCommandBuffers = 32;
+  std::vector<VkCommandBuffer> spilled;
+  std::array<VkCommandBuffer, kInlineCommandBuffers> inline_buffers{};
   for (std::uint32_t index = 0; index < submit_count; ++index) {
     const VkSubmitInfo2& original = submits[index];
-    std::vector<VkCommandBuffer> command_buffers;
-    command_buffers.reserve(original.commandBufferInfoCount);
-    for (std::uint32_t info = 0; info < original.commandBufferInfoCount;
-         ++info) {
-      command_buffers.push_back(
-          original.pCommandBufferInfos[info].commandBuffer);
+    const std::uint32_t count = original.commandBufferInfoCount;
+    VkCommandBuffer* command_buffers = inline_buffers.data();
+    if (count > kInlineCommandBuffers) {
+      spilled.resize(count);
+      command_buffers = spilled.data();
+    }
+    for (std::uint32_t info = 0; info < count; ++info) {
+      command_buffers[info] =
+          original.pCommandBufferInfos[info].commandBuffer;
     }
     const mocktail::graphics::Etc2SubmitWait wait = State().etc2.PrepareSubmit(
-        command_buffers.data(),
-        static_cast<std::uint32_t>(command_buffers.size()), true);
+        command_buffers, count, true);
     if (wait.semaphore == VK_NULL_HANDLE) {
       continue;
     }

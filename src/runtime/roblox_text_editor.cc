@@ -1,5 +1,7 @@
 #include "runtime/roblox_text_editor.h"
 
+#include "mocktail/runtime/secure_clear.h"
+#include <string.h>
 #include <SDL3/SDL_keycode.h>
 #include <SDL3/SDL_scancode.h>
 #include <utf8proc.h>
@@ -116,17 +118,7 @@ RobloxTextEditResult Result(bool handled, bool dispatched, bool ended,
   return {handled, dispatched, ended, std::move(status)};
 }
 
-void SecureClear(std::string* text) {
-  if (text == nullptr) {
-    return;
-  }
-  volatile char* bytes = text->empty() ? nullptr : &(*text)[0];
-  for (std::size_t index = 0; index < text->size(); ++index) {
-    bytes[index] = 0;
-  }
-  std::string empty;
-  text->swap(empty);
-}
+void SecureClear(std::string* text) { ::mocktail::runtime::SecureClearText(text); }
 
 uint32_t ShortcutBit(SDL_Scancode scancode) {
   switch (scancode) {

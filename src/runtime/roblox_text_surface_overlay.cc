@@ -1,5 +1,7 @@
 #include "runtime/roblox_text_surface_overlay.h"
 
+#include "mocktail/runtime/secure_clear.h"
+#include <string.h>
 #include <SDL3/SDL.h>
 #include <SDL3_ttf/SDL_ttf.h>
 #include <fontconfig/fontconfig.h>
@@ -49,27 +51,9 @@ bool ClientDrawsItsOwnText() {
   return client_draws;
 }
 
-void SecureClear(std::string* value) {
-  if (value == nullptr) {
-    return;
-  }
-  volatile char* bytes = value->empty() ? nullptr : value->data();
-  for (std::size_t index = 0; index < value->size(); ++index) {
-    bytes[index] = 0;
-  }
-  value->clear();
-}
+void SecureClear(std::string* value) { ::mocktail::runtime::SecureClearTextInPlace(value); }
 
-void SecureClear(std::vector<std::uint8_t>* value) {
-  if (value == nullptr) {
-    return;
-  }
-  volatile std::uint8_t* bytes = value->empty() ? nullptr : value->data();
-  for (std::size_t index = 0; index < value->size(); ++index) {
-    bytes[index] = 0;
-  }
-  value->clear();
-}
+void SecureClear(std::vector<std::uint8_t>* value) { ::mocktail::runtime::SecureClearBytes(value); }
 
 struct SensitiveString {
   ~SensitiveString() { SecureClear(&value); }

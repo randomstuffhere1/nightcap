@@ -1,5 +1,7 @@
 #include "runtime/roblox_text_display_state.h"
 
+#include "mocktail/runtime/secure_clear.h"
+#include <string.h>
 #include <utf8proc.h>
 
 #include <algorithm>
@@ -16,16 +18,7 @@ namespace {
 
 constexpr char kPasswordBullet[] = "\xE2\x80\xA2";
 
-void SecureClear(std::string* value) {
-  if (value == nullptr) {
-    return;
-  }
-  volatile char* bytes = value->empty() ? nullptr : value->data();
-  for (std::size_t index = 0; index < value->size(); ++index) {
-    bytes[index] = 0;
-  }
-  value->clear();
-}
+void SecureClear(std::string* value) { ::mocktail::runtime::SecureClearTextInPlace(value); }
 
 std::size_t Utf8ByteForUtf16Cursor(const char* text, std::size_t size,
                                    int32_t requested_utf16,

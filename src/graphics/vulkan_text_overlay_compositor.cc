@@ -1,5 +1,7 @@
 #include "mocktail/graphics/vulkan_text_overlay_compositor.h"
 
+#include "mocktail/runtime/secure_clear.h"
+#include <string.h>
 #include <dlfcn.h>
 #include <libplacebo/dispatch.h>
 #include <libplacebo/log.h>
@@ -115,16 +117,7 @@ bool GraphicsFamilyCanUseSwapchain(
   return false;
 }
 
-void SecureClear(std::vector<std::uint8_t>* bytes) {
-  if (bytes == nullptr) {
-    return;
-  }
-  volatile std::uint8_t* data = bytes->empty() ? nullptr : bytes->data();
-  for (std::size_t index = 0; index < bytes->size(); ++index) {
-    data[index] = 0;
-  }
-  bytes->clear();
-}
+void SecureClear(std::vector<std::uint8_t>* bytes) { ::mocktail::runtime::SecureClearBytes(bytes); }
 
 void LibplaceboLog(void*, enum pl_log_level level, const char* message) {
   if (level <= PL_LOG_WARN && message != nullptr) {
