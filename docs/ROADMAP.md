@@ -74,8 +74,8 @@ automated coverage of the client actually drawing them.
 
 **Investigated. No host-side cause found; probably not actionable from here.**
 
-The freezes are real — a 78 s session lost 15.5 s across 33 frames, and a 35 s
-one lost 13.4 s across 32 — but every layer instrumented says the engine is
+The freezes are real (a 78 s session lost 15.5 s across 33 frames, and a 35 s
+one lost 13.4 s across 32), but every layer instrumented says the engine is
 *idling*, not blocked. Full numbers in
 [PERFORMANCE.md](PERFORMANCE.md#when-the-engine-stops-rendering); the short
 version:
@@ -96,9 +96,9 @@ the guest.
 
 Two things were chased and disproved, recorded so they are not chased again. A
 shader-compilation cause was ruled out first: all pipeline and texture work
-totalled 40 ms in a 78 s session. Then a DNS storm looked conclusive —
+totalled 40 ms in a 78 s session. Then a DNS storm looked conclusive:
 `inet_addr` called 12,408 times for one address, 808 times in a second during
-the largest gap — but per-gap coverage showed fourteen of the ~1 s gaps contain
+the largest gap. But per-gap coverage showed fourteen of the ~1 s gaps contain
 essentially none of it, and the session-wide correlation is r = −0.07. It
 explains one gap and nothing else.
 
@@ -131,7 +131,7 @@ client loads its own `shadercachevk.bin` and passes it to the driver. The
 shader cache was working. Compiling shaders is not the stutter.
 
 The stutter is elsewhere. Frame interval p50 was 16.7 ms and p99 89.6 ms, and
-33 frames of 3490 ran over 100 ms — 0.9% of frames but 15.5 s of lost time
+33 frames of 3490 ran over 100 ms, 0.9% of frames but 15.5 s of lost time
 out of 77.5 s. The worst of them cluster near exact multiples of a second:
 
 ```
@@ -162,6 +162,9 @@ blocked, not busy, which is what the item above now says.
 - Small textures upscaled 4x by default, with PNG overrides in
   `~/.config/mocktail/textures`.
 - ETC2 textures decoded on desktop GPUs without stutter.
+- The texture hot kernels in Rust: resampling, the EAC alpha merge and the R11
+  and RG11 decoders, checked against the C++ they replaced by
+  `kernel_parity_test`. The ratios are in [PERFORMANCE.md](PERFORMANCE.md).
 - No more error 319 kicks after joining a server.
 - Roblox sees the real host RAM and screen size.
 - Desktop launcher that works on Wayland and finds the installed binary.
@@ -191,4 +194,3 @@ blocked, not busy, which is what the item above now says.
 
 - Replacing the `mocktail` binary and config names. Keeping them makes
   upstream merges clean.
-- DEB, RPM, and AUR packages. Upstream ships those for unmodified Mocktail.

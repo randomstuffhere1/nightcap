@@ -52,6 +52,10 @@ Release notes on GitHub are taken from the matching section here.
   `FFlagDebugLuauCodegenAll` in `fflags.json` to choose it yourself.
 - Nightcap answers Roblox's Java calls with less work per call, and the audio thread no longer allocates
   memory for each block of sound it plays.
+- Building needs a Rust toolchain, 1.83 or newer, because the texture hot kernels moved to `rust/`. The
+  crates are vendored under `rust/vendor`, so no build path reaches the network for them, and
+  `rust/rust-toolchain.toml` picks the channel. Every packaging path declares the toolchain it needs,
+  including `org.freedesktop.Sdk.Extension.rust-stable` for the Flatpak.
 
 ### Fixed
 
@@ -162,16 +166,17 @@ Release notes on GitHub are taken from the matching section here.
 - The window writes `config.ui.yaml` beside `config.yaml` rather than `config.yaml` itself. `config.yaml` is
   created once, mode 0600, and states that Nightcap never replaces your edits; 154 of its 208 lines are
   comments that are its only documentation. The two layer, environment above both, and `config.ui.yaml` above
-  `config.yaml` — so a value set in the window outranks a later hand-edit of the same key, which the window
-  says in a banner. Clearing a setting goes back to your own value, and clearing every setting removes the
-  file. `config.yaml` is never rewritten; a test rereads it and asserts it is byte-for-byte unchanged.
+  `config.yaml`. A value set in the window therefore outranks a later hand-edit of the same key, which the
+  window says in a banner. Clearing a setting goes back to your own value, and clearing every setting
+  removes the file. `config.yaml` is never rewritten; a test rereads it and asserts it is byte-for-byte
+  unchanged.
 - A `Nightcap Settings` desktop entry, so the window is reachable without a terminal.
 
 - A plugged-in pad now shows its own button glyphs. The pad family is taken from the hardware's real type
   rather than the type SDL reports, which returned a generic value for anything it could not place: a Switch
   Pro, a Joy-Con or a GameCube pad reached the client as unknown and drew generic glyphs. The client has art
   for PlayStation and Xbox pads only, so a Switch or GameCube pad is reported as the nearest layout it knows,
-  which is Xbox — both use the same face-button diamond with A and B in the same places. Startup says when it
+  which is Xbox: both use the same face-button diamond with A and B in the same places. Startup says when it
   does this, so the approximation is visible. No invented type value is ever sent to the client, since a value
   outside the set it understands could leave it with no art to draw at all.
 - `graphics.quality` in `config.yaml` sets Roblox's graphics level, 1 to 6, or `auto` to leave it to the

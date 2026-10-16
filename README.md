@@ -69,6 +69,49 @@ coming next, the [changelog](CHANGELOG.md) for what each release changed,
 [performance](docs/PERFORMANCE.md) for CPU load, heat and the knobs that change
 them, and the [FAQ](FAQ.md) for Discord RPC, logs, and VR.
 
+## What this fork adds
+
+This repository started as a clone of
+[CoderDayton/nightcap](https://github.com/CoderDayton/nightcap) and now runs
+ahead of it. Work from that repository is merged in as it lands, so the gap is
+the list below and nothing else. In a clone with both remotes,
+`git diff coderdayton/main main` is the same list.
+
+- **A settings window.** `mocktail --settings`, or **Nightcap Settings** in the
+  app menu, opens a GTK4 window over 25 settings in five tabs. Each control
+  only accepts values its setting accepts, so a bad value is refused where you
+  type it. The window writes `config.ui.yaml` and leaves `config.yaml` alone,
+  comments included.
+- **Joining a private server from a link.** Roblox's `/share?code=` link and
+  the join dialog turn into a host launch, and the browser closes itself. A
+  public server link works as well, and one Roblox refuses says so instead of
+  failing quietly.
+- **Where the game server is.** `integrations.server_location_indicator` shows
+  the place, region and country in a pill drawn into the frame the game is
+  already presenting, so it cannot take a click meant for the game. Off by
+  default.
+- **Rust texture kernels.** The resampler, the EAC alpha merge and the R11 and
+  RG11 decoders live in `rust/` and link into the `libvulkan.so` stub.
+  `kernel_parity_test` runs the Rust and C++ kernels over every format, stride
+  and size and compares them byte for byte; the measured ratios are in
+  [PERFORMANCE.md](docs/PERFORMANCE.md). `MOCKTAIL_RUST_KERNELS=off` selects the
+  C++ ones.
+- **A startup timeline.** `make startup-timeline` prints a per-phase median over
+  several launches, so you can see which phase a launch spends its time in.
+- **The fullscreen flash and the one-second resize are gone**, along with the
+  swapchain-out-of-date report that used to fire when the surface moved under a
+  present.
+- **Stall reports name what stalled.** A long frame gap reports the thread and
+  the wait underneath it rather than a bare duration.
+- **Controller glyphs follow the pad.** The family comes from the hardware type
+  SDL reports, so a Switch Pro or a GameCube pad draws the nearest layout the
+  client has instead of generic buttons.
+- **Per-payload graphics fixups.** A compatibility profile can declare
+  `swapchain_fixup`, `shader_fixups` and `use_new_text_renderer` for a Roblox
+  build that needs them. Every one is absent by default.
+- **`window.close_on_leave`** closes Nightcap when you leave an experience
+  rather than leaving it open on the Roblox home screen.
+
 ## Install with Flatpak
 
 ```bash
@@ -208,12 +251,14 @@ WebKitGTK 6.0.
 
 The texture kernels live in Rust (`rust/`, built by `cmake/MocktailRust.cmake`
 into a staticlib that links into the `libvulkan.so` stub and the kernel tests).
-A Rust toolchain from rustup is also required, and the crates are vendored under
-`rust/vendor`, so no build path needs network access. Cross-compiling to
-`aarch64` additionally needs that target installed
-(`rustup target add aarch64-unknown-linux-gnu`) and `aarch64-linux-gnu-gcc` on
-the linker path. `-DMOCKTAIL_BUILD_RUST_KERNELS=OFF` builds against a prebuilt
-archive given in `-DMOCKTAIL_RUST_PREBUILT=/path/to/libmocktail_rs.a`.
+A Rust toolchain is also required, 1.83 or newer; `rust/rust-toolchain.toml`
+selects the channel for rustup-managed installs, and the distribution packages
+below carry one. The crates are vendored under `rust/vendor`, so no build path
+needs network access. Cross-compiling to `aarch64` additionally needs that
+target installed (`rustup target add aarch64-unknown-linux-gnu`) and
+`aarch64-linux-gnu-gcc` on the linker path.
+`-DMOCKTAIL_BUILD_RUST_KERNELS=OFF` builds against a prebuilt archive given in
+`-DMOCKTAIL_RUST_PREBUILT=/path/to/libmocktail_rs.a`.
 
 Cargo's build output is redirected into `build/rust-target`, so it is gitignored
 and `make clean` removes it along with the rest of the build tree.
@@ -230,7 +275,7 @@ sudo apt install build-essential cmake git ninja-build pkg-config lld \
   nlohmann-json3-dev libyaml-dev libpng-dev libelf-dev libminizip-dev \
   libcapstone-dev libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev \
   libutf8proc-dev libfontconfig1-dev libegl-dev libvulkan-dev \
-  libplacebo-dev zlib1g-dev
+  libplacebo-dev zlib1g-dev rustc cargo
 ```
 </details>
 
@@ -241,7 +286,7 @@ sudo apt install build-essential cmake git ninja-build pkg-config lld \
 sudo pacman -S --needed base-devel cmake git ninja pkgconf lld sdl3 sdl3_ttf \
   curl openssl nlohmann-json libyaml libpng libelf minizip capstone gtk4 \
   libadwaita webkitgtk-6.0 libutf8proc fontconfig libglvnd \
-  libplacebo vulkan-headers vulkan-icd-loader zlib
+  libplacebo vulkan-headers vulkan-icd-loader zlib rust
 ```
 </details>
 
@@ -255,7 +300,7 @@ sudo dnf install gcc-c++ cmake git ninja-build pkgconf-pkg-config lld \
   minizip-ng-compat-devel \
   capstone-devel gtk4-devel libadwaita-devel webkitgtk6.0-devel \
   utf8proc-devel fontconfig-devel libglvnd-devel vulkan-headers \
-  vulkan-loader-devel libplacebo-devel zlib-ng-compat-devel
+  vulkan-loader-devel libplacebo-devel zlib-ng-compat-devel rust cargo
 ```
 </details>
 

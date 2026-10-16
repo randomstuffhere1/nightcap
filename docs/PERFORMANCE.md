@@ -9,8 +9,8 @@ Nightcap asks Feral GameMode for a performance session at startup
 (`performance.gamemode`, default `auto`). GameMode raises the CPU governor and
 the process priority, which helps.
 
-On a CPU with a wide spread of per-core maximum frequencies — Intel P-core and
-E-core parts, AMD parts with preferred cores — GameMode also pins the process
+On a CPU with a wide spread of per-core maximum frequencies (Intel P-core and
+E-core parts, AMD parts with preferred cores), GameMode also pins the process
 to the fastest cores. On a 32-thread host that can mean 4 usable threads out of
 32. Roblox spreads its work across a worker pool, so the pin concentrates that
 pool onto a couple of physical cores instead of spreading it. Those cores sit
@@ -47,7 +47,7 @@ your own file replaces it, and `desiredgov=powersave` there means GameMode
 clocks the CPU **down** for the whole session while still reporting
 `[gamemode] performance request active`. The symptoms are a low CPU clock
 under load, a GPU that never leaves its lower SM clocks, and the engine pump
-falling back to `tpause` — which costs about 70% of a core instead of 3%,
+falling back to `tpause`, which costs about 70% of a core instead of 3%,
 because `sleep` is only chosen when the governor reads `performance`. On one
 13900K host, correcting `powersave` to `performance` took the process from
 177% CPU to 42% and the package from 70°C to 53-63°C, at the same frame rate.
@@ -62,7 +62,7 @@ the game for new settings to apply to it.
 
 `gamemoded` is D-Bus activated through
 `com.feralinteractive.GameMode.service`, so `systemctl --user stop gamemoded`
-does not hold — the next client request starts it again within seconds. To
+does not hold: the next client request starts it again within seconds. To
 measure with GameMode genuinely off, mask it:
 
 ```bash
@@ -95,7 +95,7 @@ Two traps here. The engine process reports its name as `Main`, not
 `mocktail`; `pgrep -x mocktail` finds only the launcher, which sits near 0%
 CPU and tells you nothing. And `taskset -p` reads one thread, not the whole
 process, so a single call reports the main thread's mask and says nothing
-about the workers — which is where the game's load actually is.
+about the workers, which is where the game's load actually is.
 
 For the same reason, `ps -L -o psr=` shows which core each thread is running
 on right now, not which cores it is allowed on. On a hybrid CPU the scheduler
@@ -147,7 +147,7 @@ just the CPU:
 
 The main thread is calling the engine at exactly the normal rate and returning
 immediately. The render thread has nothing to do. The engine is polling, finding
-no work, and choosing not to render — which is a different problem from blocking,
+no work, and choosing not to render, which is a different problem from blocking,
 and one that is usually not on this side of the bridge.
 
 `cpu_us` far below `dur` on its own does **not** mean blocked. An idle thread
@@ -169,7 +169,7 @@ multi-second freezes, the blocking-call totals were:
 
 Three network reads over 50 ms in the whole session, all at startup. Nothing
 waits for anything close to the freeze durations, and there were 21,616
-`EAGAIN` returns from non-blocking reads — the guest polling descriptors that
+`EAGAIN` returns from non-blocking reads: the guest polling descriptors that
 have nothing on them, which is the signature of polling rather than waiting.
 
 Beware what strace does to the numbers. It adds overhead per syscall, and the
@@ -214,7 +214,7 @@ MOCKTAIL_TRACE_PUMP_STALLS=1 mocktail
 ```
 
 It reports per-call duration, which is the wrong axis for the freeze pattern
-above — the pump calls during a freeze are *shorter* than normal. It is still
+above; the pump calls during a freeze are *shorter* than normal. It is still
 the right tool for a genuinely long individual call.
 
 A Release build carries no symbols for the guest, so each frame is named by the
@@ -502,7 +502,7 @@ If you are chasing a hitch, check those numbers in your own trace before
 working on graphics. In the run above, frame interval p50 was 16.7 ms and p99
 was 89.6 ms; 33 frames of 3490 exceeded 100 ms, and those cost 15.5 s of the
 77.5 s session. The worst clustered near exact second multiples, and inside
-the largest 1825 ms gap the adapter did almost nothing — presents stopped and
+the largest 1825 ms gap the adapter did almost nothing: presents stopped and
 resumed, with only the engine's own 347 ms main-thread step in between. A
 freeze with no adapter work in it is not a graphics problem.
 
@@ -700,8 +700,8 @@ casually: it touches the path that downloads and promotes a payload.
 ## Measuring
 
 Shift+F4 in game shows Roblox's own scheduler jobs, with a millisecond cost and
-a percentage for each. It does not show Nightcap's threads — the Vulkan
-adapter, the ETC2 decode workers, the libc shim — so it is a reading on the
+a percentage for each. It does not show Nightcap's threads (the Vulkan
+adapter, the ETC2 decode workers, the libc shim), so it is a reading on the
 game, not on the process.
 
 For the whole process:
@@ -716,7 +716,7 @@ A thread pinned near 100% while the frame rate is steady is a busy-wait. The
 one exception is the host main thread in `tpause` mode, which the OS reports
 as busy while the core is parked (see above). Load spread across many
 `RBX Worker` threads is the game's own scheduler, and its cost tracks the
-place you are in — part count, moving parts and joints all show in the
+place you are in: part count, moving parts and joints all show in the
 Shift+F4 World section.
 
 `--profile <file>` writes a Chrome trace of the Vulkan adapter's work for
