@@ -217,11 +217,29 @@ struct AdapterState {
   // fullscreen transition.
   std::atomic<VkQueue> last_submitted_queue{VK_NULL_HANDLE};
   bool extent_translation_logged = false;
+  std::uint32_t last_translated_width = 0;
+  std::uint32_t last_translated_height = 0;
   bool present_policy_logged = false;
   bool initialized = false;
 };
 
 static std::atomic<bool> g_vulkan_call_observation_active{false};
+
+// Off by default; MOCKTAIL_TRACE_FULLSCREEN=1 prints one line per swapchain
+// creation and per present result around a mode change. This exists because
+// three different fixes for the fullscreen flash were each plausible and none
+// were confirmed, and the next question is entirely empirical: whether a
+// swapchain is created at a different extent than the window, and whether the
+// present that follows returns out-of-date. Both are visible here and nowhere
+// else.
+bool FullscreenTraceEnabled() {
+  static const bool enabled = [] {
+    const char* value = std::getenv("MOCKTAIL_TRACE_FULLSCREEN");
+    return value != nullptr && value[0] != '\0' &&
+           std::strcmp(value, "0") != 0;
+  }();
+  return enabled;
+}
 
 AdapterState& State() {
   static AdapterState state;
@@ -2294,12 +2312,28 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
       }
     }
   }
+  if (FullscreenTraceEnabled()) {
+    std::fprintf(stderr,
+                 "  [fs-trace] create extent=%ux%u format=%d images>=%u "
+                 "replacing=%d old=%p transform=%x usage=%x\n",
+                 host_info.imageExtent.width, host_info.imageExtent.height,
+                 static_cast<int>(host_info.imageFormat),
+                 host_info.minImageCount,
+                 host_info.oldSwapchain != VK_NULL_HANDLE ? 1 : 0,
+                 static_cast<const void*>(host_info.oldSwapchain),
+                 static_cast<unsigned>(host_info.preTransform),
+                 static_cast<unsigned>(host_info.imageUsage));
+  }
   const VkResult result = mocktail::graphics::CreateSwapchainWithFixupFallbacks(
       host_info, create_info->presentMode, fixup,
       [&](const VkSwapchainCreateInfoKHR& attempt) {
         return host_create(device, &attempt, allocator, swapchain);
       });
   if (result != VK_SUCCESS) {
+    if (FullscreenTraceEnabled()) {
+      std::fprintf(stderr, "  [fs-trace] create failed result=%d\n",
+                   static_cast<int>(result));
+    }
     return result;
   }
   const auto host_get_images = reinterpret_cast<PFN_vkGetSwapchainImagesKHR>(
@@ -2795,6 +2829,18 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
         stderr, "  [vulkan] Android currentExtent translated to %ux%u\n",
         capabilities->currentExtent.width, capabilities->currentExtent.height);
   }
+  // Every later change is worth a line: this value is what the guest believes
+  // the surface is, and the guest only rebuilds its swapchain when it changes.
+  // A translation that stops moving while the window resizes is the failure.
+  if (FullscreenTraceEnabled() &&
+      (capabilities->currentExtent.width != state.last_translated_width ||
+       capabilities->currentExtent.height != state.last_translated_height)) {
+    state.last_translated_width = capabilities->currentExtent.width;
+    state.last_translated_height = capabilities->currentExtent.height;
+    std::fprintf(stderr, "  [fs-trace] currentExtent now %ux%u\n",
+                 capabilities->currentExtent.width,
+                 capabilities->currentExtent.height);
+  }
   return result;
 }
 
@@ -2875,6 +2921,10 @@ vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* present_info) {
       queue, present_info, ObservedHostQueuePresent);
   scope.Arg("result", result);
   const VkResult normalized_result = NormalizeSwapchainResult(result);
+  if (FullscreenTraceEnabled()) {
+    std::fprintf(stderr, "  [fs-trace] present result=%d\n",
+                 static_cast<int>(normalized_result));
+  }
   if (normalized_result == VK_ERROR_OUT_OF_DATE_KHR) {
     const NoteSurfaceOutOfDateFn note_surface_out_of_date =
         state.note_surface_out_of_date.load(std::memory_order_acquire);

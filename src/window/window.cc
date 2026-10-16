@@ -1679,15 +1679,74 @@ extern "C" bool mocktail_window_has_presented_frame() {
   return HasPresentedFrame();
 }
 
-extern "C" int mocktail_window_width() {
+// The window's current size in pixels, for the surface-extent translation in
+// vkGetPhysicalDeviceSurfaceCapabilitiesKHR.
+//
+// SDL is the authority here, deliberately, and the cached snapshots are not.
+//
+// # Why this cannot read the cached size
+//
+// This function feeds currentExtent, so whatever it returns is what the guest
+// believes the surface is. The guest only rebuilds its swapchain when that
+// number changes, so a stale value here does not merely report the wrong size:
+// it silently stops the guest from ever resizing again.
+//
+// Both cached sources can go stale across a mode change, because both are
+// refreshed from the guest rather than from SDL:
+//
+//   * g_state.width is written on startup and on surface events, and those
+//     events are driven by the guest's own idea of the window.
+//   * g_window_surface_lifecycle's snapshot is only replaced when the guest
+//     delivers a typed surface event.
+//
+// A fullscreen change resizes the SDL window immediately, but the guest does
+// not necessarily push a new surface event for it. Measured, with
+// MOCKTAIL_TRACE_FULLSCREEN=1: nine fullscreen transitions and one swapchain
+// creation, with the swapchain left at the fullscreen extent while the window
+// alternated between 1368x768 and 991x588. Every present returned VK_SUCCESS,
+// because the compositor scales an oversized buffer into an undersized surface,
+// so the guest never learned anything had changed. That desynchronisation is
+// what shows up as garbage for a frame or two around the transition.
+//
+// SDL_GetWindowSizeInPixels is queried live, so it reflects the mode change the
+// moment it happens. It is also the call the startup path uses to seed
+// g_state.width, so the units are identical.
+int WindowPixelWidth() {
+  if (g_state.sdl_window != nullptr) {
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowSizeInPixels(g_state.sdl_window, &width, &height);
+    if (width > 0 && height > 0) {
+      return width;
+    }
+  }
+  // No window, or SDL has not settled yet: fall back to the cached sizes.
   const auto surface = g_window_surface_lifecycle.Snapshot();
-  return surface.generation != 0 ? static_cast<int>(surface.width) : GetWidth();
+  if (surface.generation != 0) {
+    return static_cast<int>(surface.width);
+  }
+  return GetWidth();
 }
 
-extern "C" int mocktail_window_height() {
+int WindowPixelHeight() {
+  if (g_state.sdl_window != nullptr) {
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowSizeInPixels(g_state.sdl_window, &width, &height);
+    if (width > 0 && height > 0) {
+      return height;
+    }
+  }
   const auto surface = g_window_surface_lifecycle.Snapshot();
-  return surface.generation != 0 ? static_cast<int>(surface.height) : GetHeight();
+  if (surface.generation != 0) {
+    return static_cast<int>(surface.height);
+  }
+  return GetHeight();
 }
+
+extern "C" int mocktail_window_width() { return WindowPixelWidth(); }
+
+extern "C" int mocktail_window_height() { return WindowPixelHeight(); }
 
 extern "C" void* mocktail_gl_proc_address(const char* name) {
   return GetGLProcAddress(name);
