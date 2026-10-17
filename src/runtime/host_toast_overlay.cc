@@ -213,15 +213,7 @@ Status HostToastOverlay::Shutdown() {
   message_.clear();
   viewport_ = {};
   initialized_ = false;
-  if (font_ != nullptr) {
-    TTF_CloseFont(font_);
-    font_ = nullptr;
-  }
-  font_point_size_ = 0;
-  if (ttf_initialized_) {
-    TTF_Quit();
-    ttf_initialized_ = false;
-  }
+  fonts_.Close();
   return Status::Ok();
 }
 
@@ -286,24 +278,11 @@ void HostToastOverlay::EnsureFontLocked() {
   const int scale = std::max(
       1, static_cast<int>(std::lround(viewport_.density_scale)));
   const int point_size = kTextSizePx * scale;
-  if (font_ != nullptr && font_point_size_ == point_size) {
+  if (fonts_.primary() != nullptr && font_point_size_ == point_size) {
     return;
   }
-  if (font_ != nullptr) {
-    TTF_CloseFont(font_);
-    font_ = nullptr;
-    font_point_size_ = 0;
-  }
-  if (!ttf_initialized_ && !TTF_Init()) {
-    return;
-  }
-  ttf_initialized_ = true;
-  for (const std::string& file : ToastFontFiles()) {
-    font_ = TTF_OpenFont(file.c_str(), static_cast<float>(point_size));
-    if (font_ != nullptr) {
-      font_point_size_ = point_size;
-      return;
-    }
+  if (fonts_.Open(ToastFontFiles(), static_cast<float>(point_size))) {
+    font_point_size_ = point_size;
   }
 }
 
@@ -320,9 +299,10 @@ bool HostToastOverlay::RasterizeLocked() {
 
   int text_width = 0;
   SDL_Surface* text = nullptr;
-  if (font_ != nullptr) {
+  if (fonts_.primary() != nullptr) {
     const SDL_Color white = {255, 255, 255, 255};
-    text = TTF_RenderText_Blended(font_, message_.data(), message_.size(), white);
+    text = TTF_RenderText_Blended(fonts_.primary(), message_.data(),
+                                  message_.size(), white);
     if (text != nullptr) {
       // What SDL_ttf hands back is not guaranteed to be RGBA in that order, and
       // reading it as though it were turns its transparent background into opaque

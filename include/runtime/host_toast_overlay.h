@@ -11,8 +11,7 @@
 #include "mocktail/graphics/text_overlay_frame.h"
 #include "mocktail/status.h"
 #include "runtime/roblox_text_display_state.h"
-
-struct TTF_Font;
+#include "runtime/ttf_font_set.h"
 
 namespace mocktail {
 namespace runtime {
@@ -69,8 +68,7 @@ class HostToastOverlay final {
   int card_height_ = 0;
   int scale_ = 1;
   bool initialized_ = false;
-  bool ttf_initialized_ = false;
-  TTF_Font* font_ = nullptr;
+  TtfFontSet fonts_;
   int font_point_size_ = 0;
 };
 

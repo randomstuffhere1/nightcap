@@ -10,8 +10,7 @@
 #include "mocktail/graphics/text_overlay_frame.h"
 #include "mocktail/status.h"
 #include "runtime/roblox_text_display_state.h"
-
-struct TTF_Font;
+#include "runtime/ttf_font_set.h"
 
 namespace mocktail {
 namespace runtime {
@@ -42,7 +41,6 @@ class RobloxTextSurfaceOverlay final {
   void ApplyUpdate(const RobloxTextDisplayUpdate& update);
   Status RasterizeLocked();
   Status OpenFontsLocked(std::int32_t font, float point_size);
-  void CloseFontsLocked();
   void ClearFrameLocked();
   void RecordFailureLocked(Status status);
 
@@ -50,14 +48,13 @@ class RobloxTextSurfaceOverlay final {
   RobloxTextDisplayState state_;
   RobloxTextOverlayViewport viewport_;
   std::vector<std::uint8_t> rgba_;
-  std::vector<TTF_Font*> fonts_;
+  TtfFontSet fonts_;
   std::int32_t fonts_font_ = 0;
   float fonts_point_size_ = 0.0F;
   std::uint64_t state_revision_ = 0;
   std::uint64_t raster_revision_ = 0;
   Status failure_;
   bool initialized_ = false;
-  bool ttf_initialized_ = false;
   bool failure_logged_ = false;
   bool ready_logged_ = false;
 };

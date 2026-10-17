@@ -332,7 +332,9 @@ Status RobloxTextSurfaceOverlay::Shutdown() {
   }
   state_.Reset();
   ClearFrameLocked();
-  CloseFontsLocked();
+  fonts_.Close();
+  fonts_font_ = 0;
+  fonts_point_size_ = 0.0F;
   viewport_ = {};
   initialized_ = false;
   if (owned_active_overlay) {
@@ -492,7 +494,7 @@ Status RobloxTextSurfaceOverlay::RasterizeLocked() {
     SecureClear(&candidate);
     return status;
   }
-  const std::vector<TTF_Font*>& fonts = fonts_;
+  const std::vector<TTF_Font*>& fonts = fonts_.fonts();
   if (wrapped_layout) {
     TTF_HorizontalAlignment alignment = TTF_HORIZONTAL_ALIGN_LEFT;
     if (presentation.x_alignment == 1) {
@@ -670,50 +672,14 @@ Status RobloxTextSurfaceOverlay::OpenFontsLocked(std::int32_t font,
       fonts_point_size_ == point_size) {
     return Status::Ok();
   }
-  if (!TTF_Init()) {
-    return RasterizationFailure("unable to initialize SDL3_ttf");
-  }
-  const std::vector<std::string> files =
-      ResolveFontFiles(ResolveRobloxTextFont(font));
-  std::vector<TTF_Font*> opened;
-  opened.reserve(files.size());
-  for (const std::string& file : files) {
-    TTF_Font* candidate = TTF_OpenFont(file.c_str(), point_size);
-    if (candidate != nullptr) {
-      opened.push_back(candidate);
-    }
-  }
-  // A failed reopen leaves the fonts already rendering in place.
-  if (opened.empty()) {
-    TTF_Quit();
+  // A failed reopen leaves the fonts already rendering in place, which is what
+  // the owner guarantees: it only swaps the old set out once the new one opened.
+  if (!fonts_.Open(ResolveFontFiles(ResolveRobloxTextFont(font)), point_size)) {
     return RasterizationFailure("unable to open a Roblox or fallback font");
   }
-  for (std::size_t index = 1; index < opened.size(); ++index) {
-    (void)TTF_AddFallbackFont(opened.front(), opened[index]);
-  }
-  CloseFontsLocked();
-  fonts_ = std::move(opened);
-  ttf_initialized_ = true;
   fonts_font_ = font;
   fonts_point_size_ = point_size;
   return Status::Ok();
-}
-
-void RobloxTextSurfaceOverlay::CloseFontsLocked() {
-  if (!fonts_.empty()) {
-    TTF_ClearFallbackFonts(fonts_.front());
-    for (auto iterator = fonts_.rbegin(); iterator != fonts_.rend();
-         ++iterator) {
-      TTF_CloseFont(*iterator);
-    }
-    fonts_.clear();
-  }
-  fonts_font_ = 0;
-  fonts_point_size_ = 0.0F;
-  if (ttf_initialized_) {
-    TTF_Quit();
-    ttf_initialized_ = false;
-  }
 }
 
 void RobloxTextSurfaceOverlay::ClearFrameLocked() {

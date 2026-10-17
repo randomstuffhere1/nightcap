@@ -425,6 +425,7 @@ add_library(mocktail_runtime STATIC
   src/runtime/supported_launch_policy.cc
   src/runtime/support_bundle.cc
   src/runtime/system_proxy.cc
+  src/runtime/ttf_font_set.cc
   src/runtime/texture_memory_policy.cc
   src/runtime/device_memory_profile.cc
 )
