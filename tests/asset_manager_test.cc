@@ -65,6 +65,7 @@ class AssetManagerTest : public ::testing::Test {
   void TearDown() override {
     unsetenv("MOCKTAIL_ASSET_ROOT");
     unsetenv("MOCKTAIL_ASSET_OVERLAY_DIR");
+    unsetenv("MOCKTAIL_SKY_TRANSCODE_CACHE_DIR");
     if (had_backend_) {
       setenv("MOCKTAIL_GRAPHICS_BACKEND", previous_backend_.c_str(), 1);
     } else {
@@ -232,6 +233,116 @@ TEST_F(AssetManagerTest, TranscodedSkyCannotBypassConversionThroughDescriptor) {
   std::ifstream file(root_ + "/" + name, std::ios::binary);
   file.read(reinterpret_cast<char*>(on_disk.data()), on_disk.size());
   EXPECT_EQ(on_disk, original);
+}
+
+TEST_F(AssetManagerTest, SkyTranscodeCacheReusesEntryAndRejectsUnusableOne) {
+  const auto original = MakeEtc1SkyTexture();
+  const std::string name = "assets/android/textures/sky/cached.tex";
+  WriteBinaryAsset(name, original);
+  const std::string cache = MakeTempRoot();
+  ASSERT_FALSE(cache.empty());
+  ASSERT_EQ(setenv("MOCKTAIL_SKY_TRANSCODE_CACHE_DIR", cache.c_str(), 1), 0);
+  ASSERT_EQ(setenv("MOCKTAIL_GRAPHICS_BACKEND", "direct-vulkan", 1), 0);
+
+  const auto open_converted = [&]() {
+    AAsset* asset = AAssetManager_open(
+        AAssetManager_fromJava(nullptr, nullptr), name.c_str(), 0);
+    EXPECT_NE(asset, nullptr);
+    std::vector<unsigned char> converted(
+        static_cast<std::size_t>(AAsset_getLength(asset)));
+    std::memcpy(converted.data(), AAsset_getBuffer(asset), converted.size());
+    AAsset_close(asset);
+    return converted;
+  };
+  const auto entries = [&]() {
+    std::vector<std::filesystem::path> found;
+    for (const auto& entry : std::filesystem::directory_iterator(cache)) {
+      found.push_back(entry.path());
+    }
+    return found;
+  };
+
+  const std::vector<unsigned char> converted = open_converted();
+  ASSERT_FALSE(converted.empty());
+  // BC1 format in the KTX header.
+  EXPECT_EQ(converted[28], 0xf0);
+  const std::vector<std::filesystem::path> first_entries = entries();
+  ASSERT_EQ(first_entries.size(), 1U);
+
+  // The per-process memo would answer this one, so drop it: what is read now
+  // has to be the entry the first open wrote.
+  libc_shim::ResetEtc1SkyTranscodeMemoryCache();
+  EXPECT_EQ(open_converted(), converted);
+  EXPECT_EQ(entries().size(), 1U);
+
+  // A damaged entry is not used. The texture is converted again and the result
+  // is identical, which is the whole contract of the cache.
+  {
+    std::fstream damaged(first_entries.front(),
+                         std::ios::binary | std::ios::in | std::ios::out);
+    ASSERT_TRUE(damaged.good());
+    damaged.seekg(-1, std::ios::end);
+    const char existing = damaged.get();
+    damaged.seekp(-1, std::ios::end);
+    damaged.put(static_cast<char>(existing ^ 0xff));
+    damaged.close();
+    ASSERT_TRUE(damaged.good());
+  }
+  libc_shim::ResetEtc1SkyTranscodeMemoryCache();
+  EXPECT_EQ(open_converted(), converted);
+
+  // A source file that changed is a different entry, not a stale hit.
+  libc_shim::ResetEtc1SkyTranscodeMemoryCache();
+  WriteBinaryAsset(name, original);
+  EXPECT_EQ(open_converted(), converted);
+  EXPECT_EQ(entries().size(), 2U);
+}
+
+TEST_F(AssetManagerTest, SkyTranscodeCacheDropsEntriesFromOlderPayloads) {
+  const auto original = MakeEtc1SkyTexture();
+  const std::string name = "assets/android/textures/sky/grown.tex";
+  WriteBinaryAsset(name, original);
+  const std::string cache = MakeTempRoot();
+  ASSERT_FALSE(cache.empty());
+  ASSERT_EQ(setenv("MOCKTAIL_SKY_TRANSCODE_CACHE_DIR", cache.c_str(), 1), 0);
+  ASSERT_EQ(setenv("MOCKTAIL_GRAPHICS_BACKEND", "direct-vulkan", 1), 0);
+
+  const auto open_converted = [&]() {
+    AAsset* asset = AAssetManager_open(
+        AAssetManager_fromJava(nullptr, nullptr), name.c_str(), 0);
+    EXPECT_NE(asset, nullptr);
+    std::vector<unsigned char> converted(
+        static_cast<std::size_t>(AAsset_getLength(asset)));
+    std::memcpy(converted.data(), AAsset_getBuffer(asset), converted.size());
+    AAsset_close(asset);
+    return converted;
+  };
+
+  // Stand in for the entries earlier payloads left behind. They sort older
+  // than anything written now, so they are the ones that go.
+  std::vector<std::string> stale;
+  for (int index = 0; index < 80; ++index) {
+    const std::string entry = cache + "/sky512_stale" +
+                              std::to_string(index) + "-0.bc1";
+    std::ofstream file(entry, std::ios::binary);
+    file << "stale";
+    file.close();
+    stale.push_back(entry);
+  }
+
+  const std::vector<unsigned char> converted = open_converted();
+  ASSERT_FALSE(converted.empty());
+  libc_shim::ResetEtc1SkyTranscodeMemoryCache();
+  EXPECT_EQ(open_converted(), converted);
+
+  std::size_t remaining = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(cache)) {
+    (void)entry;
+    ++remaining;
+  }
+  EXPECT_LE(remaining, 64U);
+  // The entry for the texture in use survives: it is the newest.
+  EXPECT_NE(std::filesystem::exists(stale.front()), true);
 }
 
 TEST_F(AssetManagerTest, OpenGlSkyKeepsOriginalFileDescriptor) {

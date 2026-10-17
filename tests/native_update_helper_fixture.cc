@@ -25,6 +25,13 @@ int IntegerEnvironment(const char* name, int fallback) {
              : fallback;
 }
 
+void Linger() {
+  const int milliseconds = IntegerEnvironment("MOCKTAIL_TEST_UPDATE_LINGER_MS", 0);
+  for (int slept = 0; slept < milliseconds; slept += 10) {
+    usleep(10000);
+  }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -62,5 +69,6 @@ int main(int argc, char** argv) {
       return 66;
     }
   }
+  Linger();
   return IntegerEnvironment("MOCKTAIL_TEST_UPDATE_EXIT", 0);
 }

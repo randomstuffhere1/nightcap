@@ -74,6 +74,11 @@ class RuntimePaths {
   const std::filesystem::path& asset_overlay_dir() const {
     return asset_overlay_dir_;
   }
+  // Where the ETC1-to-BC1 conversion of the bundled sky textures is kept
+  // between launches. Unset means no on-disk conversion cache.
+  const std::filesystem::path& sky_transcode_cache_dir() const {
+    return sky_transcode_cache_dir_;
+  }
   bool use_real_sober_paths() const { return use_real_sober_paths_; }
 
   std::filesystem::path DefaultAssetPath() const;
@@ -108,6 +113,7 @@ class RuntimePaths {
   std::filesystem::path active_payload_manifest_;
   std::filesystem::path cookie_file_;
   std::filesystem::path asset_overlay_dir_;
+  std::filesystem::path sky_transcode_cache_dir_;
   bool use_real_sober_paths_ = false;
 };
 

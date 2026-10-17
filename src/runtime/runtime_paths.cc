@@ -358,6 +358,13 @@ RuntimePaths RuntimePaths::FromEnvironment(
         paths.sober_data_root_ / "asset_overlay",
         paths.data_root_ / "asset_overlay");
   }
+  if (environment.HasNonEmpty("MOCKTAIL_SKY_TRANSCODE_CACHE_DIR")) {
+    paths.sky_transcode_cache_dir_ =
+        environment.GetOr("MOCKTAIL_SKY_TRANSCODE_CACHE_DIR", "");
+  } else {
+    paths.sky_transcode_cache_dir_ =
+        paths.cache_root_ / "graphics/sky-transcodes";
+  }
   return paths;
 }
 
@@ -603,7 +610,8 @@ bool ExportRuntimePathEnvironment(const RuntimePaths& paths,
   for (const std::filesystem::path& directory :
        {paths.android_runtime_root(), paths.android_cache_root(),
         paths.vulkan_shader_cache_file().parent_path(),
-        paths.pipeline_cache_dir(), paths.asset_overlay_dir()}) {
+        paths.pipeline_cache_dir(), paths.asset_overlay_dir(),
+        paths.sky_transcode_cache_dir()}) {
     if (!RuntimePaths::EnsureDirectory(directory, &filesystem_error)) {
       if (error != nullptr) {
         *error = "cannot create resolved runtime path: " + directory.string();
@@ -624,6 +632,8 @@ bool ExportRuntimePathEnvironment(const RuntimePaths& paths,
                                paths.config_root() / "textures", error) &&
          SetEnvironmentDefault("MOCKTAIL_ASSET_OVERLAY_DIR",
                                paths.asset_overlay_dir(), error) &&
+         SetEnvironmentDefault("MOCKTAIL_SKY_TRANSCODE_CACHE_DIR",
+                               paths.sky_transcode_cache_dir(), error) &&
          // The payload digest cache in compat/ keys off this, so it has to be
          // published before anything looks for a record under it.
          SetEnvironmentDefault("MOCKTAIL_DATA_ROOT", paths.data_root(), error);

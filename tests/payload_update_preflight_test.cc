@@ -143,6 +143,26 @@ TEST(PayloadUpdatePreflightTest, StreamsUpdaterStagesToNativeDialog) {
   const std::filesystem::path capture = temporary.root() / "progress";
   ScopedVariable capture_variable("MOCKTAIL_TEST_PROGRESS_CAPTURE",
                                   capture.string());
+  // A reveal delay of 0 is what a launch that opens the window eagerly gets.
+  const MapEnvironment environment = NativeEnvironment({
+      {"MOCKTAIL_UPDATE_PROGRESS_HELPER", MOCKTAIL_TEST_PROGRESS_HELPER},
+      {"DISPLAY", ":test"},
+      {"MOCKTAIL_UPDATE_PROGRESS_DELAY_MS", "0"},
+  });
+  const RuntimePaths paths = RuntimePaths::FromEnvironment(environment);
+  const auto result = RunPayloadUpdatePreflight(environment, paths);
+  ASSERT_TRUE(result) << result.error;
+  EXPECT_EQ(ReadLines(capture),
+            std::vector<std::string>({"PDownloading Roblox...", "S"}));
+}
+
+TEST(PayloadUpdatePreflightTest, PreflightThatFinishesFirstNeverOpensWindow) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path capture = temporary.root() / "progress";
+  ScopedVariable capture_variable("MOCKTAIL_TEST_PROGRESS_CAPTURE",
+                                  capture.string());
+  // This updater exits immediately, which is the warm case: the window is not
+  // worth its start-up cost, so nothing is spawned and nothing is written.
   const MapEnvironment environment = NativeEnvironment({
       {"MOCKTAIL_UPDATE_PROGRESS_HELPER", MOCKTAIL_TEST_PROGRESS_HELPER},
       {"DISPLAY", ":test"},
@@ -150,6 +170,28 @@ TEST(PayloadUpdatePreflightTest, StreamsUpdaterStagesToNativeDialog) {
   const RuntimePaths paths = RuntimePaths::FromEnvironment(environment);
   const auto result = RunPayloadUpdatePreflight(environment, paths);
   ASSERT_TRUE(result) << result.error;
+  EXPECT_TRUE(result.attempted);
+  EXPECT_TRUE(ReadLines(capture).empty());
+}
+
+TEST(PayloadUpdatePreflightTest, SlowPreflightOpensWindowAfterTheDelay) {
+  TemporaryDirectory temporary;
+  const std::filesystem::path capture = temporary.root() / "progress";
+  ScopedVariable capture_variable("MOCKTAIL_TEST_PROGRESS_CAPTURE",
+                                  capture.string());
+  // The updater below outlives the delay, which is what an update that is
+  // actually downloading looks like.
+  ScopedVariable linger_variable("MOCKTAIL_TEST_UPDATE_LINGER_MS", "400");
+  const MapEnvironment environment = NativeEnvironment({
+      {"MOCKTAIL_UPDATE_PROGRESS_HELPER", MOCKTAIL_TEST_PROGRESS_HELPER},
+      {"DISPLAY", ":test"},
+      {"MOCKTAIL_UPDATE_PROGRESS_DELAY_MS", "50"},
+  });
+  const RuntimePaths paths = RuntimePaths::FromEnvironment(environment);
+  const auto result = RunPayloadUpdatePreflight(environment, paths);
+  ASSERT_TRUE(result) << result.error;
+  // The packet the updater sent before the window existed is not lost: it was
+  // queued in the channel the window then inherited.
   EXPECT_EQ(ReadLines(capture),
             std::vector<std::string>({"PDownloading Roblox...", "S"}));
 }

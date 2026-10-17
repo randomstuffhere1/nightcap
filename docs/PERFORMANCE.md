@@ -626,10 +626,44 @@ A first launch with no caches still pays the full verification: about 6.0 s in
 Debug, of which the preflight alone is 1.3 s. That is the cost of actually
 hashing the payload and asking the provider, done once.
 
-What is left of the host side is about 300 ms, of which ~200 ms is spawning the
-GTK progress window before the updater starts. `MOCKTAIL_DISABLE_UPDATE_PROGRESS=1`
-takes that to 10 ms and is the quickest way to see the rest; it also means no
-progress window during a real download.
+### The progress window that never appeared
+
+`RunPayloadUpdatePreflight` used to spawn `mocktail_failure_dialog
+--progress-monitor` before it spawned the updater. That helper is a GTK
+application, and its start-up cost about 200 ms. The warm updater itself takes
+10-15 ms. So every launch paid 200 ms for a window it never saw: the helper
+presents a window only once a progress packet arrives, and a launch with nothing
+to download sends none.
+
+The channel is still created up front, so the updater never loses a packet. The
+window is spawned only after the updater has been running for
+`MOCKTAIL_UPDATE_PROGRESS_DELAY_MS`, 250 ms by default. Anything that finishes
+inside that window never forks the helper. A real download runs for seconds, so
+its window still appears, reading from a socket that already holds every packet
+the updater sent before it started. `0` restores the eager spawn, and
+`MOCKTAIL_DISABLE_UPDATE_PROGRESS=1` still suppresses the window throughout.
+
+### The sky textures, converted on every launch
+
+The bundled Android sky textures are KTX1/ETC1, which the desktop Vulkan path
+cannot sample, so `libc_shim` converts each block to BC1 while the asset manager
+reads the file. Twelve files, about 190 ms of CPU on this machine: 26 ms per
+1024x1024 face, 6 ms per 512x512 one. Roblox's worker threads paid that inside
+the window between engine start and the first frame, on a CPU already carrying
+four busy threads.
+
+The converted bytes depend on nothing but the payload file, so they now live
+under the cache root in `graphics/sky-transcodes`. An entry records the device,
+inode, size, both mtime fields, and a CRC-32 of the payload, and every one of
+them has to match before the entry is used, along with the payload being exactly
+as long as its source. A new payload, a touched file, a damaged entry, or a
+wrong length each fall through to converting again, which is what every launch
+did before. Writes go to a temporary file and get renamed into place, and the
+directory is trimmed to 64 entries so old payloads do not pile up.
+
+Reading all twelve entries back costs about 5 ms of I/O. The first launch after a
+payload update still converts once. Point `MOCKTAIL_SKY_TRANSCODE_CACHE_DIR` at
+a path that cannot be written to turn the cache off.
 
 ### What the caches are, and what they are not
 
@@ -683,19 +717,22 @@ the file was still treated as owned, a successful POST would have written the
 tracker cookie back into the credential file. Only an explicitly supplied
 `MOCKTAIL_COOKIE_FILE` replaces the default jar now.
 
-### The largest remaining host cost
+### What is left on the host side
 
-About 200 ms of what is left is not the updater at all: `RunPayloadUpdatePreflight`
-spawns `mocktail_failure_dialog --progress-monitor` -- a GTK application -- before
-it spawns the updater, and the GTK start-up is the whole 200 ms. The updater
-itself, warm, takes 10 ms.
+The two changes above take about 200 ms of serial work off the front of the
+launch and about 190 ms of CPU off the threads that load the first frame.
 
-Opening that window only when there is an update to show progress for would take
-it to nothing, but the decision needs the configured check interval, which only
-the updater parses. Doing it properly means having the updater report whether it
-is about to download something, rather than having the launcher guess from a
-second read of the same config. That is worth doing, and it is not worth doing
-casually: it touches the path that downloads and promotes a payload.
+What remains is small and hard to move. The ELF import scan (~125 ms) maps the
+payload and resolves every undefined symbol the linker does not already know.
+Caching that scan would not help much: the addresses it resolves to belong to
+this process's mappings, so a record from a previous launch cannot supply them.
+`JNI_OnLoad` (~100 ms) is Roblox's own code. Every other host phase is single-digit
+milliseconds.
+
+The ~3.4 s between the engine startup calls returning and the first frame now
+dominates the timeline, and `perf record` puts about 80% of the process's startup
+CPU inside `libroblox.so`. The launch spends that window waiting on Roblox's own
+loading; the host layer underneath it has little left to give.
 
 ## Measuring
 

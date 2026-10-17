@@ -1,15 +1,24 @@
 #include "libc_shim/vulkan_etc1_sky_transcoder.h"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <mutex>
 #include <string>
+#include <string_view>
+#include <system_error>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -25,6 +34,313 @@ constexpr size_t kMaxSkyTextureSize = 16U * 1024U * 1024U;
 constexpr std::array<uint8_t, 12> kKtx1Identifier = {
     0xab, 0x4b, 0x54, 0x58, 0x20, 0x31, 0x31, 0xbb, 0x0d, 0x0a, 0x1a, 0x0a,
 };
+
+// On-disk cache entry layout. The payload follows a fixed 64-byte header that
+// records the identity of the source file, so a stale entry cannot be served
+// for a different texture that happens to share a name.
+constexpr std::array<char, 8> kCacheMagic = {'M', 'T', 'S', 'K', 'Y', '1',
+                                             '\0', '\0'};
+constexpr uint32_t kCacheVersion = 1;
+constexpr size_t kCacheHeaderBytes = 64;
+constexpr size_t kCacheOffsetMagic = 0;
+constexpr size_t kCacheOffsetVersion = 8;
+constexpr size_t kCacheOffsetPayloadBytes = 12;
+constexpr size_t kCacheOffsetSourceBytes = 16;
+constexpr size_t kCacheOffsetDevice = 24;
+constexpr size_t kCacheOffsetInode = 32;
+constexpr size_t kCacheOffsetMtimeSeconds = 40;
+constexpr size_t kCacheOffsetMtimeNanoseconds = 48;
+constexpr size_t kCacheOffsetCrc = 56;
+
+struct SourceIdentity {
+  uint64_t device = 0;
+  uint64_t inode = 0;
+  uint64_t size = 0;
+  int64_t mtime_seconds = 0;
+  int64_t mtime_nanoseconds = 0;
+};
+
+void StoreLe32(uint8_t* bytes, uint32_t value) {
+  bytes[0] = static_cast<uint8_t>(value);
+  bytes[1] = static_cast<uint8_t>(value >> 8);
+  bytes[2] = static_cast<uint8_t>(value >> 16);
+  bytes[3] = static_cast<uint8_t>(value >> 24);
+}
+
+void StoreLe64(uint8_t* bytes, uint64_t value) {
+  for (size_t index = 0; index < 8; ++index) {
+    bytes[index] = static_cast<uint8_t>(value >> (index * 8));
+  }
+}
+
+uint32_t LoadLe32(const uint8_t* bytes) {
+  return static_cast<uint32_t>(bytes[0]) |
+         (static_cast<uint32_t>(bytes[1]) << 8) |
+         (static_cast<uint32_t>(bytes[2]) << 16) |
+         (static_cast<uint32_t>(bytes[3]) << 24);
+}
+
+uint64_t LoadLe64(const uint8_t* bytes) {
+  uint64_t value = 0;
+  for (size_t index = 0; index < 8; ++index) {
+    value |= static_cast<uint64_t>(bytes[index]) << (index * 8);
+  }
+  return value;
+}
+
+// CRC-32 over the stored bytes. The rename that publishes an entry already
+// rules out a partial write; this rules out a damaged one, which a disk cache
+// read back once per launch is exactly the thing to be suspicious about.
+uint32_t Crc32(const uint8_t* data, size_t bytes) {
+  uint32_t crc = 0xffffffffU;
+  for (size_t index = 0; index < bytes; ++index) {
+    crc ^= data[index];
+    for (int bit = 0; bit < 8; ++bit) {
+      crc = (crc >> 1) ^ (0xedb88320U & (~(crc & 1U) + 1U));
+    }
+  }
+  return ~crc;
+}
+
+std::string CacheDirectory() {
+  const char* directory = std::getenv("MOCKTAIL_SKY_TRANSCODE_CACHE_DIR");
+  if (directory == nullptr || directory[0] == '\0') {
+    return {};
+  }
+  std::error_code error;
+  std::filesystem::create_directories(directory, error);
+  if (error) {
+    return {};
+  }
+  return std::string(directory);
+}
+
+std::string CacheFileName(const std::string_view path,
+                          const SourceIdentity& identity) {
+  // Only the file name is kept: the identity below already says which file this
+  // is, and two payloads can hold different textures under one name.
+  const std::size_t separator = path.find_last_of('/');
+  const std::string_view name = separator == std::string_view::npos
+                                    ? path
+                                    : path.substr(separator + 1);
+  std::string key;
+  key.reserve(name.size() + 64);
+  for (const char character : name) {
+    const bool safe = (character >= 'a' && character <= 'z') ||
+                      (character >= 'A' && character <= 'Z') ||
+                      (character >= '0' && character <= '9') ||
+                      character == '.' || character == '-' || character == '_';
+    key.push_back(safe ? character : '_');
+  }
+  key.push_back('-');
+  char digits[33] = {};
+  std::snprintf(digits, sizeof(digits), "%016llx%016llx",
+                static_cast<unsigned long long>(identity.device),
+                static_cast<unsigned long long>(identity.inode));
+  key.append(digits);
+  key.push_back('-');
+  std::snprintf(digits, sizeof(digits), "%016llx%08x%08llx",
+                static_cast<unsigned long long>(identity.size),
+                static_cast<unsigned>(identity.mtime_seconds),
+                static_cast<unsigned long long>(identity.mtime_nanoseconds));
+  key.append(digits);
+  key.append(".bc1");
+  return key;
+}
+
+bool ReadSourceIdentity(const char* path, SourceIdentity* identity) {
+  if (path == nullptr || identity == nullptr) {
+    return false;
+  }
+  struct stat metadata = {};
+  if (::stat(path, &metadata) != 0 || !S_ISREG(metadata.st_mode) ||
+      metadata.st_size < 0) {
+    return false;
+  }
+  identity->device = static_cast<uint64_t>(metadata.st_dev);
+  identity->inode = static_cast<uint64_t>(metadata.st_ino);
+  identity->size = static_cast<uint64_t>(metadata.st_size);
+  identity->mtime_seconds = static_cast<int64_t>(metadata.st_mtim.tv_sec);
+  identity->mtime_nanoseconds =
+      static_cast<int64_t>(metadata.st_mtim.tv_nsec);
+  return true;
+}
+
+bool LoadCachedTranscode(const std::string& file,
+                         const SourceIdentity& identity,
+                         std::vector<unsigned char>* data) {
+  const int descriptor =
+      open(file.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  if (descriptor < 0) {
+    return false;
+  }
+  auto release = [&]() { ::close(descriptor); };
+  std::array<uint8_t, kCacheHeaderBytes> header{};
+  size_t header_bytes = 0;
+  while (header_bytes < header.size()) {
+    const ssize_t received = read(descriptor, header.data() + header_bytes,
+                                  header.size() - header_bytes);
+    if (received == 0) {
+      release();
+      return false;
+    }
+    if (received < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      release();
+      return false;
+    }
+    header_bytes += static_cast<size_t>(received);
+  }
+  if (std::memcmp(header.data() + kCacheOffsetMagic, kCacheMagic.data(),
+                  kCacheMagic.size()) != 0 ||
+      LoadLe32(header.data() + kCacheOffsetVersion) != kCacheVersion ||
+      LoadLe64(header.data() + kCacheOffsetSourceBytes) != identity.size ||
+      LoadLe64(header.data() + kCacheOffsetDevice) != identity.device ||
+      LoadLe64(header.data() + kCacheOffsetInode) != identity.inode ||
+      static_cast<int64_t>(LoadLe64(header.data() + kCacheOffsetMtimeSeconds)) !=
+          identity.mtime_seconds ||
+      static_cast<int64_t>(LoadLe64(header.data() +
+                                    kCacheOffsetMtimeNanoseconds)) !=
+          identity.mtime_nanoseconds) {
+    release();
+    return false;
+  }
+  const uint32_t payload_bytes = LoadLe32(header.data() + kCacheOffsetPayloadBytes);
+  const uint32_t expected_crc = LoadLe32(header.data() + kCacheOffsetCrc);
+  // The transcode rewrites the file in place, so the entry has to be exactly
+  // the size of the texture it came from.
+  if (payload_bytes != identity.size || payload_bytes > kMaxSkyTextureSize) {
+    release();
+    return false;
+  }
+  std::vector<unsigned char> payload(payload_bytes);
+  size_t read_bytes = 0;
+  while (read_bytes < payload.size()) {
+    const ssize_t received = read(descriptor, payload.data() + read_bytes,
+                                  payload.size() - read_bytes);
+    if (received == 0) {
+      release();
+      return false;
+    }
+    if (received < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      release();
+      return false;
+    }
+    read_bytes += static_cast<size_t>(received);
+  }
+  // Nothing may follow the payload: a longer file is a different entry.
+  uint8_t trailing = 0;
+  const ssize_t extra = read(descriptor, &trailing, 1);
+  release();
+  if (extra != 0 ||
+      Crc32(payload.data(), payload.size()) != expected_crc) {
+    return false;
+  }
+  *data = std::move(payload);
+  return true;
+}
+
+// An entry names one file identity, so every payload leaves the previous
+// payload's entries behind. Nothing ever reads those again, so the directory is
+// trimmed back to a few payloads' worth. Twelve textures on a cold launch make
+// this a dozen scans of a directory that stays under the cap.
+constexpr std::size_t kMaximumCacheEntries = 64;
+
+void PruneStaleEntries(const std::filesystem::path& directory) {
+  std::error_code error;
+  std::vector<std::pair<std::int64_t, std::filesystem::path>> entries;
+  for (const auto& entry : std::filesystem::directory_iterator(
+           directory, std::filesystem::directory_options::skip_permission_denied,
+           error)) {
+    if (error || !entry.is_regular_file(error)) {
+      continue;
+    }
+    const auto written = entry.last_write_time().time_since_epoch().count();
+    entries.emplace_back(static_cast<std::int64_t>(written), entry.path());
+  }
+  if (entries.size() <= kMaximumCacheEntries) {
+    return;
+  }
+  std::sort(entries.begin(), entries.end());
+  const std::size_t excess = entries.size() - kMaximumCacheEntries;
+  for (std::size_t index = 0; index < excess; ++index) {
+    std::error_code remove_error;
+    std::filesystem::remove(entries[index].second, remove_error);
+  }
+}
+
+bool StoreCachedTranscode(const std::string& file,
+                          const SourceIdentity& identity,
+                          const std::vector<unsigned char>& data) {
+  if (data.size() > kMaxSkyTextureSize) {
+    return false;
+  }
+  static std::atomic<uint64_t> s_generation{0};
+  const std::string temporary =
+      file + ".tmp-" + std::to_string(getpid()) + "-" +
+      std::to_string(s_generation.fetch_add(1, std::memory_order_relaxed));
+  const int descriptor = open(temporary.c_str(),
+                              O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC |
+                                  O_NOFOLLOW,
+                              S_IRUSR | S_IWUSR);
+  if (descriptor < 0) {
+    return false;
+  }
+  auto discard = [&]() {
+    close(descriptor);
+    unlink(temporary.c_str());
+  };
+  std::array<uint8_t, kCacheHeaderBytes> header{};
+  std::memcpy(header.data() + kCacheOffsetMagic, kCacheMagic.data(),
+              kCacheMagic.size());
+  StoreLe32(header.data() + kCacheOffsetVersion, kCacheVersion);
+  StoreLe32(header.data() + kCacheOffsetPayloadBytes,
+            static_cast<uint32_t>(data.size()));
+  StoreLe64(header.data() + kCacheOffsetSourceBytes, identity.size);
+  StoreLe64(header.data() + kCacheOffsetDevice, identity.device);
+  StoreLe64(header.data() + kCacheOffsetInode, identity.inode);
+  StoreLe64(header.data() + kCacheOffsetMtimeSeconds,
+            static_cast<uint64_t>(identity.mtime_seconds));
+  StoreLe64(header.data() + kCacheOffsetMtimeNanoseconds,
+            static_cast<uint64_t>(identity.mtime_nanoseconds));
+  StoreLe32(header.data() + kCacheOffsetCrc, Crc32(data.data(), data.size()));
+
+  auto write_all = [&](const uint8_t* bytes, size_t count) {
+    size_t offset = 0;
+    while (offset < count) {
+      const ssize_t written =
+          write(descriptor, bytes + offset, count - offset);
+      if (written < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        return false;
+      }
+      offset += static_cast<size_t>(written);
+    }
+    return true;
+  };
+  if (!write_all(header.data(), header.size()) ||
+      !write_all(data.data(), data.size())) {
+    discard();
+    return false;
+  }
+  if (close(descriptor) != 0) {
+    unlink(temporary.c_str());
+    return false;
+  }
+  if (rename(temporary.c_str(), file.c_str()) != 0) {
+    unlink(temporary.c_str());
+    return false;
+  }
+  PruneStaleEntries(std::filesystem::path(file).parent_path());
+  return true;
+}
 
 struct Rgb {
   uint8_t r;
@@ -282,6 +598,17 @@ void ConvertEtc1RgbBlockToBc1(const uint8_t *etc1, uint8_t *bc1) {
   WriteLe32(bc1 + 4, indices);
 }
 
+std::mutex& TranscodeMemoryMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+std::unordered_map<std::string, std::vector<unsigned char>>&
+TranscodeMemory() {
+  static std::unordered_map<std::string, std::vector<unsigned char>> memo;
+  return memo;
+}
+
 bool TranscodeEtc1SkyTextureForVulkan(const char *path,
                                       std::vector<unsigned char> *data) {
   if (!IsBundledSkyTexture(path) || data == nullptr ||
@@ -289,17 +616,35 @@ bool TranscodeEtc1SkyTextureForVulkan(const char *path,
     return false;
   }
 
-  static std::mutex s_cache_mutex;
-  static std::unordered_map<std::string, std::vector<unsigned char>> s_cached_transcodes;
-
   const std::string path_key = path != nullptr ? path : "";
   {
-    std::lock_guard<std::mutex> lock(s_cache_mutex);
-    auto it = s_cached_transcodes.find(path_key);
-    if (it != s_cached_transcodes.end()) {
+    std::lock_guard<std::mutex> lock(TranscodeMemoryMutex());
+    auto it = TranscodeMemory().find(path_key);
+    if (it != TranscodeMemory().end()) {
       *data = it->second;
       return true;
     }
+  }
+
+  // The bundled sky textures are payload files, so their converted form only
+  // changes when the payload does. The directory is keyed by file identity, not
+  // by name, and every field of that identity has to agree before an entry is
+  // used; anything else is converted again and simply costs the launch the
+  // conversion it would have paid anyway.
+  const std::string directory = CacheDirectory();
+  SourceIdentity identity;
+  const bool cacheable =
+      !directory.empty() && ReadSourceIdentity(path, &identity);
+  const std::string cache_file =
+      cacheable ? directory + "/" + CacheFileName(path_key, identity)
+                : std::string();
+  if (cacheable && LoadCachedTranscode(cache_file, identity, data)) {
+    std::lock_guard<std::mutex> lock(TranscodeMemoryMutex());
+    TranscodeMemory()[path_key] = *data;
+    std::fprintf(stderr,
+                 "  [asset] Reused cached BC1 sky texture for Vulkan: %s\n",
+                 path);
+    return true;
   }
 
   if (!TranscodeKtx1Etc1(data)) {
@@ -307,8 +652,11 @@ bool TranscodeEtc1SkyTextureForVulkan(const char *path,
   }
 
   {
-    std::lock_guard<std::mutex> lock(s_cache_mutex);
-    s_cached_transcodes[path_key] = *data;
+    std::lock_guard<std::mutex> lock(TranscodeMemoryMutex());
+    TranscodeMemory()[path_key] = *data;
+  }
+  if (cacheable) {
+    (void)StoreCachedTranscode(cache_file, identity, *data);
   }
 
   std::fprintf(stderr,
@@ -316,6 +664,11 @@ bool TranscodeEtc1SkyTextureForVulkan(const char *path,
                "Vulkan: %s\n",
                path);
   return true;
+}
+
+void ResetEtc1SkyTranscodeMemoryCache() {
+  std::lock_guard<std::mutex> lock(TranscodeMemoryMutex());
+  TranscodeMemory().clear();
 }
 
 } // namespace libc_shim
