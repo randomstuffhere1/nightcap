@@ -13,9 +13,6 @@ namespace runtime {
 struct RuntimeConfigLoadResult {
   RuntimeConfig config;
   bool file_loaded = false;
-  // True when the settings window's own file was present and used. Reported so
-  // the window can show which values it is responsible for.
-  bool ui_config_loaded = false;
   std::string error;
 
   explicit operator bool() const { return error.empty(); }

@@ -44,9 +44,16 @@ Release notes on GitHub are taken from the matching section here.
 
 - Joining a game from a website link while already in a game no longer freezes Nightcap. It leaves the
   current game and joins the new one, and leaving that game returns to the home screen.
+- The loading window no longer gets a dock icon of its own. It now shows under Nightcap's icon.
 
 ### Changed
 
+- Replaced the settings window with a fuller one that edits `config.yaml` in place, keeping your comments,
+  order and line endings, instead of writing a separate `config.ui.yaml` that layered over it. Every
+  setting has a row, including the device identity, the window size, the proxy, Fleasion, the update source
+  and the Discord text and images, and the Advanced page edits `fflags.json` and opens the config folder. A
+  value Nightcap could not load is not saved, a setting changed from its default gets a reset button, and a
+  running Nightcap is offered a restart with the same options and environment it was started with.
 - The home screen and avatar editor have fewer long frames. PC profiles compile the app's menu scripts to
   native code and turn this off while you are in a game, so games run as before. Set
   `FFlagDebugLuauCodegenAll` in `fflags.json` to choose it yourself.

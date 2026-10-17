@@ -1,777 +1,1350 @@
-// Modified by vii from komaruworld/mocktail. See README "About this fork".
-//
-// A small GTK4 window for the settings that are worth changing without opening
-// a text editor. It reads and writes config.ui.yaml, never config.yaml, so the
-// hand-edited file and its comments are left exactly as they are. See
-// include/runtime/ui_config_overrides.h for why.
-
+#include <SDL3/SDL.h>
 #include <adwaita.h>
 
-#include <fcntl.h>
-#include <sys/types.h>
-#include <unistd.h>
-
-#include <cerrno>
-#include <cstdio>
+#include <chrono>
 #include <cstdlib>
-#include <cstring>
+#include <deque>
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "mocktail/platform/application_id.h"
+#include "mocktail/platform/sdl_window_icon_data.h"
 #include "runtime/environment.h"
+#include "runtime/running_instance.h"
 #include "runtime/runtime_paths.h"
-#include "runtime/sibling_executable.h"
-#include "runtime/ui_config_overrides.h"
+#include "ui/settings_model.h"
 
 namespace {
 
-using mocktail::runtime::UiConfigField;
-using mocktail::runtime::UiConfigOverrides;
+using mocktail::ui::ChoiceIndex;
+using mocktail::ui::DeviceChoice;
+using mocktail::ui::FFlagsDocument;
+using mocktail::ui::FrameRate;
+using mocktail::ui::FrameRateMode;
+using mocktail::ui::kNoChoice;
+using mocktail::ui::Setting;
+using mocktail::ui::SettingKind;
+using mocktail::ui::SettingsDocument;
+using mocktail::ui::SettingsGroup;
+using mocktail::ui::SettingsPage;
 
+using mocktail::platform::kApplicationId;
 
-constexpr char kApplicationId[] = "io.github.CoderDayton.nightcap";
+constexpr char kWindowStyle[] = R"(
+.navigation-sidebar > row { min-height: 44px; margin: 1px 6px; padding: 0 14px; }
+.notice-bar {
+  min-height: 54px; padding-right: 6px; background-color: @window_bg_color;
+  box-shadow: inset 0 1px alpha(@window_fg_color, 0.1);
+}
+)";
 
-// One control per field, so a change can be read back and the "set here" state
-// shown. The raw pointer is owned by its container, which outlives the row.
-struct FieldRow {
-  const UiConfigField* field = nullptr;
-  GtkWidget* container = nullptr;
-  // Exactly one of these is set, depending on the field's kind.
-  GtkWidget* control = nullptr;
-  GtkWidget* reset_button = nullptr;
-  // The list behind a drop-down, held explicitly so it cannot be collected
-  // while the drop-down still asks it questions. Relying on the drop-down's own
-  // reference turned out not to be enough: the model was already gone by the
-  // time the initial value was set, and every drop-down raised a list-model
-  // assertion on open.
-  GtkStringList* option_model = nullptr;
-  // The value the field had when the window opened, so Cancel can put it back.
-  std::string original;
-  // Whether the window is the reason this key is set, as opposed to
-  // config.yaml or the environment.
-  bool set_by_window = false;
-  // Where the effective value came from, shown as help text under the control.
-  std::string source = "default";
+struct SettingsWindow;
+
+struct Row {
+  SettingsWindow* window = nullptr;
+  const Setting* setting = nullptr;
+  GtkWidget* widget = nullptr;
+  // The custom frames-per-second row. Only a kFrameRate row has one.
+  GtkWidget* custom = nullptr;
+  // The button that puts the row back to its default. Shown only while the
+  // row is changed.
+  GtkWidget* reset = nullptr;
+  // The button that opens a file picker. Only a kFile row has one.
+  GtkWidget* pick = nullptr;
+  // Whether `widget` is an expander row whose own switch is this toggle.
+  bool expander_switch = false;
+  // A value the file holds that the row does not list. It is shown as one
+  // more choice so opening the window never changes it.
+  std::string unlisted;
+  // Whether the choices have been put in the drop-down yet.
+  bool choices_set = false;
+  std::vector<DeviceChoice> devices;
+  // The text a kText row was last filled with. A field that holds anything
+  // else has an edit that is not saved yet.
+  std::string shown;
 };
 
-struct Window {
-  AdwApplicationWindow* window = nullptr;
+struct SettingsWindow {
+  SettingsWindow(std::filesystem::path config_file,
+                 std::filesystem::path fflags_file)
+      : document(std::move(config_file)), fflags(std::move(fflags_file)) {}
+
+  SettingsDocument document;
+  FFlagsDocument fflags;
+  GtkWidget* widget = nullptr;
+  std::deque<Row> rows;
+  AdwNavigationSplitView* split = nullptr;
+  AdwNavigationPage* content_page = nullptr;
+  GtkStack* stack = nullptr;
   AdwToastOverlay* toasts = nullptr;
-  GtkWidget* status_label = nullptr;
-  GtkWidget* restart_button = nullptr;
-  // True while the controls are being given their initial values. Their change
-  // signals then mean nothing, because the user has not touched anything yet.
-  bool initializing = false;
-  // True once the window is closing. GTK emits property notifications while it
-  // tears widgets down, so a control's change signal can arrive after the
-  // widget it names is already being destroyed. Following the pointer then
-  // reads freed memory, which GTK catches as a list-model assertion and which
-  // turns into a crash.
-  bool tearing_down = false;
-  std::vector<FieldRow*> rows;
-  // Owns the field descriptions the rows point at. UiConfigFields() returns by
-  // value, so a row holding a pointer into that temporary would dangle the
-  // moment the loop that produced it ended.
-  std::vector<UiConfigField> fields;
-  UiConfigOverrides overrides;
-  std::filesystem::path config_ui_file;
-  std::string config_yaml_file;
+  std::vector<std::string> output_devices;
+  std::vector<std::string> input_devices;
+  // The card under the settings that says when changes take effect.
+  GtkRevealer* notice = nullptr;
+  GtkLabel* notice_label = nullptr;
+  // The button on that card that restarts a running Nightcap.
+  GtkWidget* restart = nullptr;
+  // Both empty when the window was not started by `mocktail --settings`.
+  std::filesystem::path instance_lock;
+  std::filesystem::path restart_program;
+  // The restart question is asked once per window.
+  bool asked_restart = false;
+  bool restarting = false;
+  // A change saved while the restart ran may not reach the new Nightcap.
+  bool saved_while_restarting = false;
+  // Set once the window is destroyed, after which its widgets are gone.
+  bool closed = false;
+  // The button on that card that takes the last saved change back.
+  GtkWidget* undo = nullptr;
+  // Set while rows are filled from the file, so that filling one is not
+  // taken for a change by the user.
+  bool refreshing = false;
+  Row* stepped = nullptr;
+  guint stepped_timer = 0;
 };
 
-Window* g_window = nullptr;
+std::string Text(std::string_view text) { return std::string(text); }
 
-
-// The environment beats every file, but the window is a separate process from
-// the app and cannot know what the app's environment will hold at launch. So
-// it does not pretend to lock controls it cannot reliably identify: the banner
-// states the order instead, and a key the environment does supply simply wins.
-
-std::string CurrentValue(FieldRow* row) {
-  // A control's change signal can arrive while the window is being destroyed,
-  // and reading the control then is a use-after-free rather than a value.
-  if (g_window != nullptr && g_window->tearing_down) {
-    return row->field->default_value;
-  }
-  if (row->field->boolean) {
-    return gtk_switch_get_active(GTK_SWITCH(row->control)) ? "true" : "false";
-  }
-  if (row->field->numeric) {
-    return std::to_string(
-        gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(row->control)));
-  }
-  if (row->field->free_text) {
-    const gchar* text = gtk_editable_get_text(GTK_EDITABLE(row->control));
-    return text != nullptr ? std::string(text) : std::string();
-  }
-  // gtk_drop_down_get_selected returns an index, so the value is read back out
-  // of the model rather than returned directly.
-  const guint selected = gtk_drop_down_get_selected(GTK_DROP_DOWN(row->control));
-  if (selected == GTK_INVALID_LIST_POSITION) {
-    return row->field->default_value;
-  }
-  GListModel* model = gtk_drop_down_get_model(GTK_DROP_DOWN(row->control));
-  if (model == nullptr) {
-    return row->field->default_value;
-  }
-  gpointer item = g_list_model_get_item(model, selected);
-  if (item == nullptr) {
-    return row->field->default_value;
-  }
-  std::string value;
-  if (GTK_IS_STRING_LIST(model)) {
-    const gchar* text = gtk_string_list_get_string(GTK_STRING_LIST(model),
-                                                   static_cast<guint>(selected));
-    if (text != nullptr) {
-      value = text;
+bool HideDescendant(GtkWidget* parent, const char* name) {
+  for (GtkWidget* child = gtk_widget_get_first_child(parent); child != nullptr;
+       child = gtk_widget_get_next_sibling(child)) {
+    if (gtk_widget_has_css_class(child, name)) {
+      gtk_widget_set_visible(child, FALSE);
+      return true;
+    }
+    if (HideDescendant(child, name)) {
+      return true;
     }
   }
-  g_object_unref(item);
-  return value.empty() ? row->field->default_value : value;
+  return false;
 }
 
-void SetControlValue(FieldRow* row, const std::string& value) {
-  if (row->field->boolean) {
-    gtk_switch_set_active(GTK_SWITCH(row->control), value == "true");
+void SetChoices(Row* row) {
+  GtkStringList* labels = gtk_string_list_new(nullptr);
+  for (const auto& choice : row->setting->choices) {
+    gtk_string_list_append(labels, Text(choice.label).c_str());
+  }
+  if (!row->unlisted.empty()) {
+    gtk_string_list_append(labels, row->unlisted.c_str());
+  }
+  adw_combo_row_set_model(ADW_COMBO_ROW(row->widget), G_LIST_MODEL(labels));
+  g_object_unref(labels);
+}
+
+std::vector<std::string> AudioDeviceNames(SDL_AudioDeviceID* ids, int count) {
+  std::vector<std::string> names;
+  for (int index = 0; ids != nullptr && index < count; ++index) {
+    if (const char* name = SDL_GetAudioDeviceName(ids[index])) {
+      names.emplace_back(name);
+    }
+  }
+  SDL_free(ids);
+  return names;
+}
+
+void FindAudioDevices(SettingsWindow* window) {
+  if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
     return;
   }
-  if (row->field->numeric) {
-    gtk_spin_button_set_value(GTK_SPIN_BUTTON(row->control),
-                              std::stod(value.empty() ? "0" : value));
-    return;
+  int count = 0;
+  SDL_AudioDeviceID* ids = SDL_GetAudioPlaybackDevices(&count);
+  window->output_devices = AudioDeviceNames(ids, count);
+  ids = SDL_GetAudioRecordingDevices(&count);
+  window->input_devices = AudioDeviceNames(ids, count);
+  SDL_QuitSubSystem(SDL_INIT_AUDIO);
+}
+
+void RefreshDeviceRow(Row* row, const std::string& value) {
+  const SettingsWindow& window = *row->window;
+  std::vector<DeviceChoice> devices = mocktail::ui::DeviceChoices(
+      *row->setting,
+      row->setting->key == "audio.input_device" ? window.input_devices
+                                                : window.output_devices,
+      value);
+  const std::string chosen =
+      value.empty() ? Text(row->setting->default_value) : value;
+  guint selected = 0;
+  GtkStringList* labels = gtk_string_list_new(nullptr);
+  for (std::size_t index = 0; index < devices.size(); ++index) {
+    gtk_string_list_append(labels, devices[index].label.c_str());
+    if (devices[index].value == chosen) {
+      selected = static_cast<guint>(index);
+    }
   }
-  if (row->field->free_text) {
-    gtk_editable_set_text(GTK_EDITABLE(row->control), value.c_str());
-    return;
+  row->devices = std::move(devices);
+  adw_combo_row_set_model(ADW_COMBO_ROW(row->widget), G_LIST_MODEL(labels));
+  g_object_unref(labels);
+  adw_combo_row_set_selected(ADW_COMBO_ROW(row->widget), selected);
+}
+
+// Shows the file's value in `row`. With `keep_edit`, text typed into the row
+// and not saved yet is left alone.
+void RefreshRow(Row* row, bool keep_edit) {
+  const Setting& setting = *row->setting;
+  const std::string value = row->window->document.Value(setting.key);
+  switch (setting.kind) {
+    case SettingKind::kToggle:
+      if (row->expander_switch) {
+        adw_expander_row_set_enable_expansion(
+            ADW_EXPANDER_ROW(row->widget),
+            mocktail::ui::ToggleState(setting, value));
+      } else {
+        adw_switch_row_set_active(ADW_SWITCH_ROW(row->widget),
+                                  mocktail::ui::ToggleState(setting, value));
+      }
+      break;
+    case SettingKind::kChoice: {
+      const std::size_t index = ChoiceIndex(setting, value);
+      std::string unlisted = index == kNoChoice ? value : std::string();
+      // The list changes only when the unlisted value does.
+      if (!row->choices_set || unlisted != row->unlisted) {
+        row->unlisted = std::move(unlisted);
+        row->choices_set = true;
+        SetChoices(row);
+      }
+      adw_combo_row_set_selected(
+          ADW_COMBO_ROW(row->widget),
+          static_cast<guint>(index == kNoChoice ? setting.choices.size()
+                                                : index));
+      break;
+    }
+    case SettingKind::kFrameRate: {
+      const FrameRate rate = mocktail::ui::ParseFrameRate(value);
+      adw_combo_row_set_selected(ADW_COMBO_ROW(row->widget),
+                                 static_cast<guint>(rate.mode));
+      if (rate.mode == FrameRateMode::kCustom) {
+        adw_spin_row_set_value(ADW_SPIN_ROW(row->custom), rate.custom);
+      }
+      gtk_widget_set_visible(row->custom, rate.mode == FrameRateMode::kCustom);
+      break;
+    }
+    case SettingKind::kNumber:
+      adw_spin_row_set_value(
+          ADW_SPIN_ROW(row->widget),
+          g_ascii_strtod(
+              Text(value.empty() ? setting.default_value : value).c_str(),
+              nullptr));
+      break;
+    case SettingKind::kText:
+    case SettingKind::kFile: {
+      const bool is_set = row->window->document.IsSet(setting.key);
+      const std::string text = is_set ? value : Text(setting.default_value);
+      const std::string current =
+          gtk_editable_get_text(GTK_EDITABLE(row->widget));
+      if (!keep_edit || current == row->shown) {
+        // Setting the same text again would mark the field as edited.
+        if (text != current) {
+          gtk_editable_set_text(GTK_EDITABLE(row->widget), text.c_str());
+        }
+        row->shown = text;
+      }
+      break;
+    }
+    case SettingKind::kDevice:
+      RefreshDeviceRow(row, value);
+      break;
+    case SettingKind::kEditor:
+    case SettingKind::kFolder:
+      break;
   }
-  for (guint index = 0; index < row->field->allowed_values.size(); ++index) {
-    if (row->field->allowed_values[index] == value) {
-      gtk_drop_down_set_selected(GTK_DROP_DOWN(row->control), index);
-      return;
+}
+
+// Shows the reset button of each row that differs from its default. Rows a
+// switched-off block leaves without effect are greyed out.
+void ShowChanged(SettingsWindow* window) {
+  for (Row& row : window->rows) {
+    gtk_widget_set_sensitive(row.widget,
+                             window->document.IsActive(row.setting->key));
+    if (row.reset != nullptr) {
+      gtk_widget_set_visible(row.reset,
+                             window->document.IsChanged(*row.setting));
     }
   }
 }
 
-void ShowToast(const std::string& message) {
-  if (g_window == nullptr || g_window->toasts == nullptr) {
-    return;
+// Shows every row as the file has it. Text typed into a row and not saved
+// yet stays, except in `saved_row`, whose text was just saved.
+void RefreshRows(SettingsWindow* window, const Row* saved_row = nullptr) {
+  window->refreshing = true;
+  for (Row& row : window->rows) {
+    RefreshRow(&row, &row != saved_row);
   }
-  AdwToast* toast = adw_toast_new(message.c_str());
-  adw_toast_set_timeout(toast, 4);
-  adw_toast_overlay_add_toast(ADW_TOAST_OVERLAY(g_window->toasts), toast);
+  window->refreshing = false;
+  ShowChanged(window);
 }
 
-void UpdateRowState(FieldRow* row);
-
-// Recomputes every row's "set here" marker and reset button. Called after any
-// change so the window always shows which values it is responsible for.
-void RefreshAllRows() {
-  if (g_window == nullptr) {
-    return;
-  }
-  for (FieldRow* row : g_window->rows) {
-    UpdateRowState(row);
-  }
+void ShowError(SettingsWindow* window, const std::string& error) {
+  AdwToast* toast = adw_toast_new(error.c_str());
+  adw_toast_set_use_markup(toast, FALSE);
+  adw_toast_set_timeout(toast, 0);
+  adw_toast_overlay_add_toast(window->toasts, toast);
 }
 
-void UpdateRowState(FieldRow* row) {
-  const std::string current = CurrentValue(row);
-  const bool differs = current != row->field->default_value;
-  const std::string* stored = g_window->overrides.Find(row->field->key);
-  row->set_by_window = stored != nullptr;
+constexpr char kSavedText[] =
+    "Saved. Changes apply the next time Nightcap starts.";
+constexpr char kRestartToApplyText[] =
+    "Saved. Restart Nightcap to apply the changes.";
 
-  // A control is only worth showing as changed when the window has actually
-  // set it, which is what the reset button reveals.
-  if (row->reset_button != nullptr) {
-    gtk_widget_set_visible(row->reset_button, row->set_by_window);
-  }
-  gtk_widget_set_sensitive(row->container, TRUE);
-  (void)differs;
-}
-
-void OnFieldChanged(GtkWidget* control, gpointer user_data) {
-  (void)control;
-  auto* row = static_cast<FieldRow*>(user_data);
-  if (g_window == nullptr || row->field == nullptr) {
-    return;
-  }
-  // Setting a control's initial value emits its change signal. Treating that
-  // as an edit would leave the window claiming unsaved changes before the user
-  // has touched it, and would mark a field as set when the user never chose it.
-  if (g_window->initializing) {
-    return;
-  }
-  // The same signal arrives while the window is being torn down, when the
-  // control may already be destroyed. Reading it then is a use-after-free.
-  if (g_window->tearing_down) {
-    return;
-  }
-  const std::string value = CurrentValue(row);
+struct RestartJob {
+  std::filesystem::path instance_lock;
+  std::filesystem::path restart_program;
   std::string error;
-  if (!mocktail::runtime::ValidateUiConfigValue(row->field->key, value, &error)) {
-    // Should not happen, because the control constrains the value, but a
-    // rejected value must never reach the file.
-    ShowToast(error);
+};
+
+void RunRestart(GTask* task, gpointer, gpointer task_data, GCancellable*) {
+  auto* job = static_cast<RestartJob*>(task_data);
+  // Long enough for Roblox to finish closing. Past it, Nightcap may still
+  // close on the SIGTERM it was sent, and nothing starts it again.
+  const bool restarted = mocktail::runtime::RestartRunningInstance(
+      job->instance_lock, job->restart_program, std::chrono::minutes(2),
+      &job->error);
+  g_task_return_boolean(task, restarted);
+}
+
+void OnRestartDone(GObject*, GAsyncResult* result, gpointer user_data) {
+  auto* window = static_cast<SettingsWindow*>(user_data);
+  GTask* task = G_TASK(result);
+  const auto* job = static_cast<const RestartJob*>(g_task_get_task_data(task));
+  window->restarting = false;
+  const bool restarted = g_task_propagate_boolean(task, nullptr);
+  // Closing the window while the restart ran must not end the process
+  // between closing Nightcap and starting it again.
+  g_application_release(g_application_get_default());
+  if (window->closed) {
     return;
   }
-  if (value == row->field->default_value) {
-    g_window->overrides.Clear(row->field->key);
+  if (restarted && !window->saved_while_restarting) {
+    gtk_label_set_text(window->notice_label, "Saved. Nightcap restarted.");
+    gtk_widget_set_visible(window->restart, FALSE);
+    return;
+  }
+  gtk_label_set_text(window->notice_label, kRestartToApplyText);
+  gtk_widget_set_sensitive(window->restart, TRUE);
+  if (!restarted) {
+    ShowError(window, job->error);
+  }
+}
+
+void SaveStepped(SettingsWindow* window);
+
+void StartRestart(SettingsWindow* window) {
+  if (window->restarting) {
+    return;
+  }
+  SaveStepped(window);
+  window->restarting = true;
+  window->saved_while_restarting = false;
+  gtk_widget_set_sensitive(window->restart, FALSE);
+  gtk_label_set_text(window->notice_label, "Restarting Nightcap…");
+  g_application_hold(g_application_get_default());
+  auto* job = new RestartJob{window->instance_lock, window->restart_program,
+                             std::string()};
+  GTask* task = g_task_new(nullptr, nullptr, OnRestartDone, window);
+  g_task_set_task_data(task, job, [](gpointer data) {
+    delete static_cast<RestartJob*>(data);
+  });
+  g_task_run_in_thread(task, RunRestart);
+  g_object_unref(task);
+}
+
+void OnRestartClicked(GtkButton*, gpointer user_data) {
+  StartRestart(static_cast<SettingsWindow*>(user_data));
+}
+
+void OnRestartResponse(AdwAlertDialog*, const char* response,
+                       gpointer user_data) {
+  if (g_strcmp0(response, "restart") == 0) {
+    StartRestart(static_cast<SettingsWindow*>(user_data));
+  }
+}
+
+void AskRestart(SettingsWindow* window) {
+  AdwDialog* question = adw_alert_dialog_new(
+      "Restart Nightcap?",
+      "Nightcap is running, so the changes apply after it restarts. "
+      "Restarting leaves the game you are in.");
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(question), "later",
+                                 "Later", "restart", "Restart Now", nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(question),
+                                           "restart",
+                                           ADW_RESPONSE_SUGGESTED);
+  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(question), "restart");
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(question), "later");
+  g_signal_connect(question, "response", G_CALLBACK(OnRestartResponse),
+                   window);
+  adw_dialog_present(question, window->widget);
+}
+
+// Shows the saved card, and while Nightcap runs, offers to restart it.
+void OnChangeSaved(SettingsWindow* window) {
+  gtk_revealer_set_reveal_child(window->notice, TRUE);
+  if (window->restarting) {
+    window->saved_while_restarting = true;
+    return;
+  }
+  // An empty lock path finds nothing running.
+  const mocktail::runtime::RunningInstance instance =
+      mocktail::runtime::FindRunningInstance(window->instance_lock);
+  const bool can_restart = instance.running && instance.pid > 0 &&
+                           !window->restart_program.empty();
+  gtk_label_set_text(window->notice_label,
+                     instance.running ? kRestartToApplyText : kSavedText);
+  gtk_widget_set_visible(window->restart, can_restart);
+  gtk_widget_set_sensitive(window->restart, TRUE);
+  if (can_restart && !window->asked_restart) {
+    window->asked_restart = true;
+    AskRestart(window);
+  }
+}
+
+// Shows how saving `row` went, then shows every row as the file now has it.
+// `before` is the document's count of saved changes from before the save.
+void ShowSaved(Row* row, std::size_t before, bool saved,
+               const std::string& error) {
+  SettingsWindow* window = row->window;
+  if (!saved) {
+    ShowError(window, error);
+  } else if (window->document.saved_changes() != before) {
+    OnChangeSaved(window);
+  }
+  gtk_widget_set_visible(window->undo, window->document.CanUndo());
+  // On failure the rows go back to what the file holds. A text that was
+  // refused stays in its field, so it can be corrected.
+  RefreshRows(window, saved ? row : nullptr);
+}
+
+std::string SteppedValue(const Row& row) {
+  if (row.setting->kind == SettingKind::kNumber) {
+    return mocktail::ui::NumberValue(
+        adw_spin_row_get_value(ADW_SPIN_ROW(row.widget)));
+  }
+  FrameRate rate;
+  rate.mode = static_cast<FrameRateMode>(
+      adw_combo_row_get_selected(ADW_COMBO_ROW(row.widget)));
+  rate.custom =
+      static_cast<int>(adw_spin_row_get_value(ADW_SPIN_ROW(row.custom)));
+  return mocktail::ui::FrameRateValue(rate);
+}
+
+void SaveStepped(SettingsWindow* window) {
+  if (window->stepped_timer != 0) {
+    g_source_remove(window->stepped_timer);
+    window->stepped_timer = 0;
+  }
+  Row* row = std::exchange(window->stepped, nullptr);
+  if (row == nullptr || window->closed) {
+    return;
+  }
+  std::string error;
+  const std::size_t before = window->document.saved_changes();
+  if (!window->document.Set(row->setting->key, SteppedValue(*row), &error)) {
+    ShowError(window, error);
+    RefreshRows(window);
+    return;
+  }
+  if (window->document.saved_changes() != before) {
+    OnChangeSaved(window);
+  }
+  gtk_widget_set_visible(window->undo, window->document.CanUndo());
+  ShowChanged(window);
+}
+
+SettingsDocument& EditDocument(SettingsWindow* window) {
+  SaveStepped(window);
+  return window->document;
+}
+
+void Apply(Row* row, const std::string& value) {
+  SettingsWindow* window = row->window;
+  if (window->refreshing) {
+    return;
+  }
+  SettingsDocument& document = EditDocument(window);
+  std::string error;
+  const std::size_t before = document.saved_changes();
+  const bool saved = document.Set(row->setting->key, value, &error);
+  ShowSaved(row, before, saved, error);
+}
+
+void OnUndo(GtkButton*, gpointer user_data) {
+  auto* window = static_cast<SettingsWindow*>(user_data);
+  std::string error;
+  if (!EditDocument(window).Undo(&error)) {
+    ShowError(window, error);
+  }
+  gtk_widget_set_visible(window->undo, FALSE);
+  RefreshRows(window);
+}
+
+// Holding + on a spin row steps it many times a second. The file is saved
+// once, half a second after the last step.
+void OnSteppedValueChanged(GObject*, GParamSpec*, gpointer user_data) {
+  Row* row = static_cast<Row*>(user_data);
+  SettingsWindow* window = row->window;
+  if (window->refreshing) {
+    return;
+  }
+  if (window->stepped != row) {
+    SaveStepped(window);
   } else {
-    g_window->overrides.Set(row->field->key, value);
+    g_source_remove(window->stepped_timer);
   }
-  UpdateRowState(row);
-  if (g_window->status_label != nullptr) {
-    gtk_label_set_text(GTK_LABEL(g_window->status_label),
-                       "Unsaved changes. They apply on the next launch.");
-  }
+  window->stepped = row;
+  window->stepped_timer = g_timeout_add(
+      500,
+      [](gpointer data) -> gboolean {
+        auto* stepped_window = static_cast<SettingsWindow*>(data);
+        // The source ends when this returns, so it is not removed again.
+        stepped_window->stepped_timer = 0;
+        SaveStepped(stepped_window);
+        return G_SOURCE_REMOVE;
+      },
+      window);
 }
 
-void OnResetClicked(GtkWidget* button, gpointer user_data) {
-  (void)button;
-  auto* row = static_cast<FieldRow*>(user_data);
-  if (g_window == nullptr || row->field == nullptr) {
-    return;
+gboolean OnNumberOutput(AdwSpinRow* spin, gpointer user_data) {
+  const Row* row = static_cast<const Row*>(user_data);
+  if (adw_spin_row_get_value(spin) != 0) {
+    return FALSE;
   }
-  g_window->overrides.Clear(row->field->key);
-  // A free-text field is not constrained, so reset is the only way back to the
-  // default and the control has to be told.
-  SetControlValue(row, row->field->default_value);
-  UpdateRowState(row);
-  if (g_window->status_label != nullptr) {
-    gtk_label_set_text(GTK_LABEL(g_window->status_label),
-                       "Unsaved changes. They apply on the next launch.");
-  }
+  gtk_editable_set_text(GTK_EDITABLE(spin),
+                        Text(row->setting->zero_label).c_str());
+  return TRUE;
 }
 
-// Reads the current values into the override set and writes the file. Returns
-// whether it succeeded, and reports why through the status label.
-bool SaveChanges() {
-  if (g_window == nullptr) {
-    return false;
+gint OnNumberInput(AdwSpinRow* spin, double* value, gpointer user_data) {
+  const Row* row = static_cast<const Row*>(user_data);
+  if (g_ascii_strcasecmp(gtk_editable_get_text(GTK_EDITABLE(spin)),
+                         Text(row->setting->zero_label).c_str()) != 0) {
+    return FALSE;
   }
-  for (FieldRow* row : g_window->rows) {
-    const std::string value = CurrentValue(row);
-    std::string error;
-    if (!mocktail::runtime::ValidateUiConfigValue(row->field->key, value, &error)) {
-      if (g_window->status_label != nullptr) {
-        gtk_label_set_text(GTK_LABEL(g_window->status_label), error.c_str());
-      }
-      return false;
-    }
-    if (value == row->field->default_value) {
-      g_window->overrides.Clear(row->field->key);
-    } else {
-      g_window->overrides.Set(row->field->key, value);
-    }
-  }
+  *value = 0;
+  return TRUE;
+}
+
+void OnTextApplied(AdwEntryRow* entry, gpointer user_data) {
+  Row* row = static_cast<Row*>(user_data);
+  SettingsDocument& document = EditDocument(row->window);
   std::string error;
-  if (!mocktail::runtime::SaveUiConfigOverrides(g_window->config_ui_file,
-                                       g_window->overrides, &error)) {
-    if (g_window->status_label != nullptr) {
-      gtk_label_set_text(GTK_LABEL(g_window->status_label), error.c_str());
-    }
-    ShowToast("Could not save settings");
-    return false;
-  }
-  RefreshAllRows();
-  if (g_window->status_label != nullptr) {
-    gtk_label_set_text(GTK_LABEL(g_window->status_label),
-                       g_window->overrides.empty()
-                           ? "Saved. No settings are set in this window."
-                           : "Saved. Changes apply on the next launch.");
-  }
-  return true;
+  const std::size_t before = document.saved_changes();
+  const std::string_view text = gtk_editable_get_text(GTK_EDITABLE(entry));
+  // A field with no default left empty means unset, not an empty text the
+  // loader would refuse.
+  const bool saved = text.empty() && row->setting->default_value.empty()
+                         ? document.Set(row->setting->key, text, &error)
+                         : document.SetText(row->setting->key, text, &error);
+  ShowSaved(row, before, saved, error);
 }
 
-void OnSaveClicked(GtkWidget* button, gpointer user_data) {
-  (void)button;
-  (void)user_data;
-  if (SaveChanges()) {
-    ShowToast("Settings saved");
-  }
-}
-
-void OnResetAllClicked(GtkWidget* button, gpointer user_data) {
-  (void)button;
-  (void)user_data;
-  if (g_window == nullptr) {
-    return;
-  }
-  AdwAlertDialog* dialog = ADW_ALERT_DIALOG(
-      adw_alert_dialog_new("Reset everything?",
-                           "Every setting this window manages goes back to "
-                           "its default. Your config.yaml is not touched."));
-  adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "cancel",
-                                  "Cancel");
-  adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "reset", "Reset");
-  adw_alert_dialog_set_response_appearance(
-      ADW_ALERT_DIALOG(dialog), "reset", ADW_RESPONSE_DESTRUCTIVE);
-  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dialog), "cancel");
-  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
-  g_signal_connect(dialog, "response", G_CALLBACK(+[](AdwAlertDialog* source,
-                                                      char* response,
-                                                      gpointer data) -> void {
-                     (void)data;
-                     if (std::string_view(response) != "reset") {
-                       return;
-                     }
-                     if (g_window == nullptr) {
-                       return;
-                     }
-                     g_window->overrides = UiConfigOverrides{};
-                     for (FieldRow* row : g_window->rows) {
-                       SetControlValue(row, row->field->default_value);
-                     }
-                     RefreshAllRows();
-                     if (g_window->status_label != nullptr) {
-                       gtk_label_set_text(
-                           GTK_LABEL(g_window->status_label),
-                           "Unsaved changes. They apply on the next launch.");
-                     }
-                     (void)source;
-                   }),
-                   nullptr);
-  adw_dialog_present(ADW_DIALOG(dialog), GTK_WIDGET(g_window->window));
-}
-
-// Relaunching drops whatever the user is in, so it is always asked for and
-// never done without an answer. The environment is passed on so the relaunched
-// process behaves identically.
-// Closes this window shortly after a successful restart, so the new process
-// can claim the display before this one lets go. A named function rather than a
-// lambda inside G_CALLBACK, whose macro argument cannot contain a top-level
-// comma.
-gboolean CloseWindowAfterRestart(gpointer) {
-  if (g_window != nullptr && g_window->window != nullptr) {
-    gtk_window_close(GTK_WINDOW(g_window->window));
-  }
-  return G_SOURCE_REMOVE;
-}
-
-// Relaunches Nightcap, leaving the window open with the reason on screen if it
-// cannot. Returns whether the app was started.
-bool RestartNightcap(AdwDialog* source) {
-  // The app, not this window: the two are installed into the same directory.
-  //
-  // Going through a shell was the original approach and it was wrong twice
-  // over: the command line said /proc/self/exe, which inside a spawned shell is
-  // the shell's own executable, so it started a shell instead of the app. fork
-  // and exec avoids the shell entirely, and setsid detaches the new session so
-  // closing this process does not take the app with it.
-  const std::filesystem::path app =
-      mocktail::runtime::SiblingExecutable("mocktail");
-  if (app.empty()) {
-    ShowToast("Cannot find Nightcap next to this window");
-    adw_dialog_close(ADW_DIALOG(source));
-    return false;
-  }
-  const pid_t child = fork();
-  if (child < 0) {
-    ShowToast(std::string("Could not restart: ") + std::strerror(errno));
-    adw_dialog_close(ADW_DIALOG(source));
-    return false;
-  }
-  if (child == 0) {
-    setsid();
-    // The app outlives this command, so it must not keep the caller's terminal
-    // attached. A failure here is not worth reporting: the app has its own
-    // logging and this window is about to close either way.
-    const int null_device = ::open("/dev/null", O_RDWR);
-    if (null_device >= 0) {
-      ::dup2(null_device, STDIN_FILENO);
-      ::dup2(null_device, STDOUT_FILENO);
-      ::dup2(null_device, STDERR_FILENO);
-      if (null_device > STDERR_FILENO) {
-        ::close(null_device);
-      }
-    }
-    const std::string path = app.string();
-    const char* arguments[] = {path.c_str(), nullptr};
-    execv(path.c_str(), const_cast<char* const*>(arguments));
-    _exit(EXIT_FAILURE);
-  }
-  // The app is its own process now, so this window can go -- but only on this
-  // path, so a failed spawn leaves the window up with the reason on screen
-  // rather than closing and looking as though it worked.
-  g_timeout_add(600, CloseWindowAfterRestart, nullptr);
-  return true;
-}
-
-void OnRestartClicked(GtkWidget* button, gpointer user_data) {
-  (void)button;
-  (void)user_data;
-  if (g_window == nullptr) {
-    return;
-  }
-  AdwAlertDialog* dialog = ADW_ALERT_DIALOG(
-      adw_alert_dialog_new("Restart Nightcap?",
-                           "Settings are read at launch, so they take effect "
-                           "after a restart. Anything you are in the middle "
-                           "of will be closed."));
-  adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "cancel",
-                                  "Cancel");
-  adw_alert_dialog_add_response(ADW_ALERT_DIALOG(dialog), "restart",
-                                  "Restart");
-  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(dialog),
-                                             "restart",
-                                             ADW_RESPONSE_DESTRUCTIVE);
-  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(dialog), "cancel");
-  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(dialog), "cancel");
-  g_signal_connect(dialog, "response", G_CALLBACK(+[](AdwAlertDialog* source,
-                                                      char* response,
-                                                      gpointer data) -> void {
-                     (void)data;
-                     if (std::string_view(response) != "restart" ||
-                         g_window == nullptr) {
-                       return;
-                     }
-                     // Save first: a restart that loses the change the user
-                     // just made would be worse than not restarting.
-                     if (!SaveChanges()) {
-                       adw_dialog_close(ADW_DIALOG(source));
-                       return;
-                     }
-                     RestartNightcap(ADW_DIALOG(source));
-                   }),
-                   nullptr);
-  adw_dialog_present(ADW_DIALOG(dialog), GTK_WIDGET(g_window->window));
-}
-
-// Returns gboolean because close-request does: returning anything non-zero
-// stops the close. A void handler here left whatever was in the return
-// register to decide, which blocked the window from closing at all.
-gboolean OnCloseRequested(GtkWindow* window, gpointer user_data) {
-  (void)window;
-  (void)user_data;
-  if (g_window != nullptr) {
-    // Marked before anything else, because everything after this runs while GTK
-    // is about to destroy the controls.
-    g_window->tearing_down = true;
-    // Every row's control and reset button, disconnected by the row pointer
-    // they were connected with. GTK emits property notifications while tearing
-    // widgets down, so a change signal can arrive after the widget it names is
-    // already being freed; reading it then is a use-after-free. Disconnecting
-    // stops the callback rather than relying on the flag alone to ignore it.
-    for (FieldRow* row : g_window->rows) {
-      if (row->control != nullptr) {
-        g_signal_handlers_disconnect_by_data(row->control, row);
-      }
-      if (row->reset_button != nullptr) {
-        g_signal_handlers_disconnect_by_data(row->reset_button, row);
-      }
-    }
-    // Closing without saving must not leave a half-applied change in memory
-    // that the next open would then show as saved. Anything the user did not
-    // save is simply not written, which is what closing without saving means.
-    g_window->overrides = UiConfigOverrides{};
-    // The drop-down models are deliberately NOT released here. GTK is about to
-    // destroy the drop-downs, and it asks its model for an item count while
-    // doing so; freeing the model first leaves it reading a dangling pointer,
-    // which is a list-model assertion and then an abort. The window is the
-    // whole process and exits immediately, so the reference is left to go with
-    // it rather than released at a moment when it cannot be released safely.
-  }
-  // FALSE allows the close to proceed.
-  return FALSE;
-}
-
-GtkWidget* BuildFieldRow(FieldRow* row) {
-  GtkWidget* list = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-  gtk_widget_set_margin_top(list, 6);
-  gtk_widget_set_margin_bottom(list, 6);
-
-  GtkWidget* labels = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
-  gtk_widget_set_valign(labels, GTK_ALIGN_CENTER);
-  GtkWidget* title = gtk_label_new(row->field->key.c_str());
-  gtk_label_set_xalign(GTK_LABEL(title), 0.0f);
-  gtk_label_set_selectable(GTK_LABEL(title), TRUE);
-  gtk_box_append(GTK_BOX(labels), title);
-  GtkWidget* help = gtk_label_new(row->field->help.c_str());
-  gtk_label_set_xalign(GTK_LABEL(help), 0.0f);
-  gtk_widget_add_css_class(help, "dim-label");
-  gtk_label_set_wrap(GTK_LABEL(help), TRUE);
-  gtk_label_set_max_width_chars(GTK_LABEL(help), 52);
-  gtk_box_append(GTK_BOX(labels), help);
-  gtk_widget_set_hexpand(labels, TRUE);
-  gtk_box_append(GTK_BOX(list), labels);
-
-  if (row->field->boolean) {
-    row->control = gtk_switch_new();
-    gtk_widget_set_valign(row->control, GTK_ALIGN_CENTER);
-    gtk_widget_set_halign(row->control, GTK_ALIGN_END);
-    g_signal_connect(row->control, "state-set",
-                     G_CALLBACK(+[](GtkSwitch* source, gboolean state,
-                                    gpointer data) -> gboolean {
-                       (void)source;
-                       (void)state;
-                       OnFieldChanged(nullptr, data);
-                       return TRUE;
-                     }),
-                     row);
-  } else if (row->field->numeric) {
-    row->control = gtk_spin_button_new_with_range(
-        static_cast<double>(row->field->minimum),
-        static_cast<double>(row->field->maximum), 1.0);
-    gtk_widget_set_valign(row->control, GTK_ALIGN_CENTER);
-    gtk_spin_button_set_numeric(GTK_SPIN_BUTTON(row->control), TRUE);
-    g_signal_connect(row->control, "value-changed",
-                     G_CALLBACK(+[](GtkSpinButton* source, gpointer data)
-                                    -> void {
-                       (void)source;
-                       OnFieldChanged(nullptr, data);
-                     }),
-                     row);
-  } else if (row->field->free_text) {
-    row->control = gtk_entry_new();
-    gtk_widget_set_valign(row->control, GTK_ALIGN_CENTER);
-    gtk_widget_set_size_request(row->control, 260, -1);
-    g_signal_connect(row->control, "changed",
-                     G_CALLBACK(+[](GtkEditable* source, gpointer data)
-                                    -> void {
-                       (void)source;
-                       OnFieldChanged(nullptr, data);
-                     }),
-                     row);
-  } else {
-    // gtk_string_list_new takes a NULL-terminated list of strings, not a
-    // count, so the values are collected into a temporary vector of pointers.
-    std::vector<const gchar*> strings;
-    for (const std::string& value : row->field->allowed_values) {
-      strings.push_back(value.c_str());
-    }
-    strings.push_back(nullptr);
-    GtkStringList* options = gtk_string_list_new(strings.data());
-    // Kept on the row: see option_model above.
-    row->option_model = options;
-    row->control = gtk_drop_down_new(G_LIST_MODEL(options), nullptr);
-    gtk_widget_set_valign(row->control, GTK_ALIGN_CENTER);
-    g_signal_connect(row->control, "notify::selected",
-                     G_CALLBACK(+[](GObject* source, GParamSpec* spec,
-                                    gpointer data) -> void {
-                       (void)source;
-                       (void)spec;
-                       OnFieldChanged(nullptr, data);
-                     }),
-                     row);
-  }
-  gtk_box_append(GTK_BOX(list), row->control);
-
-  row->reset_button = gtk_button_new_from_icon_name("edit-undo-symbolic");
-  gtk_widget_set_valign(row->reset_button, GTK_ALIGN_CENTER);
-  gtk_widget_set_tooltip_text(row->reset_button,
-                              "Clear this setting and use the default");
-  g_signal_connect(row->reset_button, "clicked", G_CALLBACK(OnResetClicked),
-                   row);
-  gtk_box_append(GTK_BOX(list), row->reset_button);
-
-  row->container = list;
-  return list;
-}
-
-bool TabMatches(const std::string& tab, const UiConfigField& field) {
-  if (tab == "Graphics") {
-    return field.key.rfind("graphics.", 0) == 0 ||
-           field.key.rfind("performance.", 0) == 0;
-  }
-  if (tab == "Input") {
-    return field.key.rfind("input.", 0) == 0 ||
-           field.key.rfind("compatibility.", 0) == 0;
-  }
-  if (tab == "Audio") {
-    return field.key.rfind("audio.", 0) == 0;
-  }
-  if (tab == "Integrations") {
-    return field.key.rfind("integrations.", 0) == 0;
-  }
-  return field.key.rfind("appearance.", 0) == 0 ||
-         field.key.rfind("network.", 0) == 0 ||
-         field.key.rfind("runtime.", 0) == 0 ||
-         field.key.rfind("window.", 0) == 0;
-}
-
-void OnWindowActivate(AdwApplication* application, gpointer user_data) {
-  (void)user_data;
-  static bool created = false;
-  if (created) {
-    return;
-  }
-  created = true;
-
-  auto* window = new Window();
-  g_window = window;
-  window->fields = mocktail::runtime::UiConfigFields();
-
-  // The same paths the app resolves, so the window edits the file the app reads
-  // rather than a path it guessed.
-  const mocktail::runtime::RuntimePaths paths =
-      mocktail::runtime::RuntimePaths::FromEnvironment(mocktail::runtime::ProcessEnvironment());
-  window->config_ui_file =
-      paths.config_file().parent_path() / mocktail::runtime::kUiConfigFileName;
-  window->config_yaml_file = paths.config_file().string();
-
-  bool ui_loaded = false;
+void OnReset(GtkButton*, gpointer user_data) {
+  Row* row = static_cast<Row*>(user_data);
+  SettingsDocument& document = EditDocument(row->window);
   std::string error;
-  if (!mocktail::runtime::LoadUiConfigOverrides(window->config_ui_file, &window->overrides,
-                                      &ui_loaded, &error)) {
-    // A file the window cannot read is reported rather than ignored: starting
-    // from an empty set would let saving overwrite settings the user already
-    // has.
-    g_printerr("Cannot read %s: %s\n", window->config_ui_file.c_str(),
-               error.c_str());
-  }
+  const std::size_t before = document.saved_changes();
+  const bool saved = document.Reset(*row->setting, &error);
+  ShowSaved(row, before, saved, error);
+}
 
-  window->window =
-      ADW_APPLICATION_WINDOW(adw_application_window_new(GTK_APPLICATION(
-          application)));
-  gtk_window_set_title(GTK_WINDOW(window->window), "Nightcap Settings");
-  gtk_window_set_default_size(GTK_WINDOW(window->window), 760, 620);
+void OnToggleChanged(GObject* object, GParamSpec*, gpointer user_data) {
+  Apply(static_cast<Row*>(user_data),
+        adw_switch_row_get_active(ADW_SWITCH_ROW(object)) ? "true" : "false");
+}
 
-  // A plain box rather than AdwToolbarView: the libadwaita available here does
-  // not have it, and a window this simple does not need the extra machinery.
-  GtkWidget* root = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  GtkWidget* header = adw_header_bar_new();
-  adw_header_bar_set_title_widget(
-      ADW_HEADER_BAR(header),
-      adw_window_title_new("Nightcap Settings",
-                           "Changes apply on the next launch"));
-  gtk_box_append(GTK_BOX(root), header);
+void OnExpanderToggled(GObject* object, GParamSpec*, gpointer user_data) {
+  Apply(static_cast<Row*>(user_data),
+        adw_expander_row_get_enable_expansion(ADW_EXPANDER_ROW(object))
+            ? "true"
+            : "false");
+}
 
-  window->toasts = ADW_TOAST_OVERLAY(adw_toast_overlay_new());
-
-  // The content goes inside the toast overlay rather than beside it, so a
-  // toast floats over the window instead of the overlay claiming layout space
-  // and squeezing the list.
-  GtkWidget* box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-  adw_toast_overlay_set_child(window->toasts, box);
-  gtk_widget_set_vexpand(GTK_WIDGET(window->toasts), TRUE);
-  gtk_box_append(GTK_BOX(root), GTK_WIDGET(window->toasts));
-
-  // A banner explaining the two-file arrangement, because a user who
-  // hand-edits config.yaml and then finds their change ignored needs to know
-  // why without reading the source.
-  GtkWidget* banner = adw_banner_new(
-      "Settings saved here override your config.yaml. A value set in this "
-      "window wins over the same key in config.yaml; clear it here to go back "
-      "to your own value.");
-  adw_banner_set_button_label(ADW_BANNER(banner), "Open config.yaml");
-  adw_banner_set_revealed(ADW_BANNER(banner), TRUE);
-  g_signal_connect(banner, "button-clicked",
-                   G_CALLBACK(+[](AdwBanner* source, gpointer data) -> void {
-                     (void)source;
-                     (void)data;
-                     if (g_window == nullptr) {
-                       return;
-                     }
-                     const std::string uri =
-                         "file://" + g_window->config_yaml_file;
-                     g_app_info_launch_default_for_uri(uri.c_str(), nullptr,
-                                                       nullptr);
-                   }),
-                   nullptr);
-  gtk_box_append(GTK_BOX(box), banner);
-
-  GtkWidget* notebook = gtk_notebook_new();
-  gtk_widget_set_vexpand(notebook, TRUE);
-  gtk_box_append(GTK_BOX(box), notebook);
-
-  for (const std::string& tab : mocktail::runtime::UiConfigTabs()) {
-    GtkWidget* page = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_widget_set_margin_top(page, 12);
-    gtk_widget_set_margin_bottom(page, 12);
-    gtk_widget_set_margin_start(page, 18);
-    gtk_widget_set_margin_end(page, 18);
-    GtkWidget* scroller = gtk_scrolled_window_new();
-    gtk_widget_set_vexpand(scroller, TRUE);
-    GtkWidget* list = gtk_list_box_new();
-    gtk_list_box_set_selection_mode(GTK_LIST_BOX(list),
-                                    GTK_SELECTION_NONE);
-    for (const UiConfigField& field : window->fields) {
-      if (!TabMatches(tab, field)) {
-        continue;
-      }
-      auto* row = new FieldRow();
-      row->field = &field;
-      const std::string* stored = window->overrides.Find(field.key);
-      if (stored != nullptr) {
-        row->original = *stored;
-      }
-      gtk_list_box_append(GTK_LIST_BOX(list), BuildFieldRow(row));
-      window->rows.push_back(row);
+void OnFilePicked(GObject* source, GAsyncResult* result, gpointer user_data) {
+  Row* row = static_cast<Row*>(user_data);
+  GError* error = nullptr;
+  GFile* file =
+      gtk_file_dialog_open_finish(GTK_FILE_DIALOG(source), result, &error);
+  if (file == nullptr) {
+    if (!g_error_matches(error, GTK_DIALOG_ERROR,
+                         GTK_DIALOG_ERROR_DISMISSED)) {
+      ShowError(row->window, error->message);
     }
-    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scroller), list);
-    gtk_box_append(GTK_BOX(page), scroller);
-    gtk_notebook_append_page(GTK_NOTEBOOK(notebook), page,
-                             gtk_label_new(tab.c_str()));
+    g_error_free(error);
+    return;
+  }
+  if (char* path = g_file_get_path(file)) {
+    gtk_editable_set_text(GTK_EDITABLE(row->widget), path);
+    g_free(path);
+    OnTextApplied(ADW_ENTRY_ROW(row->widget), row);
+  }
+  g_object_unref(file);
+}
+
+void OnPickFile(GtkButton*, gpointer user_data) {
+  Row* row = static_cast<Row*>(user_data);
+  GtkFileDialog* dialog = gtk_file_dialog_new();
+  gtk_file_dialog_set_title(dialog, Text(row->setting->title).c_str());
+  const std::filesystem::path current =
+      gtk_editable_get_text(GTK_EDITABLE(row->widget));
+  if (current.is_absolute()) {
+    GFile* initial = g_file_new_for_path(current.c_str());
+    gtk_file_dialog_set_initial_file(dialog, initial);
+    g_object_unref(initial);
+  }
+  gtk_file_dialog_open(dialog, GTK_WINDOW(row->window->widget), nullptr,
+                       OnFilePicked, row);
+  g_object_unref(dialog);
+}
+
+void OnChoiceChanged(GObject* object, GParamSpec*, gpointer user_data) {
+  Row* row = static_cast<Row*>(user_data);
+  const guint selected = adw_combo_row_get_selected(ADW_COMBO_ROW(object));
+  if (selected >= row->setting->choices.size()) {
+    // The unlisted value is already what the file holds.
+    return;
+  }
+  Apply(row, Text(row->setting->choices[selected].value));
+}
+
+void OnDeviceChanged(GObject* object, GParamSpec*, gpointer user_data) {
+  Row* row = static_cast<Row*>(user_data);
+  const guint selected = adw_combo_row_get_selected(ADW_COMBO_ROW(object));
+  if (selected >= row->devices.size()) {
+    return;
+  }
+  // Apply fills the rows again, which replaces row->devices.
+  const std::string value = row->devices[selected].value;
+  Apply(row, value);
+}
+
+void OnFrameRateModeChanged(GObject*, GParamSpec*, gpointer user_data) {
+  Row* row = static_cast<Row*>(user_data);
+  const guint selected = adw_combo_row_get_selected(ADW_COMBO_ROW(row->widget));
+  if (selected > static_cast<guint>(FrameRateMode::kCustom)) {
+    return;
+  }
+  Apply(row, SteppedValue(*row));
+}
+
+// The dialog that edits fflags.json as text.
+struct FFlagsEditor {
+  SettingsWindow* window = nullptr;
+  AdwDialog* dialog = nullptr;
+  GtkTextView* view = nullptr;
+  GtkTextBuffer* buffer = nullptr;
+  AdwBanner* problem = nullptr;
+  GtkWidget* save = nullptr;
+};
+
+// Closing asks first while there is unsaved text. See OnFFlagsCloseAttempt.
+void OnFFlagsCancel(GtkButton*, gpointer user_data) {
+  adw_dialog_close(static_cast<FFlagsEditor*>(user_data)->dialog);
+}
+
+void SaveFFlags(FFlagsEditor* editor) {
+  if (!gtk_text_buffer_get_modified(editor->buffer)) {
+    return;
+  }
+  GtkTextIter start;
+  GtkTextIter end;
+  gtk_text_buffer_get_bounds(editor->buffer, &start, &end);
+  char* characters =
+      gtk_text_buffer_get_text(editor->buffer, &start, &end, FALSE);
+  const std::string text = characters;
+  g_free(characters);
+  std::string error;
+  if (editor->window->fflags.Save(text, &error)) {
+    // Undo cannot take back a save of fflags.json.
+    editor->window->document.ForgetUndo();
+    gtk_widget_set_visible(editor->window->undo, FALSE);
+    SettingsWindow* window = editor->window;
+    // The dialog owns `editor` and may free it on close.
+    adw_dialog_force_close(editor->dialog);
+    OnChangeSaved(window);
+    return;
+  }
+  // The dialog stays open with the text, so nothing typed is lost.
+  adw_banner_set_title(editor->problem, error.c_str());
+  adw_banner_set_revealed(editor->problem, TRUE);
+  if (const auto fault = mocktail::ui::JsonSyntaxFault(text)) {
+    GtkTextIter where;
+    gtk_text_buffer_get_iter_at_line_offset(
+        editor->buffer, &where, static_cast<int>(fault->line - 1),
+        static_cast<int>(fault->column - 1));
+    gtk_text_buffer_place_cursor(editor->buffer, &where);
+    gtk_text_view_scroll_to_mark(editor->view,
+                                 gtk_text_buffer_get_insert(editor->buffer),
+                                 0.1, FALSE, 0, 0);
+  }
+  gtk_widget_grab_focus(GTK_WIDGET(editor->view));
+}
+
+void OnFFlagsSave(GtkButton*, gpointer user_data) {
+  SaveFFlags(static_cast<FFlagsEditor*>(user_data));
+}
+
+gboolean OnFFlagsSaveShortcut(GtkWidget*, GVariant*, gpointer user_data) {
+  SaveFFlags(static_cast<FFlagsEditor*>(user_data));
+  return TRUE;
+}
+
+// Save has work to do, and closing needs a question, only while the text
+// differs from what was opened.
+void OnFFlagsModifiedChanged(GtkTextBuffer* buffer, gpointer user_data) {
+  auto* editor = static_cast<FFlagsEditor*>(user_data);
+  const gboolean modified = gtk_text_buffer_get_modified(buffer);
+  gtk_widget_set_sensitive(editor->save, modified);
+  adw_dialog_set_can_close(editor->dialog, !modified);
+}
+
+// A problem shown for the text as it was says nothing about the text now.
+void OnFFlagsChanged(GtkTextBuffer*, gpointer user_data) {
+  adw_banner_set_revealed(static_cast<FFlagsEditor*>(user_data)->problem,
+                          FALSE);
+}
+
+void OnFFlagsDiscardResponse(AdwAlertDialog*, const char* response,
+                             gpointer user_data) {
+  if (g_strcmp0(response, "discard") == 0) {
+    adw_dialog_force_close(static_cast<FFlagsEditor*>(user_data)->dialog);
+  }
+}
+
+// Runs when the dialog is asked to close with unsaved text in it.
+void OnFFlagsCloseAttempt(AdwDialog* dialog, gpointer user_data) {
+  AdwDialog* question = adw_alert_dialog_new(
+      "Discard changes?", "Your changes to fflags.json are not saved.");
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(question), "keep",
+                                 "Keep Editing", "discard", "Discard",
+                                 nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(question),
+                                           "discard",
+                                           ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(question), "keep");
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(question), "keep");
+  g_signal_connect(question, "response", G_CALLBACK(OnFFlagsDiscardResponse),
+                   user_data);
+  adw_dialog_present(question, GTK_WIDGET(dialog));
+}
+
+void OnFFlagsActivated(AdwActionRow*, gpointer user_data) {
+  auto* window = static_cast<SettingsWindow*>(user_data);
+  std::string error;
+  if (!window->fflags.Load(&error)) {
+    ShowError(window, error);
+    return;
   }
 
-  GtkWidget* footer = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
-  gtk_widget_set_margin_top(footer, 9);
-  gtk_widget_set_margin_bottom(footer, 9);
-  gtk_widget_set_margin_start(footer, 18);
-  gtk_widget_set_margin_end(footer, 18);
-  window->status_label = gtk_label_new(
-      ui_loaded ? "Loaded from your config.ui.yaml. Edit and save to apply on "
-                  "the next launch."
-                : "Nothing set in this window yet. Changes are saved to "
-                  "config.ui.yaml and apply on the next launch.");
-  gtk_label_set_xalign(GTK_LABEL(window->status_label), 0.0f);
-  gtk_label_set_wrap(GTK_LABEL(window->status_label), TRUE);
-  gtk_widget_set_hexpand(window->status_label, TRUE);
-  gtk_box_append(GTK_BOX(footer), window->status_label);
+  auto* editor = new FFlagsEditor;
+  editor->window = window;
+  editor->dialog = adw_dialog_new();
+  adw_dialog_set_title(editor->dialog, "FFlag overrides");
+  adw_dialog_set_content_width(editor->dialog, 640);
+  adw_dialog_set_content_height(editor->dialog, 520);
+  g_object_set_data_full(
+      G_OBJECT(editor->dialog), "editor", editor,
+      [](gpointer data) { delete static_cast<FFlagsEditor*>(data); });
 
-  GtkWidget* reset_all = gtk_button_new_with_label("Reset all");
-  gtk_widget_set_valign(reset_all, GTK_ALIGN_CENTER);
-  g_signal_connect(reset_all, "clicked", G_CALLBACK(OnResetAllClicked),
-                   nullptr);
-  gtk_box_append(GTK_BOX(footer), reset_all);
-
-  window->restart_button = gtk_button_new_with_label("Restart");
-  gtk_widget_set_valign(window->restart_button, GTK_ALIGN_CENTER);
-  gtk_widget_add_css_class(window->restart_button, "suggested-action");
-  // Never restarts on its own. The user is asked first, and only after a
-  // successful save, because a restart that dropped unsaved changes would be
-  // worse than not restarting.
-  gtk_widget_set_tooltip_text(window->restart_button,
-                              "Apply the settings now. Asks first.");
-  g_signal_connect(window->restart_button, "clicked",
-                   G_CALLBACK(OnRestartClicked), nullptr);
-  gtk_box_append(GTK_BOX(footer), window->restart_button);
-
+  GtkWidget* cancel = gtk_button_new_with_label("Cancel");
   GtkWidget* save = gtk_button_new_with_label("Save");
-  gtk_widget_set_valign(save, GTK_ALIGN_CENTER);
+  editor->save = save;
   gtk_widget_add_css_class(save, "suggested-action");
-  g_signal_connect(save, "clicked", G_CALLBACK(OnSaveClicked), nullptr);
-  gtk_box_append(GTK_BOX(footer), save);
+  gtk_widget_set_tooltip_text(save, "Save (Ctrl+S)");
+  gtk_widget_set_sensitive(save, FALSE);
+  g_signal_connect(cancel, "clicked", G_CALLBACK(OnFFlagsCancel), editor);
+  g_signal_connect(save, "clicked", G_CALLBACK(OnFFlagsSave), editor);
+  g_signal_connect(editor->dialog, "close-attempt",
+                   G_CALLBACK(OnFFlagsCloseAttempt), editor);
+  GtkEventController* shortcuts = gtk_shortcut_controller_new();
+  gtk_shortcut_controller_add_shortcut(
+      GTK_SHORTCUT_CONTROLLER(shortcuts),
+      gtk_shortcut_new(
+          gtk_keyval_trigger_new(GDK_KEY_s, GDK_CONTROL_MASK),
+          gtk_callback_action_new(OnFFlagsSaveShortcut, editor, nullptr)));
+  gtk_widget_add_controller(GTK_WIDGET(editor->dialog), shortcuts);
+  GtkWidget* header = adw_header_bar_new();
+  adw_header_bar_set_show_start_title_buttons(ADW_HEADER_BAR(header), FALSE);
+  adw_header_bar_set_show_end_title_buttons(ADW_HEADER_BAR(header), FALSE);
+  adw_header_bar_pack_start(ADW_HEADER_BAR(header), cancel);
+  adw_header_bar_pack_end(ADW_HEADER_BAR(header), save);
 
-  gtk_box_append(GTK_BOX(box), footer);
-  adw_application_window_set_content(window->window, root);
+  GtkWidget* problem = adw_banner_new("");
+  editor->problem = ADW_BANNER(problem);
+  adw_banner_set_use_markup(editor->problem, FALSE);
 
-  // Set the controls after they are all built, so setting one does not look
-  // like a user edit and mark the window dirty on open.
-  window->initializing = true;
-  for (FieldRow* row : window->rows) {
-    const std::string* stored = window->overrides.Find(row->field->key);
-    const std::string value = stored != nullptr ? *stored
-                                                 : row->field->default_value;
-    SetControlValue(row, value);
-    UpdateRowState(row);
+  GtkWidget* view = gtk_text_view_new();
+  gtk_text_view_set_monospace(GTK_TEXT_VIEW(view), TRUE);
+  gtk_text_view_set_top_margin(GTK_TEXT_VIEW(view), 12);
+  gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(view), 12);
+  gtk_text_view_set_left_margin(GTK_TEXT_VIEW(view), 12);
+  gtk_text_view_set_right_margin(GTK_TEXT_VIEW(view), 12);
+  gtk_accessible_update_property(GTK_ACCESSIBLE(view),
+                                 GTK_ACCESSIBLE_PROPERTY_LABEL, "fflags.json",
+                                 -1);
+  editor->view = GTK_TEXT_VIEW(view);
+  editor->buffer = gtk_text_view_get_buffer(GTK_TEXT_VIEW(view));
+  // Undo must not go back past the file's own text.
+  gtk_text_buffer_begin_irreversible_action(editor->buffer);
+  gtk_text_buffer_set_text(editor->buffer, window->fflags.Text().c_str(), -1);
+  gtk_text_buffer_end_irreversible_action(editor->buffer);
+  gtk_text_buffer_set_modified(editor->buffer, FALSE);
+  GtkTextIter top;
+  gtk_text_buffer_get_start_iter(editor->buffer, &top);
+  gtk_text_buffer_place_cursor(editor->buffer, &top);
+  g_signal_connect(editor->buffer, "modified-changed",
+                   G_CALLBACK(OnFFlagsModifiedChanged), editor);
+  g_signal_connect(editor->buffer, "changed", G_CALLBACK(OnFFlagsChanged),
+                   editor);
+  GtkWidget* scrolled = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), view);
+
+  GtkWidget* toolbar = adw_toolbar_view_new();
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), header);
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), problem);
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), scrolled);
+  adw_dialog_set_child(editor->dialog, toolbar);
+  adw_dialog_present(editor->dialog, window->widget);
+  gtk_widget_grab_focus(view);
+}
+
+void OnFolderOpened(GObject* source, GAsyncResult* result,
+                    gpointer user_data) {
+  GError* error = nullptr;
+  if (gtk_file_launcher_open_containing_folder_finish(
+          GTK_FILE_LAUNCHER(source), result, &error)) {
+    return;
   }
-  window->initializing = false;
-  RefreshAllRows();
+  if (!g_error_matches(error, GTK_DIALOG_ERROR, GTK_DIALOG_ERROR_DISMISSED)) {
+    ShowError(static_cast<SettingsWindow*>(user_data), error->message);
+  }
+  g_error_free(error);
+}
 
-  g_signal_connect(window->window, "close-request",
-                   G_CALLBACK(OnCloseRequested), nullptr);
-  gtk_window_present(GTK_WINDOW(window->window));
+// Shows config.yaml in the file manager.
+void OnFolderActivated(AdwActionRow*, gpointer user_data) {
+  auto* window = static_cast<SettingsWindow*>(user_data);
+  GFile* file = g_file_new_for_path(window->document.config_file().c_str());
+  GtkFileLauncher* launcher = gtk_file_launcher_new(file);
+  gtk_file_launcher_open_containing_folder(
+      launcher, GTK_WINDOW(window->widget), nullptr, OnFolderOpened, window);
+  g_object_unref(launcher);
+  g_object_unref(file);
+}
+
+void SetRowText(GtkWidget* widget, std::string_view title,
+                std::string_view subtitle) {
+  adw_preferences_row_set_use_markup(ADW_PREFERENCES_ROW(widget), FALSE);
+  adw_preferences_row_set_title(ADW_PREFERENCES_ROW(widget),
+                                Text(title).c_str());
+  // A text row shows its title inside the field and has no subtitle.
+  if (ADW_IS_ACTION_ROW(widget)) {
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(widget),
+                                Text(subtitle).c_str());
+  }
+}
+
+void AddToContainer(GtkWidget* container, GtkWidget* widget) {
+  if (ADW_IS_EXPANDER_ROW(container)) {
+    adw_expander_row_add_row(ADW_EXPANDER_ROW(container), widget);
+  } else {
+    adw_preferences_group_add(ADW_PREFERENCES_GROUP(container), widget);
+  }
+}
+
+GtkWidget* NewResetButton(Row* row) {
+  GtkWidget* button = gtk_button_new_from_icon_name("edit-undo-symbolic");
+  gtk_widget_set_tooltip_text(button, "Reset to default");
+  gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+  gtk_widget_add_css_class(button, "flat");
+  gtk_widget_set_visible(button, FALSE);
+  g_signal_connect(button, "clicked", G_CALLBACK(OnReset), row);
+  return button;
+}
+
+void AddRow(SettingsWindow* window, GtkWidget* container,
+            const Setting& setting, bool expander_switch = false) {
+  Row& row = window->rows.emplace_back();
+  row.window = window;
+  row.setting = &setting;
+  if (expander_switch) {
+    row.widget = container;
+    row.expander_switch = true;
+    g_signal_connect(container, "notify::enable-expansion",
+                     G_CALLBACK(OnExpanderToggled), &row);
+    return;
+  }
+  switch (setting.kind) {
+    case SettingKind::kToggle:
+      row.widget = adw_switch_row_new();
+      g_signal_connect(row.widget, "notify::active",
+                       G_CALLBACK(OnToggleChanged), &row);
+      break;
+    case SettingKind::kChoice:
+      row.widget = adw_combo_row_new();
+      g_signal_connect(row.widget, "notify::selected",
+                       G_CALLBACK(OnChoiceChanged), &row);
+      break;
+    case SettingKind::kDevice:
+      row.widget = adw_combo_row_new();
+      g_signal_connect(row.widget, "notify::selected",
+                       G_CALLBACK(OnDeviceChanged), &row);
+      break;
+    case SettingKind::kFrameRate:
+      row.widget = adw_combo_row_new();
+      SetChoices(&row);
+      row.custom = adw_spin_row_new_with_range(
+          1, mocktail::ui::kMaximumCustomFrameRate, 1);
+      adw_spin_row_set_value(ADW_SPIN_ROW(row.custom),
+                             mocktail::ui::kDefaultCustomFrameRate);
+      SetRowText(row.custom, "Custom limit", "Frames per second");
+      g_signal_connect(row.widget, "notify::selected",
+                       G_CALLBACK(OnFrameRateModeChanged), &row);
+      g_signal_connect(row.custom, "notify::value",
+                       G_CALLBACK(OnSteppedValueChanged), &row);
+      break;
+    case SettingKind::kNumber:
+      row.widget = adw_spin_row_new_with_range(setting.minimum,
+                                               setting.maximum, setting.step);
+      g_signal_connect(row.widget, "notify::value",
+                       G_CALLBACK(OnSteppedValueChanged), &row);
+      if (!setting.zero_label.empty()) {
+        // A numeric row drops the label's letters.
+        adw_spin_row_set_numeric(ADW_SPIN_ROW(row.widget), FALSE);
+        g_signal_connect(row.widget, "output", G_CALLBACK(OnNumberOutput),
+                         &row);
+        g_signal_connect(row.widget, "input", G_CALLBACK(OnNumberInput), &row);
+      }
+      break;
+    case SettingKind::kText:
+    case SettingKind::kFile:
+      row.widget = adw_entry_row_new();
+      adw_entry_row_set_show_apply_button(ADW_ENTRY_ROW(row.widget), TRUE);
+      row.reset = NewResetButton(&row);
+      adw_entry_row_add_suffix(ADW_ENTRY_ROW(row.widget), row.reset);
+      g_signal_connect(row.widget, "apply", G_CALLBACK(OnTextApplied), &row);
+      if (setting.kind == SettingKind::kFile) {
+        row.pick = gtk_button_new_from_icon_name("document-open-symbolic");
+        gtk_widget_set_tooltip_text(row.pick, "Choose a file");
+        gtk_widget_set_valign(row.pick, GTK_ALIGN_CENTER);
+        gtk_widget_add_css_class(row.pick, "flat");
+        // The picker stands in for the pencil.
+        HideDescendant(row.widget, "edit-icon");
+        adw_entry_row_add_suffix(ADW_ENTRY_ROW(row.widget), row.pick);
+        g_signal_connect(row.pick, "clicked", G_CALLBACK(OnPickFile), &row);
+      }
+      break;
+    case SettingKind::kEditor:
+      row.widget = adw_action_row_new();
+      adw_action_row_add_suffix(
+          ADW_ACTION_ROW(row.widget),
+          gtk_image_new_from_icon_name("go-next-symbolic"));
+      gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row.widget), TRUE);
+      g_signal_connect(row.widget, "activated",
+                       G_CALLBACK(OnFFlagsActivated), window);
+      break;
+    case SettingKind::kFolder:
+      row.widget = adw_action_row_new();
+      adw_action_row_add_suffix(
+          ADW_ACTION_ROW(row.widget),
+          gtk_image_new_from_icon_name("folder-open-symbolic"));
+      gtk_list_box_row_set_activatable(GTK_LIST_BOX_ROW(row.widget), TRUE);
+      g_signal_connect(row.widget, "activated",
+                       G_CALLBACK(OnFolderActivated), window);
+      break;
+  }
+  if (row.reset == nullptr && setting.kind != SettingKind::kEditor &&
+      setting.kind != SettingKind::kFolder) {
+    row.reset = NewResetButton(&row);
+    adw_action_row_add_suffix(ADW_ACTION_ROW(row.widget), row.reset);
+    // Before the row's own control, so the control stays at the edge.
+    if (GtkWidget* suffixes = gtk_widget_get_parent(row.reset);
+        GTK_IS_BOX(suffixes)) {
+      gtk_box_reorder_child_after(GTK_BOX(suffixes), row.reset, nullptr);
+    }
+  }
+  SetRowText(row.widget, setting.title, setting.subtitle);
+  AddToContainer(container, row.widget);
+  if (row.custom != nullptr) {
+    AddToContainer(container, row.custom);
+  }
+}
+
+const SettingsPage& PageOf(GtkListBoxRow* row) {
+  return mocktail::ui::SettingsPages()[static_cast<std::size_t>(
+      gtk_list_box_row_get_index(row))];
+}
+
+// Puts a section name above the first sidebar row of each section.
+void SetSidebarHeader(GtkListBoxRow* row, GtkListBoxRow* before, gpointer) {
+  const SettingsPage& page = PageOf(row);
+  if (before != nullptr && PageOf(before).section == page.section) {
+    gtk_list_box_row_set_header(row, nullptr);
+    return;
+  }
+  char* upper = g_utf8_strup(page.section.data(),
+                             static_cast<gssize>(page.section.size()));
+  GtkWidget* label = gtk_label_new(upper);
+  g_free(upper);
+  gtk_label_set_xalign(GTK_LABEL(label), 0);
+  gtk_widget_add_css_class(label, "caption-heading");
+  gtk_widget_add_css_class(label, "dim-label");
+  gtk_widget_set_margin_start(label, 14);
+  gtk_widget_set_margin_top(label, before == nullptr ? 6 : 18);
+  gtk_widget_set_margin_bottom(label, 6);
+  gtk_list_box_row_set_header(row, label);
+}
+
+void OnPageSelected(GtkListBox*, GtkListBoxRow* row, gpointer user_data) {
+  auto* window = static_cast<SettingsWindow*>(user_data);
+  if (row == nullptr) {
+    return;
+  }
+  const SettingsPage& page = PageOf(row);
+  gtk_stack_set_visible_child_name(window->stack, Text(page.name).c_str());
+  adw_navigation_page_set_title(window->content_page,
+                                Text(page.title).c_str());
+}
+
+// On a narrow window the sidebar and the settings take turns.
+void OnPageActivated(GtkListBox*, GtkListBoxRow*, gpointer user_data) {
+  adw_navigation_split_view_set_show_content(
+      static_cast<SettingsWindow*>(user_data)->split, TRUE);
+}
+
+// The Nightcap artwork beside the name. The artwork is built in, so it shows
+// whether or not the icon theme has Nightcap's icon installed.
+GtkWidget* BuildSidebarTitle() {
+  // The artwork has clear space around it, so the gap to the name is small.
+  GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+  GBytes* bytes = g_bytes_new_static(
+      mocktail::platform::internal::kMocktailWindowIconPng,
+      mocktail::platform::internal::kMocktailWindowIconPngSize);
+  if (GdkTexture* texture = gdk_texture_new_from_bytes(bytes, nullptr)) {
+    GtkWidget* image = gtk_image_new_from_paintable(GDK_PAINTABLE(texture));
+    gtk_image_set_pixel_size(GTK_IMAGE(image), 24);
+    gtk_box_append(GTK_BOX(box), image);
+    g_object_unref(texture);
+  }
+  g_bytes_unref(bytes);
+  GtkWidget* label = gtk_label_new("Nightcap");
+  gtk_widget_add_css_class(label, "title");
+  gtk_box_append(GTK_BOX(box), label);
+  return box;
+}
+
+GtkWidget* BuildSidebar(SettingsWindow* window) {
+  GtkWidget* list = gtk_list_box_new();
+  gtk_widget_add_css_class(list, "navigation-sidebar");
+  gtk_list_box_set_selection_mode(GTK_LIST_BOX(list), GTK_SELECTION_BROWSE);
+  gtk_list_box_set_header_func(GTK_LIST_BOX(list), SetSidebarHeader, nullptr,
+                               nullptr);
+  for (const SettingsPage& page : mocktail::ui::SettingsPages()) {
+    GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
+    gtk_box_append(GTK_BOX(box),
+                   gtk_image_new_from_icon_name(Text(page.icon_name).c_str()));
+    GtkWidget* label = gtk_label_new(Text(page.title).c_str());
+    gtk_label_set_xalign(GTK_LABEL(label), 0);
+    gtk_widget_set_hexpand(label, TRUE);
+    gtk_box_append(GTK_BOX(box), label);
+    gtk_list_box_append(GTK_LIST_BOX(list), box);
+  }
+  g_signal_connect(list, "row-selected", G_CALLBACK(OnPageSelected), window);
+  g_signal_connect(list, "row-activated", G_CALLBACK(OnPageActivated),
+                   window);
+
+  GtkWidget* scrolled = gtk_scrolled_window_new();
+  gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled),
+                                 GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+  gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(scrolled), list);
+
+  // The artwork and name sit at the left, in line with the rows below.
+  GtkWidget* header = adw_header_bar_new();
+  adw_header_bar_set_show_title(ADW_HEADER_BAR(header), FALSE);
+  GtkWidget* title = BuildSidebarTitle();
+  gtk_widget_set_margin_start(title, 4);
+  adw_header_bar_pack_start(ADW_HEADER_BAR(header), title);
+  GtkWidget* toolbar = adw_toolbar_view_new();
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar), header);
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), scrolled);
+  gtk_list_box_select_row(
+      GTK_LIST_BOX(list),
+      gtk_list_box_get_row_at_index(GTK_LIST_BOX(list), 0));
+  return toolbar;
+}
+
+GtkWidget* BuildNotice(SettingsWindow* window) {
+  GtkWidget* icon =
+      gtk_image_new_from_icon_name("dialog-information-symbolic");
+  GtkWidget* label = gtk_label_new(kSavedText);
+  window->notice_label = GTK_LABEL(label);
+  gtk_label_set_xalign(GTK_LABEL(label), 0);
+  gtk_label_set_wrap(GTK_LABEL(label), TRUE);
+  gtk_widget_set_hexpand(label, TRUE);
+  gtk_widget_set_margin_start(icon, 14);
+  gtk_widget_set_margin_end(label, 14);
+  window->undo = gtk_button_new_with_label("Undo");
+  gtk_widget_set_tooltip_text(window->undo, "Take the last change back");
+  gtk_widget_set_valign(window->undo, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_end(window->undo, 8);
+  gtk_widget_add_css_class(window->undo, "flat");
+  g_signal_connect(window->undo, "clicked", G_CALLBACK(OnUndo), window);
+  window->restart = gtk_button_new_with_label("Restart Now");
+  gtk_widget_set_valign(window->restart, GTK_ALIGN_CENTER);
+  gtk_widget_set_margin_end(window->restart, 8);
+  gtk_widget_add_css_class(window->restart, "suggested-action");
+  gtk_widget_set_visible(window->restart, FALSE);
+  g_signal_connect(window->restart, "clicked", G_CALLBACK(OnRestartClicked),
+                   window);
+  gtk_widget_set_margin_top(label, 12);
+  gtk_widget_set_margin_bottom(label, 12);
+
+  GtkWidget* bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+  gtk_widget_add_css_class(bar, "notice-bar");
+  gtk_box_append(GTK_BOX(bar), icon);
+  gtk_box_append(GTK_BOX(bar), label);
+  gtk_box_append(GTK_BOX(bar), window->undo);
+  gtk_box_append(GTK_BOX(bar), window->restart);
+
+  GtkWidget* revealer = gtk_revealer_new();
+  window->notice = GTK_REVEALER(revealer);
+  gtk_revealer_set_transition_type(window->notice,
+                                   GTK_REVEALER_TRANSITION_TYPE_SLIDE_UP);
+  gtk_revealer_set_child(window->notice, bar);
+  return revealer;
+}
+
+GtkWidget* BuildPages(SettingsWindow* window) {
+  GtkWidget* stack = gtk_stack_new();
+  window->stack = GTK_STACK(stack);
+  for (const SettingsPage& page : mocktail::ui::SettingsPages()) {
+    // A clamp of our own instead of AdwPreferencesPage, whose fixed 600 px
+    // clamp leaves wide empty gutters.
+    GtkWidget* groups = gtk_box_new(GTK_ORIENTATION_VERTICAL, 24);
+    gtk_widget_set_margin_top(groups, 24);
+    gtk_widget_set_margin_bottom(groups, 24);
+    gtk_widget_set_margin_start(groups, 14);
+    gtk_widget_set_margin_end(groups, 14);
+    GtkWidget* clamp = adw_clamp_new();
+    adw_clamp_set_maximum_size(ADW_CLAMP(clamp), 720);
+    adw_clamp_set_tightening_threshold(ADW_CLAMP(clamp), 720);
+    adw_clamp_set_child(ADW_CLAMP(clamp), groups);
+    GtkWidget* page_widget = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(page_widget),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(page_widget), clamp);
+    for (const SettingsGroup& group : page.groups) {
+      GtkWidget* group_widget = adw_preferences_group_new();
+      adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(group_widget),
+                                      Text(group.title).c_str());
+      adw_preferences_group_set_description(
+          ADW_PREFERENCES_GROUP(group_widget),
+          group.description.empty() ? nullptr
+                                    : Text(group.description).c_str());
+      GtkWidget* container = group_widget;
+      std::size_t first = 0;
+      if (!group.expander.empty()) {
+        container = adw_expander_row_new();
+        SetRowText(container, group.expander, {});
+        adw_expander_row_set_subtitle(ADW_EXPANDER_ROW(container),
+                                      Text(group.expander_subtitle).c_str());
+        if (group.expander_switch && !group.settings.empty()) {
+          adw_expander_row_set_show_enable_switch(ADW_EXPANDER_ROW(container),
+                                                  TRUE);
+          AddRow(window, container, group.settings.front(), true);
+          first = 1;
+        }
+        adw_preferences_group_add(ADW_PREFERENCES_GROUP(group_widget),
+                                  container);
+      }
+      for (std::size_t index = first; index < group.settings.size();
+           ++index) {
+        AddRow(window, container, group.settings[index]);
+      }
+      gtk_box_append(GTK_BOX(groups), group_widget);
+    }
+    gtk_stack_add_named(GTK_STACK(stack), page_widget,
+                        Text(page.name).c_str());
+  }
+  return stack;
+}
+
+// The sidebar of pages beside the settings of the chosen one.
+GtkWidget* BuildSplitView(SettingsWindow* window,
+                          AdwApplicationWindow* window_widget) {
+  GtkWidget* split = adw_navigation_split_view_new();
+  window->split = ADW_NAVIGATION_SPLIT_VIEW(split);
+  adw_navigation_split_view_set_min_sidebar_width(window->split, 224);
+  adw_navigation_split_view_set_max_sidebar_width(window->split, 260);
+
+  GtkWidget* toasts = adw_toast_overlay_new();
+  window->toasts = ADW_TOAST_OVERLAY(toasts);
+  adw_toast_overlay_set_child(window->toasts, BuildPages(window));
+  GtkWidget* toolbar = adw_toolbar_view_new();
+  adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(toolbar),
+                               adw_header_bar_new());
+  adw_toolbar_view_add_bottom_bar(ADW_TOOLBAR_VIEW(toolbar),
+                                  BuildNotice(window));
+  adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(toolbar), toasts);
+  window->content_page = adw_navigation_page_new(toolbar, "Settings");
+  adw_navigation_split_view_set_content(window->split, window->content_page);
+
+  // The sidebar selects its first row, which needs the pages above.
+  adw_navigation_split_view_set_sidebar(
+      window->split,
+      adw_navigation_page_new(BuildSidebar(window), "Nightcap"));
+
+  AdwBreakpoint* narrow =
+      adw_breakpoint_new(adw_breakpoint_condition_parse("max-width: 620sp"));
+  GValue collapsed = G_VALUE_INIT;
+  g_value_init(&collapsed, G_TYPE_BOOLEAN);
+  g_value_set_boolean(&collapsed, TRUE);
+  adw_breakpoint_add_setter(narrow, G_OBJECT(split), "collapsed", &collapsed);
+  g_value_unset(&collapsed);
+  adw_application_window_add_breakpoint(window_widget, narrow);
+  return split;
+}
+
+GtkWidget* BuildProblemPage(const SettingsWindow& window,
+                            const std::string& error) {
+  GtkWidget* page = adw_status_page_new();
+  adw_status_page_set_icon_name(ADW_STATUS_PAGE(page),
+                                "dialog-warning-symbolic");
+  adw_status_page_set_title(ADW_STATUS_PAGE(page),
+                            "The settings file has a problem");
+  char* description = g_markup_printf_escaped(
+      "%s\n\nFix or remove this file, then open Settings again:\n%s",
+      error.c_str(), window.document.config_file().c_str());
+  adw_status_page_set_description(ADW_STATUS_PAGE(page), description);
+  g_free(description);
+  return page;
+}
+
+void OnDiscardTextResponse(AdwAlertDialog*, const char* response,
+                           gpointer user_data) {
+  if (g_strcmp0(response, "discard") == 0) {
+    gtk_window_destroy(
+        GTK_WINDOW(static_cast<SettingsWindow*>(user_data)->widget));
+  }
+}
+
+// Closing asks first while a text row holds text that is not applied.
+gboolean OnCloseRequest(GtkWindow*, gpointer user_data) {
+  auto* window = static_cast<SettingsWindow*>(user_data);
+  SaveStepped(window);
+  const Row* edited = nullptr;
+  for (const Row& row : window->rows) {
+    if ((row.setting->kind == SettingKind::kText ||
+         row.setting->kind == SettingKind::kFile) &&
+        row.shown != gtk_editable_get_text(GTK_EDITABLE(row.widget))) {
+      edited = &row;
+      break;
+    }
+  }
+  if (edited == nullptr) {
+    return FALSE;
+  }
+  const std::string body = "The text typed into \"" +
+                           Text(edited->setting->title) +
+                           "\" is not applied.";
+  AdwDialog* question = adw_alert_dialog_new("Discard changes?", nullptr);
+  adw_alert_dialog_set_body(ADW_ALERT_DIALOG(question), body.c_str());
+  adw_alert_dialog_add_responses(ADW_ALERT_DIALOG(question), "keep",
+                                 "Keep Editing", "discard", "Discard",
+                                 nullptr);
+  adw_alert_dialog_set_response_appearance(ADW_ALERT_DIALOG(question),
+                                           "discard",
+                                           ADW_RESPONSE_DESTRUCTIVE);
+  adw_alert_dialog_set_default_response(ADW_ALERT_DIALOG(question), "keep");
+  adw_alert_dialog_set_close_response(ADW_ALERT_DIALOG(question), "keep");
+  g_signal_connect(question, "response", G_CALLBACK(OnDiscardTextResponse),
+                   window);
+  adw_dialog_present(question, window->widget);
+  return TRUE;
+}
+
+void OnWindowDestroy(GtkWidget*, gpointer user_data) {
+  auto* window = static_cast<SettingsWindow*>(user_data);
+  window->closed = true;
+  if (window->stepped_timer != 0) {
+    g_source_remove(window->stepped_timer);
+    window->stepped_timer = 0;
+  }
+  window->stepped = nullptr;
+}
+
+void OnActivate(GtkApplication* application, gpointer user_data) {
+  auto* window = static_cast<SettingsWindow*>(user_data);
+  if (GtkWindow* existing = gtk_application_get_active_window(application)) {
+    gtk_window_present(existing);
+    return;
+  }
+
+  GtkCssProvider* style = gtk_css_provider_new();
+  gtk_css_provider_load_from_string(style, kWindowStyle);
+  gtk_style_context_add_provider_for_display(
+      gdk_display_get_default(), GTK_STYLE_PROVIDER(style),
+      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  g_object_unref(style);
+
+  GtkWidget* window_widget = adw_application_window_new(application);
+  window->widget = window_widget;
+  gtk_window_set_title(GTK_WINDOW(window_widget), "Nightcap Settings");
+  gtk_window_set_default_size(GTK_WINDOW(window_widget), 860, 620);
+  gtk_widget_set_size_request(window_widget, 360, 420);
+  gtk_window_set_icon_name(GTK_WINDOW(window_widget), kApplicationId);
+  g_signal_connect(window_widget, "close-request",
+                   G_CALLBACK(OnCloseRequest), window);
+  g_signal_connect(window_widget, "destroy", G_CALLBACK(OnWindowDestroy),
+                   window);
+
+  GtkWidget* content = nullptr;
+  std::string error;
+  if (window->document.Load(&error)) {
+    FindAudioDevices(window);
+    content = BuildSplitView(window, ADW_APPLICATION_WINDOW(window_widget));
+    RefreshRows(window);
+  } else {
+    content = adw_toolbar_view_new();
+    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(content),
+                                 adw_header_bar_new());
+    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(content),
+                                 BuildProblemPage(*window, error));
+  }
+
+  adw_application_window_set_content(ADW_APPLICATION_WINDOW(window_widget),
+                                     content);
+  gtk_window_present(GTK_WINDOW(window_widget));
 }
 
 }  // namespace
 
 int main(int argc, char* argv[]) {
-  AdwApplication* application = adw_application_new(
-      kApplicationId, G_APPLICATION_NON_UNIQUE);
-  g_signal_connect(application, "activate", G_CALLBACK(OnWindowActivate),
-                   nullptr);
-  const int status = g_application_run(G_APPLICATION(application), argc, argv);
+  g_set_application_name("Nightcap Settings");
+  const mocktail::runtime::RuntimePaths paths =
+      mocktail::runtime::RuntimePaths::FromEnvironment(
+          mocktail::runtime::ProcessEnvironment());
+  SettingsWindow window(paths.config_file(),
+                        paths.config_root() / "fflags.json");
+  const auto absolute_path = [](const char* name) {
+    const char* value = std::getenv(name);
+    return value != nullptr && std::filesystem::path(value).is_absolute()
+               ? std::filesystem::path(value)
+               : std::filesystem::path();
+  };
+  window.instance_lock =
+      absolute_path(mocktail::runtime::kInstanceLockVariable);
+  window.restart_program =
+      absolute_path(mocktail::runtime::kRestartProgramVariable);
+
+  // The application ID matches the desktop entry so the window gets
+  // Nightcap's icon. Nightcap itself does not own the name on the session
+  // bus, and neither does this window.
+  AdwApplication* application =
+      adw_application_new(kApplicationId, G_APPLICATION_NON_UNIQUE);
+  g_signal_connect(application, "activate", G_CALLBACK(OnActivate), &window);
+  const int status =
+      g_application_run(G_APPLICATION(application), argc, argv);
+  g_object_unref(application);
   return status;
 }

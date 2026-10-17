@@ -34,7 +34,6 @@
 #include "runtime/command_line.h"
 #include "runtime/crash_report_policy.h"
 #include "runtime/environment.h"
-#include "runtime/sibling_executable.h"
 #include "runtime/external_launch_broker.h"
 #include "runtime/failure_dialog.h"
 #include "runtime/fleasion.h"
@@ -54,6 +53,8 @@
 #include "runtime/runtime_config_file.h"
 #include "runtime/runtime_paths.h"
 #include "runtime/session_log.h"
+#include "runtime/running_instance.h"
+#include "runtime/settings_launcher.h"
 #include "runtime/single_instance_lock.h"
 #include "runtime/startup_trace.h"
 #include "runtime/support_bundle.h"
@@ -289,56 +290,24 @@ int main(int argc, char* argv[]) {
         command_line.options.program_name);
     return EXIT_SUCCESS;
   }
-  if (command_line.options.mode ==
-      mocktail::runtime::CommandMode::kSettings) {
-    // The settings window is a separate binary so it can be opened without a
-    // payload, and so a crash in it cannot take a running session down. It sits
-    // beside this one; the desktop entry and this flag both reach it the same
-    // way.
-    const std::filesystem::path settings =
-        mocktail::runtime::SiblingExecutable("mocktail_settings");
-    if (settings.empty()) {
-      std::cerr << "[FATAL] Cannot find mocktail_settings beside "
-                << std::filesystem::read_symlink("/proc/self/exe") << "\n";
-      return EXIT_FAILURE;
+  if (command_line.options.mode == mocktail::runtime::CommandMode::kSettings) {
+    // The window reports a broken config itself, so it starts before the
+    // config is loaded.
+    const mocktail::runtime::ProcessEnvironment settings_environment;
+    // The window finds and restarts a running Nightcap through these.
+    if (mocktail::runtime::CanRestartFromSettings(settings_environment)) {
+      setenv(mocktail::runtime::kInstanceLockVariable,
+             mocktail::runtime::CurrentUserInstanceLockPath().c_str(), 1);
+      setenv(mocktail::runtime::kRestartProgramVariable,
+             mocktail::runtime::CurrentExecutableIdentityPath().c_str(), 1);
     }
-    // Replaced rather than forked-and-waited, so this process is gone before
-    // the window appears and the two never compete for the same identity.
-    const pid_t child = fork();
-    if (child < 0) {
-      std::cerr << "[FATAL] Cannot start the settings window: "
-                << std::strerror(errno) << "\n";
-      return EXIT_FAILURE;
-    }
-    if (child == 0) {
-      // Child: become the settings window. setsid detaches it from this
-      // process's session so closing the terminal does not take it with it.
-      setsid();
-      // The window outlives this command, so it must not keep the caller's
-      // stdout or stderr open. Anything capturing this command's output would
-      // otherwise wait for the window to close before seeing end of file, which
-      // makes `mocktail --settings` look like it hangs.
-      const int null_device = ::open("/dev/null", O_RDWR);
-      if (null_device >= 0) {
-        ::dup2(null_device, STDIN_FILENO);
-        ::dup2(null_device, STDOUT_FILENO);
-        ::dup2(null_device, STDERR_FILENO);
-        if (null_device > STDERR_FILENO) {
-          ::close(null_device);
-        }
-      }
-      const std::string path = settings.string();
-      const char* arguments[] = {path.c_str(), nullptr};
-      execv(path.c_str(), const_cast<char* const*>(arguments));
-      // execv only returns on failure, and this process is about to exit, so
-      // the message goes to stderr rather than being reported to a parent that
-      // has already gone.
-      std::cerr << "[FATAL] Cannot run " << path << ": " << std::strerror(errno)
-                << "\n";
-      _exit(EXIT_FAILURE);
-    }
-    // Parent: the window is its own process now, so this one is done.
-    return EXIT_SUCCESS;
+    std::string settings_error;
+    mocktail::runtime::ExecSettingsWindow(settings_environment,
+                                          &settings_error);
+    std::cerr << settings_error << '\n';
+    // Started from the app menu there is no terminal to read that on.
+    mocktail::runtime::ShowFailureDialog(settings_environment, settings_error);
+    return EXIT_FAILURE;
   }
   // Normalize inherited process state before bootstrap or helpers can create
   // threads. Keep research/canary resource limits under their caller's control.

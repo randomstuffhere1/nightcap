@@ -64,14 +64,6 @@ class TemporaryDirectory {
     return file;
   }
 
-  // The settings window's own file, written next to config.yaml.
-  std::filesystem::path WriteUi(std::string_view contents) const {
-    const std::filesystem::path file = path_ / "config.ui.yaml";
-    std::ofstream output(file);
-    output << contents;
-    return file;
-  }
-
   const std::filesystem::path& path() const { return path_; }
 
  private:
@@ -708,109 +700,6 @@ TEST(RuntimeConfigFileTest, RejectsOutOfRangePerformanceSettings) {
   }
 }
 
-// The settings window writes config.ui.yaml next to config.yaml, and the two
-// layer. These tests pin the order, because getting it wrong means a setting
-// silently does nothing.
-TEST(RuntimeConfigFileTest, TheSettingsFileOverridesTheHandEditedOne) {
-  TemporaryDirectory temporary;
-  const std::filesystem::path file = temporary.Write(R"yaml(
-version: 1
-graphics:
-  vsync: on
-  backend: system
-)yaml");
-  temporary.WriteUi(R"yaml(graphics:
-  vsync: off
-)yaml");
-  const RuntimeConfigLoadResult loaded =
-      LoadRuntimeConfig(MapEnvironment(), file);
-  ASSERT_TRUE(loaded) << loaded.error;
-  EXPECT_TRUE(loaded.file_loaded);
-  EXPECT_TRUE(loaded.ui_config_loaded);
-  // The window's value wins...
-  EXPECT_EQ(loaded.config.vsync_mode(), "off");
-  // ...and a key it did not set still comes from the hand-edited file.
-  EXPECT_EQ(loaded.config.graphics_backend(), GraphicsBackend::kSystem);
-}
-
-TEST(RuntimeConfigFileTest, TheEnvironmentStillWinsOverEverything) {
-  TemporaryDirectory temporary;
-  const std::filesystem::path file = temporary.Write(R"yaml(
-version: 1
-graphics:
-  vsync: on
-)yaml");
-  temporary.WriteUi(R"yaml(graphics:
-  vsync: off
-)yaml");
-  const RuntimeConfigLoadResult loaded = LoadRuntimeConfig(
-      MapEnvironment({{"MOCKTAIL_VSYNC", "on"}}), file);
-  ASSERT_TRUE(loaded) << loaded.error;
-  EXPECT_EQ(loaded.config.vsync_mode(), "on");
-}
-
-// config.yaml is never rewritten by the window, and that promise is what makes
-// its comments usable as documentation. This asserts it rather than trusting it.
-TEST(RuntimeConfigFileTest, TheSettingsFileNeverTouchesTheHandEditedOne) {
-  TemporaryDirectory temporary;
-  const std::string original = R"yaml(# My own notes, which must survive.
-version: 1
-graphics:
-  vsync: on
-)yaml";
-  const std::filesystem::path file = temporary.Write(original);
-  temporary.WriteUi(R"yaml(graphics:
-  vsync: off
-)yaml");
-  const RuntimeConfigLoadResult loaded =
-      LoadRuntimeConfig(MapEnvironment(), file);
-  ASSERT_TRUE(loaded) << loaded.error;
-  std::ifstream reread(file);
-  const std::string contents((std::istreambuf_iterator<char>(reread)),
-                             std::istreambuf_iterator<char>());
-  EXPECT_EQ(contents, original);
-}
-
-TEST(RuntimeConfigFileTest, NoSettingsFileIsTheNormalCase) {
-  TemporaryDirectory temporary;
-  const std::filesystem::path file = temporary.Write("version: 1\n");
-  const RuntimeConfigLoadResult loaded =
-      LoadRuntimeConfig(MapEnvironment(), file);
-  ASSERT_TRUE(loaded) << loaded.error;
-  EXPECT_TRUE(loaded.file_loaded);
-  EXPECT_FALSE(loaded.ui_config_loaded);
-  EXPECT_EQ(loaded.config.vsync_mode(), "auto");
-}
-
-// A settings file that cannot be understood stops the launch rather than being
-// ignored, because ignoring it would drop settings the user believes are on.
-TEST(RuntimeConfigFileTest, ARejectedSettingsFileIsReportedNotIgnored) {
-  TemporaryDirectory temporary;
-  const std::filesystem::path file = temporary.Write("version: 1\n");
-  temporary.WriteUi(R"yaml(graphics:
-  vsync: sometimes
-)yaml");
-  const RuntimeConfigLoadResult loaded =
-      LoadRuntimeConfig(MapEnvironment(), file);
-  EXPECT_FALSE(loaded);
-  EXPECT_NE(loaded.error.find("graphics.vsync"), std::string::npos)
-      << loaded.error;
-}
-
-TEST(RuntimeConfigFileTest, AKeyOnlyTheWindowCouldWriteIsRejectedHereToo) {
-  TemporaryDirectory temporary;
-  const std::filesystem::path file = temporary.Write("version: 1\n");
-  // The window's own validation refuses a key it does not manage. The loader
-  // refuses it too, so a hand-edited settings file cannot smuggle one in.
-  temporary.WriteUi(R"yaml(graphics:
-  nonsense_key: 1
-)yaml");
-  const RuntimeConfigLoadResult loaded =
-      LoadRuntimeConfig(MapEnvironment(), file);
-  EXPECT_FALSE(loaded);
-  EXPECT_NE(loaded.error.find("nonsense_key"), std::string::npos)
-      << loaded.error;
-}
 
 TEST(RuntimeConfigFileTest, RejectsAnUnknownPipelineCacheMode) {
   TemporaryDirectory temporary;

@@ -6,43 +6,23 @@ change to this list.
 
 ## 1. Settings UI
 
-Shipped, with one thing deliberately not done.
+Shipped.
 
-`mocktail --settings`, or the Nightcap Settings entry in the app menu, opens a
-GTK4 window covering 25 settings across five tabs: Graphics, Input, Audio,
-Integrations, Advanced. Each row shows the setting's key, what it does, and a
-control that only accepts values the setting accepts, so a bad value is refused
-where it is typed instead of at the next launch. Restart applies the changes,
-and only after saving them and only after you agree to it.
+`mocktail --settings`, or Settings from the app menu, opens a GTK4 window
+covering every `config.yaml` setting: graphics, input, performance, audio,
+network, Discord, Fleasion, updates and the device identity, with a text editor
+for `fflags.json` and a button that opens the config folder. Each row accepts
+only values the loader accepts, so a bad value is refused where it is typed
+instead of at the next launch. A setting changed from its default gets a reset
+button, and a running Nightcap is offered a restart with its own options and
+environment.
 
-**It writes `config.ui.yaml`, not `config.yaml`.** `config.yaml` is created
-once with mode 0600, the bootstrap refuses to follow a symlink at it, and it
-says that Nightcap never replaces your edits. 154 of its 208 lines are comments
-that are its only documentation. Rewriting it from a window would break that
-promise and throw the documentation away, and preserving comments through a
-rewrite is a large job for a file that is mostly comments. So the window keeps
-its own small file of only the keys you set, and the two layer:
-
-```
-environment > config.ui.yaml > config.yaml > built-in defaults
-```
-
-The consequence is worth knowing: **a value set in the window outranks a later
-hand-edit of the same key** in `config.yaml`, because setting it in the window
-is the more deliberate of the two. Clearing it in the window goes back to your
-own value. The window says this in a banner, and a button opens
-`config.yaml` for you. Clearing every setting removes the file, so "did I clear
-everything" is answerable from the filesystem.
-
-What is not done: **FFlag overrides.** `fflags.json` is a flat JSON of engine
-flags with no schema this window could validate against, and a dropdown of
-several hundred flags would be a worse experience than the text editor it
-replaces. Editing it stays a text editor job.
-
-Not verified: the window was checked by running it, confirming it opens,
-renders, and leaves `config.yaml` byte-identical. Saving was exercised through
-the writer's own tests rather than by clicking, so the button wiring itself has
-not been driven by hand.
+**It edits `config.yaml` itself, and keeps the comments.** The window replaces
+only the bytes that carry the key it changes: comments, order, line endings and
+unrelated keys are left as they are, a commented-out key is uncommented in
+place, and every result is parsed again and refused if it would change any other
+setting. That removes the surprise the earlier sidecar design had, where a value
+set in the window outranked a later hand-edit of the same key.
 
 ## 2. Controller button glyphs
 
@@ -146,6 +126,12 @@ blocked, not busy, which is what the item above now says.
 
 ## Shipped
 
+- Settings window, from the app menu or `mocktail --settings`: graphics,
+  input, performance, audio, and Discord options, and a text editor for
+  `fflags.json`. It edits the same `config.yaml`, keeps your comments, and
+  does not save a value Nightcap could not start with. Changes apply on the
+  next launch. A setting changed from its default gets a reset button, and a
+  running Nightcap is offered a restart with its own options and environment.
 - A pipeline cache fallback. The client already persists its own
   `shadercachevk.bin` and hands it to `vkCreatePipelineCache`, so this does
   nothing on a stock client; it only engages if a future client stops seeding

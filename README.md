@@ -77,11 +77,11 @@ ahead of it. Work from that repository is merged in as it lands, so the gap is
 the list below and nothing else. In a clone with both remotes,
 `git diff coderdayton/main main` is the same list.
 
-- **A settings window.** `mocktail --settings`, or **Nightcap Settings** in the
-  app menu, opens a GTK4 window over 25 settings in five tabs. Each control
+- **A settings window.** `mocktail --settings`, or **Settings** in the app menu,
+  opens a GTK4 window with a row for every `config.yaml` setting, plus an
+  `fflags.json` editor and a button that opens the config folder. Each control
   only accepts values its setting accepts, so a bad value is refused where you
-  type it. The window writes `config.ui.yaml` and leaves `config.yaml` alone,
-  comments included.
+  type it. It edits `config.yaml` in place and keeps your comments.
 - **Joining a private server from a link.** Roblox's `/share?code=` link and
   the join dialog turn into a host launch, and the browser closes itself. A
   public server link works as well, and one Roblox refuses says so instead of
@@ -221,6 +221,8 @@ removing the marker.
 
 Put a JSON object in `$XDG_CONFIG_HOME/mocktail/fflags.json` (usually
 `~/.config/mocktail/fflags.json`). Nightcap applies it on the next launch.
+The Advanced page of the [settings window](#settings) edits this file and
+does not save text that Nightcap could not load.
 
 PC profiles use the legacy Charts page by default to avoid the blank screen
 caused by `Color3` errors in the newer SDUI page. An explicit
@@ -240,9 +242,28 @@ it yourself turns the switching off and your value applies everywhere. See
   "DFIntExample": "120"
 }
 ```
+
 ## Settings
 
-Edit `~/.config/mocktail/config.yaml`. Useful options:
+Open the settings window from the app menu: right-click Nightcap and pick
+Settings. Or run:
+
+```sh
+mocktail --settings
+```
+
+With the Flatpak, run
+`flatpak run io.github.CoderDayton.nightcap --settings`. To open it with a
+key, bind that command to a keyboard shortcut in your desktop's settings. If
+Settings is missing from the menu right after you install, log out and back
+in.
+
+The window edits `~/.config/mocktail/config.yaml`. It keeps your comments
+and layout, saves each change at once, and does not save a value Nightcap
+could not start with. Changes apply the next time Nightcap starts. If
+Nightcap is open, the window offers to restart it, except in the Flatpak.
+
+You can also edit the file by hand. Useful options:
 
 - `graphics.frame_rate_limit: display` to unlock FPS to your monitor's rate.
 - `graphics.vsync: off` for the lowest lag, at the cost of tearing.
@@ -251,21 +272,23 @@ Edit `~/.config/mocktail/config.yaml`. Useful options:
   to leave it to the client.
 - `performance.texture_memory_mb` to raise or lower the texture budget Roblox
   is told about. 0 keeps the automatic figure.
+- `performance.small_texture_upscale` to change how much small compressed
+  textures are enlarged, `1` to `8`. `1` turns it off.
 - `performance.multithreaded_rendering: true` to size Roblox's worker queues
   from every physical core.
 - `graphics.pipeline_cache: clear` to drop the fallback pipeline cache and run
   the next session uncached.
+- `audio.buffer_samples` to request a playback buffer size. SDL3 cannot set it
+  per device, so the value is advisory and startup reports the size in use.
+- `compatibility.desktop_playability: false` to stop telling the client it is on
+  a desktop platform.
+- `window.close_on_leave: true` to close Nightcap when you leave an experience
+  instead of staying on the Roblox home screen.
+- `integrations.server_location_indicator: true` to look up which region the
+  game server is in after you join and show it in a small notice.
 
-Most of these are easier to set from the settings window than by editing YAML:
-
-```sh
-mocktail --settings
-```
-
-It is also in the app menu as **Nightcap Settings**. The window saves to
-`config.ui.yaml` and never rewrites `config.yaml`, so your own file and its
-comments are left alone. A value set in the window takes priority over the same
-key in `config.yaml`; clear it in the window to go back to your own value.
+Each of these also has a row in the settings window, which is easier than
+editing YAML by hand.
 
 `config/mocktail.example.yaml` documents every option, and
 [PERFORMANCE.md](docs/PERFORMANCE.md) explains what the ones that trade CPU for
@@ -358,7 +381,8 @@ Roblox website links open the build tree copy without installing, run
 To build and install the Flatpak from source, install `flatpak-builder` and run
 `make flatpak`. It builds with 2 parallel jobs to keep memory use low. Pass
 `FLATPAK_JOBS=N` to `make flatpak`, or set `MOCKTAIL_FLATPAK_JOBS=N` for
-`scripts/build_flatpak.sh`, to change that.
+`scripts/build_flatpak.sh`, to change that. To build without installing, run
+`make flatpak-build`; the result stays in `build-flatpak/`.
 
 To see where startup time actually goes, run `make startup-timeline`. It prints
 a per-phase median across a few launches; see [Startup](docs/PERFORMANCE.md#startup)

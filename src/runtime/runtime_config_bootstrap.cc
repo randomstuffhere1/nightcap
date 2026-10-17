@@ -70,15 +70,6 @@ graphics:
   # presents through the lowest-latency synchronized mode the driver offers
   # unless frame_rate_limit is unlimited.
   # vsync: off
-  # Settings priority, highest first:
-  #   1. MOCKTAIL_* environment variables
-  #   2. config.ui.yaml, written by `mocktail --settings`
-  #   3. this file
-  #   4. built-in defaults
-  # The settings window keeps its own file rather than editing this one, so
-  # your comments and hand-written values here are never rewritten. A key set
-  # in the window outranks the same key here; clear it in the window to go back
-  # to your value.
   #
   # String (default: on): keep a fallback copy of the driver's pipeline cache.
   # The Roblox client already persists its own shadercachevk.bin and passes it

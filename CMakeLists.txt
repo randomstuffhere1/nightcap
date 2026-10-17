@@ -413,10 +413,11 @@ add_library(mocktail_runtime STATIC
   src/runtime/asset_overlay_names.cc
   src/runtime/runtime_config.cc
   src/runtime/runtime_config_bootstrap.cc
+  src/runtime/runtime_config_editor.cc
+  src/runtime/runtime_config_store.cc
   src/runtime/runtime_config_file.cc
-  src/runtime/sibling_executable.cc
-  src/runtime/ui_config_overrides.cc
   src/runtime/runtime_paths.cc
+  src/runtime/running_instance.cc
   src/runtime/session_log.cc
   src/runtime/server_location.cc
   src/runtime/single_instance_lock.cc
@@ -473,6 +474,8 @@ target_link_libraries(mocktail_runtime PRIVATE
 # Keep GTK out of the process that loads Android libraries.
 add_library(mocktail_failure_dialog_runtime STATIC
   src/runtime/failure_dialog.cc
+  src/runtime/helper_program.cc
+  src/runtime/settings_launcher.cc
 )
 add_library(Mocktail::FailureDialog ALIAS mocktail_failure_dialog_runtime)
 target_include_directories(mocktail_failure_dialog_runtime PUBLIC include)
@@ -484,6 +487,7 @@ mocktail_apply_compile_options(mocktail_failure_dialog_runtime)
 add_executable(mocktail_failure_dialog
   src/ui/mocktail_failure_dialog.cc
 )
+target_include_directories(mocktail_failure_dialog PRIVATE include)
 target_link_libraries(mocktail_failure_dialog PRIVATE PkgConfig::LIBADWAITA)
 if(TARGET PkgConfig::X11)
   target_compile_definitions(mocktail_failure_dialog PRIVATE MOCKTAIL_HAVE_X11=1)
@@ -491,16 +495,27 @@ if(TARGET PkgConfig::X11)
 endif()
 mocktail_apply_compile_options(mocktail_failure_dialog)
 
-# The settings window. A separate binary rather than a window inside the app so
-# it can be opened without a session running, and so a crash in it cannot take
-# a game down with it. It shares the config writer with the app, not its
-# process, and never writes config.yaml.
+add_library(mocktail_settings_model STATIC
+  src/ui/settings_model.cc
+)
+add_library(Mocktail::SettingsModel ALIAS mocktail_settings_model)
+target_include_directories(mocktail_settings_model PUBLIC include)
+target_link_libraries(mocktail_settings_model PUBLIC
+  Mocktail::Runtime
+  mocktail_services
+)
+mocktail_apply_compile_options(mocktail_settings_model)
+
 add_executable(mocktail_settings
   src/ui/mocktail_settings.cc
 )
+target_include_directories(mocktail_settings PRIVATE
+  ${MOCKTAIL_PLATFORM_GENERATED_INCLUDE_DIR}
+)
 target_link_libraries(mocktail_settings PRIVATE
+  Mocktail::SettingsModel
   PkgConfig::LIBADWAITA
-  mocktail_runtime
+  SDL3::SDL3
 )
 mocktail_apply_compile_options(mocktail_settings)
 
@@ -825,6 +840,7 @@ install(TARGETS
     mocktail
     mocktail_updater
     mocktail_failure_dialog
+    mocktail_settings
     mocktail_webview_helper
     mocktail_audio_sdl
     mocktail_opensles
@@ -863,22 +879,12 @@ install(CODE "
   string(REPLACE \"Exec=env SDL_VIDEODRIVER=wayland,x11 mocktail %u\"
          \"Exec=env SDL_VIDEODRIVER=wayland,x11 \${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/mocktail %u\"
          MOCKTAIL_DESKTOP_ENTRY \"\${MOCKTAIL_DESKTOP_ENTRY}\")
+  string(REPLACE \"Exec=mocktail --settings\"
+         \"Exec=\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/mocktail --settings\"
+         MOCKTAIL_DESKTOP_ENTRY \"\${MOCKTAIL_DESKTOP_ENTRY}\")
   file(WRITE \"${CMAKE_BINARY_DIR}/io.github.CoderDayton.nightcap.desktop\"
        \"\${MOCKTAIL_DESKTOP_ENTRY}\")
   file(INSTALL \"${CMAKE_BINARY_DIR}/io.github.CoderDayton.nightcap.desktop\"
-       DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/applications\")
-
-  # The settings window gets its own entry so it is reachable from the app menu
-  # without a terminal. A desktop file holds one [Desktop Entry] group, so it
-  # cannot be a second group in the file above.
-  file(READ \"${CMAKE_SOURCE_DIR}/packaging/io.github.CoderDayton.nightcap-settings.desktop\"
-       MOCKTAIL_SETTINGS_DESKTOP_ENTRY)
-  string(REPLACE \"Exec=env SDL_VIDEODRIVER=wayland,x11 mocktail --settings\"
-         \"Exec=env SDL_VIDEODRIVER=wayland,x11 \${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/mocktail --settings\"
-         MOCKTAIL_SETTINGS_DESKTOP_ENTRY \"\${MOCKTAIL_SETTINGS_DESKTOP_ENTRY}\")
-  file(WRITE \"${CMAKE_BINARY_DIR}/io.github.CoderDayton.nightcap-settings.desktop\"
-       \"\${MOCKTAIL_SETTINGS_DESKTOP_ENTRY}\")
-  file(INSTALL \"${CMAKE_BINARY_DIR}/io.github.CoderDayton.nightcap-settings.desktop\"
        DESTINATION \"\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_DATADIR}/applications\")
 ")
 install(FILES packaging/io.github.CoderDayton.nightcap.metainfo.xml
@@ -979,7 +985,7 @@ set(CPACK_RPM_PACKAGE_CONFLICTS "${MOCKTAIL_PACKAGE_CONFLICTS}")
 include(CPack)
 
 add_dependencies(mocktail all_stubs)
-add_dependencies(mocktail mocktail_failure_dialog)
+add_dependencies(mocktail mocktail_failure_dialog mocktail_settings)
 add_dependencies(mocktail mocktail_webview_helper)
 
 if(BUILD_TESTING)
