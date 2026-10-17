@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 
+#include "net/curl_support.h"
 #include "runtime/host_toast_overlay.h"
 
 namespace mocktail {
@@ -51,45 +52,30 @@ constexpr const char* kRobloxServerUrlPrefix =
 // The public provider Bloxstrap's server-location hint uses.
 constexpr const char* kIpInfoUrlPrefix = "https://ipinfo.io/";
 
-struct BoundedResponse {
-  std::string body;
-  bool exceeded = false;
-};
-
-std::size_t WriteResponse(char* data, std::size_t size, std::size_t count,
-                          void* context) {
-  auto* response = static_cast<BoundedResponse*>(context);
-  const std::size_t bytes = size * count;
-  if (response->body.size() + bytes > kMaximumResponseBytes) {
-    response->exceeded = true;
-    return 0;
-  }
-  response->body.append(data, bytes);
-  return bytes;
-}
-
 // A quiet GET that never throws and never blocks past its ceiling. Provider
 // and proxy details are not propagated into error text.
 bool GetJson(const std::string& url, std::string* body) {
   static std::string proxy_url;
   static bool proxy_loaded = false;
-  CURL* curl = curl_easy_init();
-  if (curl == nullptr) {
+  // The shared owner initialises libcurl before handing out a handle. This
+  // lookup used to call curl_easy_init directly and relied on some other
+  // translation unit having initialised libcurl first.
+  const net::EasyHandle curl(true);
+  if (!curl) {
     return false;
   }
-  BoundedResponse response;
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
-  curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
-  curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
-  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, kLookupConnectTimeoutMs);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, kLookupTimeoutMs);
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mocktail/0.1");
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteResponse);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+  net::BoundedStringSink response{body, kMaximumResponseBytes, false};
+  curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_HTTPGET, 1L);
+  net::TransportOptions options;
+  options.user_agent = "Mocktail/0.1";
+  options.connect_timeout_ms = kLookupConnectTimeoutMs;
+  options.timeout_ms = kLookupTimeoutMs;
+  options.follow_redirects = true;
+  options.maximum_redirects = 3;
+  net::ApplyTransportOptions(curl.get(), options);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, net::WriteBoundedString);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
   if (!proxy_loaded) {
     proxy_loaded = true;
     const char* host = std::getenv("MOCKTAIL_HTTP_PROXY_HOST");
@@ -99,22 +85,17 @@ bool GetJson(const std::string& url, std::string* body) {
     }
   }
   if (!proxy_url.empty()) {
-    curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
-    curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
+    curl_easy_setopt(curl.get(), CURLOPT_PROXY, proxy_url.c_str());
+    curl_easy_setopt(curl.get(), CURLOPT_NOPROXY, "");
   }
-  if (const char* ca_bundle = std::getenv("MOCKTAIL_CA_BUNDLE")) {
-    curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle);
-  }
-  const CURLcode status = curl_easy_perform(curl);
+  const CURLcode status = curl_easy_perform(curl.get());
   long http_status = 0;
   if (status == CURLE_OK) {
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_status);
   }
-  curl_easy_cleanup(curl);
   if (status != CURLE_OK || http_status != 200 || response.exceeded) {
     return false;
   }
-  *body = std::move(response.body);
   return true;
 }
 

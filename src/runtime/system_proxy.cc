@@ -2,6 +2,7 @@
 
 #include <gio/gio.h>
 
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -84,6 +85,35 @@ SystemProxyResult ResolveSystemProxy() {
   }
   g_strfreev(resolved);
   return SelectSystemProxy(candidates);
+}
+
+CURLcode ApplyConfiguredProxy(CURL* handle) {
+  if (handle == nullptr) {
+    return CURLE_BAD_FUNCTION_ARGUMENT;
+  }
+  const char* host = std::getenv("MOCKTAIL_HTTP_PROXY_HOST");
+  const char* port = std::getenv("MOCKTAIL_HTTP_PROXY_PORT");
+  if (host == nullptr || port == nullptr) {
+    return CURLE_OK;
+  }
+  const char* scheme = std::getenv("MOCKTAIL_HTTP_PROXY_SCHEME");
+  const std::optional<NetworkProxyConfig> proxy = ParseNetworkProxyConfig(
+      host, port, scheme != nullptr ? scheme : "http");
+  if (!proxy.has_value()) {
+    // A malformed configuration is left as "no proxy" rather than failing the
+    // request: the call sites treat every libcurl option failure as fatal, and
+    // an unusable proxy variable should not stop a launch that could still
+    // reach a direct endpoint.
+    return CURLE_OK;
+  }
+  const std::string url = BuildNetworkProxyUrl(*proxy);
+  if (curl_easy_setopt(handle, CURLOPT_PROXY, url.c_str()) != CURLE_OK) {
+    return CURLE_FAILED_INIT;
+  }
+  if (curl_easy_setopt(handle, CURLOPT_NOPROXY, "") != CURLE_OK) {
+    return CURLE_FAILED_INIT;
+  }
+  return CURLE_OK;
 }
 
 }  // namespace runtime

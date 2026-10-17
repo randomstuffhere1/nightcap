@@ -1,6 +1,8 @@
 #ifndef MOCKTAIL_RUNTIME_SYSTEM_PROXY_H_
 #define MOCKTAIL_RUNTIME_SYSTEM_PROXY_H_
 
+#include <curl/curl.h>
+
 #include <optional>
 #include <string>
 #include <vector>
@@ -26,6 +28,19 @@ SystemProxyResult SelectSystemProxy(
 // the desktop/environment proxy resolver, including PAC when it is available.
 // HTTP/HTTPS resolver results and SOCKS5 proxy endpoints are supported.
 SystemProxyResult ResolveSystemProxy();
+
+// Applies MOCKTAIL_HTTP_PROXY_HOST / _PORT / _SCHEME to a libcurl easy handle,
+// and leaves the handle untouched when the environment does not configure one.
+//
+// This block was copied into every HTTP call site by hand and the copies
+// drifted: server_location built "http://host:port" without consulting the
+// scheme or the shared parser, so a configured SOCKS5 or HTTPS proxy was
+// silently ignored there. One implementation is the fix.
+//
+// NOPROXY is cleared whenever a proxy is applied, so an inherited no_proxy
+// entry (including "*" from a desktop launcher) cannot bypass a proxy the user
+// configured on purpose.
+CURLcode ApplyConfiguredProxy(CURL* handle);
 
 }  // namespace runtime
 }  // namespace mocktail

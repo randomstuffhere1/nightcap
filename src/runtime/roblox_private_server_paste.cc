@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "net/curl_support.h"
 #include "runtime/environment.h"
 #include "runtime/failure_dialog.h"
 #include "runtime/roblox_game_url.h"
@@ -121,11 +122,6 @@ bool IsValidUtf8(std::string_view value) {
   return true;
 }
 
-struct BoundedResponse {
-  std::string body;
-  bool exceeded = false;
-};
-
 struct RobloxHttpResult {
   long http_status = 0;
   CURLcode curl_status = CURLE_OK;
@@ -133,23 +129,6 @@ struct RobloxHttpResult {
   bool body_exceeded = false;
   std::string headers;
 };
-
-std::size_t WriteHttpResponse(char* data, std::size_t size,
-                              std::size_t count, void* user_data) {
-  auto* response = static_cast<BoundedResponse*>(user_data);
-  if (response == nullptr || data == nullptr ||
-      (count != 0 && size > std::numeric_limits<std::size_t>::max() / count)) {
-    return 0;
-  }
-  const std::size_t bytes = size * count;
-  if (bytes > kMaximumGameResponseBytes ||
-      response->body.size() > kMaximumGameResponseBytes - bytes) {
-    response->exceeded = true;
-    return 0;
-  }
-  response->body.append(data, bytes);
-  return bytes;
-}
 
 std::size_t WriteHttpHeader(char* data, std::size_t size,
                             std::size_t count, void* user_data) {
@@ -295,82 +274,63 @@ RobloxPrivateServerPasteResult HandleRobloxPrivateServerPaste(
   return {true, status.ok(), std::move(status)};
 }
 
-std::optional<nlohmann::json> RobloxJsonRequest(const std::string& url,
-                                                const std::string* post_body,
-                                                curl_slist* headers,
-                                                 RobloxHttpResult* result_out) {
-  static std::once_flag curl_initialization;
-  static CURLcode curl_initialization_status = CURLE_FAILED_INIT;
-  std::call_once(curl_initialization, [] {
-    curl_initialization_status = curl_global_init(CURL_GLOBAL_DEFAULT);
-  });
-  if (curl_initialization_status != CURLE_OK) return std::nullopt;
+std::optional<nlohmann::json> RobloxJsonRequest(
+    const std::string& url, const std::string* post_body,
+    const net::HeaderList* headers, RobloxHttpResult* result_out) {
+  // One shared libcurl initialisation for the whole process, rather than a
+  // std::once_flag that only this translation unit could see.
+  const net::EasyHandle curl(true);
+  if (!curl) return std::nullopt;
 
-  CURL* curl = curl_easy_init();
-  if (curl == nullptr) return std::nullopt;
-  BoundedResponse response;
+  std::string body;
+  net::BoundedStringSink response{&body, kMaximumGameResponseBytes, false};
   RobloxHttpResult* result = result_out;
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  if (headers != nullptr) {
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+  curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+  if (headers != nullptr && headers->get() != nullptr) {
+    curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers->get());
   }
   if (post_body != nullptr) {
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, post_body->c_str());
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE,
+    curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, post_body->c_str());
+    curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE,
                      static_cast<long>(post_body->size()));
   } else {
-    curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+    curl_easy_setopt(curl.get(), CURLOPT_HTTPGET, 1L);
   }
-  curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
-  curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 2000L);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 3500L);
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "Nightcap/1.0");
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteHttpResponse);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
+  net::TransportOptions options;
+  options.user_agent = "Nightcap/1.0";
+  options.connect_timeout_ms = 2000L;
+  options.timeout_ms = 3500L;
+  // Redirects are refused rather than followed: every Roblox endpoint here is
+  // fixed, so a redirect is not expected and following one would leak the
+  // .ROBLOSECURITY cookie to whatever host it names.
+  options.follow_redirects = false;
+  net::ApplyTransportOptions(curl.get(), options);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, net::WriteBoundedString);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
   if (result != nullptr) {
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, WriteHttpHeader);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, result);
+    curl_easy_setopt(curl.get(), CURLOPT_HEADERFUNCTION, WriteHttpHeader);
+    curl_easy_setopt(curl.get(), CURLOPT_HEADERDATA, result);
   }
 
-  std::string proxy_url;
-  const char* proxy_host = std::getenv("MOCKTAIL_HTTP_PROXY_HOST");
-  const char* proxy_port = std::getenv("MOCKTAIL_HTTP_PROXY_PORT");
-  const char* proxy_scheme = std::getenv("MOCKTAIL_HTTP_PROXY_SCHEME");
-  if (proxy_host != nullptr && proxy_port != nullptr) {
-    const std::optional<NetworkProxyConfig> proxy =
-        ParseNetworkProxyConfig(proxy_host, proxy_port,
-                                proxy_scheme != nullptr ? proxy_scheme : "http");
-    if (proxy.has_value()) {
-      proxy_url = BuildNetworkProxyUrl(*proxy);
-      curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
-      curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
-    }
-  }
-  if (const char* ca_bundle = std::getenv("MOCKTAIL_CA_BUNDLE")) {
-    curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle);
-  }
+  ApplyConfiguredProxy(curl.get());
 
-  const CURLcode perform_status = curl_easy_perform(curl);
+  const CURLcode perform_status = curl_easy_perform(curl.get());
   long http_status = 0;
   if (perform_status == CURLE_OK) {
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_status);
   }
-  curl_easy_cleanup(curl);
   if (result != nullptr) {
     result->curl_status = perform_status;
     result->http_status = http_status;
-    result->body = response.body;
+    result->body = body;
     result->body_exceeded = response.exceeded;
   }
   if (perform_status != CURLE_OK || http_status != 200 || response.exceeded) {
     return std::nullopt;
   }
-  nlohmann::json document = nlohmann::json::parse(
-      response.body.begin(), response.body.end(), nullptr, false);
+  nlohmann::json document =
+      nlohmann::json::parse(body.begin(), body.end(), nullptr, false);
   if (document.is_discarded() || !document.is_object()) {
     return std::nullopt;
   }
@@ -437,15 +397,17 @@ std::string FetchRobloxCsrfToken(const std::string& auth_cookie,
     if (!cached_token.empty()) return cached_token;
   }
 
-  curl_slist* headers = nullptr;
   const std::string cookie_header = "Cookie: .ROBLOSECURITY=" + auth_cookie;
-  headers = curl_slist_append(headers, cookie_header.c_str());
+  // The owner reports a failed header allocation instead of silently sending a
+  // header-less request, which is what the ignored curl_slist_append return
+  // used to allow.
+  const net::HeaderList headers(std::vector<std::string>{cookie_header});
+  if (!headers.allocated()) return std::string();
   RobloxHttpResult result;
   // Deliberately sent with no CSRF header and an empty body: this call is
   // expected to be rejected, and that rejection is where the token comes from.
   const std::string empty_body;
-  (void)RobloxJsonRequest(kCsrfTokenEndpoint, &empty_body, headers, &result);
-  curl_slist_free_all(headers);
+  (void)RobloxJsonRequest(kCsrfTokenEndpoint, &empty_body, &headers, &result);
   if (http_status_out != nullptr) *http_status_out = result.http_status;
 
   std::string token;
@@ -698,17 +660,17 @@ Status ResolveRobloxPrivateServerShareLink(
     return Invalid("private-server share request is too large");
   }
 
-  curl_slist* headers = nullptr;
-  headers = curl_slist_append(headers, "Content-Type: application/json");
   const std::string cookie_header = "Cookie: .ROBLOSECURITY=" + auth_cookie;
-  headers = curl_slist_append(headers, cookie_header.c_str());
   const std::string csrf_header = std::string("X-CSRF-TOKEN: ") + csrf_token;
-  headers = curl_slist_append(headers, csrf_header.c_str());
+  const net::HeaderList headers(std::vector<std::string>{
+      "Content-Type: application/json", cookie_header, csrf_header});
+  if (!headers.allocated()) {
+    return Invalid("private-server share request could not be prepared");
+  }
 
   RobloxHttpResult result;
   const std::optional<nlohmann::json> document =
-      RobloxJsonRequest(kShareResolveEndpoint, &payload, headers, &result);
-  curl_slist_free_all(headers);
+      RobloxJsonRequest(kShareResolveEndpoint, &payload, &headers, &result);
 
   if (!document.has_value()) {
     LogShareLinkDebug(share_code, true, auth_cookie.size(), csrf_status,

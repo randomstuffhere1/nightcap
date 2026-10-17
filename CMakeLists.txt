@@ -300,6 +300,19 @@ if(UNIX AND NOT APPLE)
 endif()
 pkg_check_modules(WEBKITGTK6 REQUIRED IMPORTED_TARGET webkitgtk-6.0)
 
+# Shared libcurl plumbing: the process-wide initialisation, RAII owners for
+# libcurl's four owned pointer types, the HTTPS transport baseline, and the
+# bounded response-body sink. It depends on nothing but libcurl, so the runtime,
+# the updater and the services library can all use it without depending on each
+# other.
+add_library(mocktail_curl STATIC
+  src/net/curl_support.cc
+)
+add_library(Mocktail::Curl ALIAS mocktail_curl)
+target_include_directories(mocktail_curl PUBLIC include)
+target_link_libraries(mocktail_curl PUBLIC CURL::libcurl Threads::Threads)
+mocktail_apply_compile_options(mocktail_curl)
+
 add_library(mocktail_update STATIC
   src/update/android_manifest.cc
   src/update/apk_bundle.cc
@@ -323,6 +336,7 @@ add_library(Mocktail::Update ALIAS mocktail_update)
 target_include_directories(mocktail_update PUBLIC include)
 target_link_libraries(mocktail_update PUBLIC
   Mocktail::Compat
+  Mocktail::Curl
   CURL::libcurl
   OpenSSL::Crypto
   PkgConfig::LIBYAML
@@ -446,6 +460,7 @@ target_link_libraries(mocktail_runtime PUBLIC Threads::Threads)
 # never links GTK into the process that loads Android libraries.
 target_link_libraries(mocktail_runtime PRIVATE
   Mocktail::FailureDialog
+  Mocktail::Curl
   OpenSSL::Crypto
   CURL::libcurl
   nlohmann_json::nlohmann_json
@@ -499,6 +514,7 @@ add_library(Mocktail::Services ALIAS mocktail_services)
 target_include_directories(mocktail_services PUBLIC include)
 target_link_libraries(mocktail_services PUBLIC
   mocktail_runtime
+  Mocktail::Curl
   CURL::libcurl
   nlohmann_json::nlohmann_json
 )
@@ -659,6 +675,7 @@ target_link_libraries(mocktail_experience_runtime PUBLIC
   PkgConfig::UTF8PROC
   PRIVATE
     Mocktail::AuthRuntimeComposition
+    Mocktail::Curl
     Mocktail::FailureDialog
     Mocktail::LegacyJni
     CURL::libcurl
