@@ -144,6 +144,355 @@ bool ParsePositiveInt(std::string_view value, int* parsed) {
   return result.ec == std::errc() && result.ptr == end && *parsed > 0;
 }
 
+// Most configuration keys are the same shape: look one key up, validate it,
+// write it into the environment under a known variable. Those are declared as
+// data in the k*Fields tables below and walked by ApplyFields, so a key cannot
+// be accepted without being handled, or handled without being accepted.
+//
+// Keys that do not fit stay as explicit code in ValidateAndMap: the ones that
+// validate a value through a parser with its own rules (graphics.backend,
+// graphics.quality, performance.physics_worker_mode, ...), the ones whose value
+// is cross-checked against another key (network.proxy_host with
+// network.proxy_port), and the ones that read a nested mapping (device).
+enum class FieldKind {
+  // Value must be one of `literals`, a space-separated list. Stored verbatim.
+  kEnum,
+  // Value must parse as an unsigned integer within [minimum, maximum]. Stored
+  // verbatim, as the original spelling.
+  kBoundedUnsigned,
+  // Value must parse as a positive integer. Stored as decimal, which normalises
+  // "  7  " and "007" into one spelling.
+  kPositiveInt,
+  // Strict true/false. Stored as "1"/"0".
+  kBooleanDigits,
+  // Strict true/false. Stored as "on"/"off".
+  kBooleanOnOff,
+  // Non-empty, no control bytes, at most `maximum` bytes.
+  kBoundedRequiredString,
+  // As above, but an empty value is allowed: an empty Discord presence field
+  // hides that field rather than failing the load.
+  kBoundedOptionalString,
+  // No validation at all. Only for values the consumer re-validates itself.
+  kPassthrough,
+};
+
+// A constructor rather than default member initialisers, so the short rows stay
+// short without tripping -Wmissing-field-initializers.
+struct Field {
+  constexpr Field(std::string_view key, std::string_view variable_name,
+                  FieldKind field_kind = FieldKind::kPassthrough,
+                  std::uint32_t low = 0, std::uint32_t high = 0,
+                  std::string_view allowed = {})
+      : yaml(key),
+        variable(variable_name),
+        kind(field_kind),
+        // Low is the lower bound for kBoundedUnsigned, and the byte ceiling for
+        // the string kinds.
+        minimum(low),
+        maximum(high),
+        literals(allowed) {}
+
+  std::string_view yaml;
+  std::string_view variable;
+  FieldKind kind;
+  std::uint32_t minimum;
+  std::uint32_t maximum;
+  std::string_view literals;
+};
+
+constexpr std::array<Field, 2> kGraphicsFields{
+    Field{"graphics.vsync", "MOCKTAIL_VSYNC", FieldKind::kEnum, 0, 0,
+          "auto on off"},
+    Field{"graphics.pipeline_cache", "MOCKTAIL_PIPELINE_CACHE_MODE",
+          FieldKind::kEnum, 0, 0, "on off clear"},
+};
+
+constexpr std::array<Field, 4> kPerformanceFields{
+    Field{"performance.texture_memory_mb", "MOCKTAIL_TEXTURE_MEMORY_MB",
+          FieldKind::kBoundedUnsigned, 0, 65536},
+    Field{"performance.small_texture_upscale", "MOCKTAIL_SMALL_TEXTURE_UPSCALE",
+          FieldKind::kBoundedUnsigned, 1, 8},
+    Field{"audio.buffer_samples", "MOCKTAIL_AUDIO_BUFFER_SAMPLES",
+          FieldKind::kBoundedUnsigned, 0, 8192},
+    Field{"performance.multithreaded_rendering",
+          "MOCKTAIL_MULTITHREADED_RENDERING", FieldKind::kBooleanDigits},
+};
+
+constexpr std::array<Field, 4> kWindowAndDeviceFields{
+    Field{"audio.output_device", "MOCKTAIL_AUDIO_OUTPUT_DEVICE",
+          FieldKind::kBoundedRequiredString, 0, 512},
+    Field{"audio.input_device", "MOCKTAIL_AUDIO_INPUT_DEVICE",
+          FieldKind::kBoundedRequiredString, 0, 512},
+    Field{"window.width", "MOCKTAIL_WIN_WIDTH", FieldKind::kPositiveInt},
+    Field{"window.height", "MOCKTAIL_WIN_HEIGHT", FieldKind::kPositiveInt},
+};
+
+constexpr std::array<Field, 5> kInputFields{
+    Field{"window.high_dpi", "MOCKTAIL_WIN_HIGH_DPI",
+          FieldKind::kBooleanDigits},
+    Field{"window.close_on_leave", "MOCKTAIL_WIN_CLOSE_ON_LEAVE",
+          FieldKind::kBooleanDigits},
+    Field{"input.touch_enabled", "MOCKTAIL_TOUCH_MODE",
+          FieldKind::kBooleanOnOff},
+    Field{"input.raw_mouse", "MOCKTAIL_RAW_MOUSE", FieldKind::kBooleanOnOff},
+    Field{"compatibility.desktop_playability",
+          "MOCKTAIL_DESKTOP_PLAYABILITY", FieldKind::kBooleanDigits},
+};
+
+constexpr std::array<Field, 3> kFleasionPassthroughFields{
+    Field{"integrations.fleasion.proxy_mode",
+          "MOCKTAIL_FLEASION_PROXY_MODE"},
+    Field{"integrations.fleasion.proxy_port", "MOCKTAIL_FLEASION_PROXY_PORT"},
+    Field{"integrations.fleasion.ca_certificate",
+          "MOCKTAIL_FLEASION_CA_CERTIFICATE"},
+};
+
+constexpr std::array<Field, 7> kIntegrationBooleanFields{
+    Field{"integrations.discord_rpc.enabled",
+          "MOCKTAIL_DISCORD_RPC_ENABLED", FieldKind::kBooleanDigits},
+    Field{"integrations.fleasion.enabled", "MOCKTAIL_FLEASION_ENABLED",
+          FieldKind::kBooleanDigits},
+    Field{"integrations.discord_rpc.show_place_name",
+          "MOCKTAIL_DISCORD_RPC_SHOW_PLACE_NAME", FieldKind::kBooleanDigits},
+    Field{"integrations.discord_rpc.show_elapsed_time",
+          "MOCKTAIL_DISCORD_RPC_SHOW_ELAPSED_TIME", FieldKind::kBooleanDigits},
+    Field{"integrations.discord_rpc.join.enabled",
+          "MOCKTAIL_DISCORD_RPC_JOIN_ENABLED", FieldKind::kBooleanDigits},
+    Field{"integrations.discord_rpc.join.public_servers_only",
+          "MOCKTAIL_DISCORD_RPC_PUBLIC_SERVERS_ONLY",
+          FieldKind::kBooleanDigits},
+    Field{"integrations.server_location_indicator",
+          "MOCKTAIL_SERVER_LOCATION_INDICATOR", FieldKind::kBooleanDigits},
+};
+
+constexpr std::array<Field, 5> kDiscordRequiredStringFields{
+    Field{"integrations.discord_rpc.join.button_label",
+          "MOCKTAIL_DISCORD_RPC_JOIN_BUTTON_LABEL",
+          FieldKind::kBoundedRequiredString, 0, 32},
+    Field{"integrations.discord_rpc.text.browsing",
+          "MOCKTAIL_DISCORD_RPC_TEXT_BROWSING",
+          FieldKind::kBoundedRequiredString, 0, 128},
+    Field{"integrations.discord_rpc.text.joining",
+          "MOCKTAIL_DISCORD_RPC_TEXT_JOINING",
+          FieldKind::kBoundedRequiredString, 0, 128},
+    Field{"integrations.discord_rpc.text.playing",
+          "MOCKTAIL_DISCORD_RPC_TEXT_PLAYING",
+          FieldKind::kBoundedRequiredString, 0, 128},
+    Field{"integrations.discord_rpc.text.unknown_place",
+          "MOCKTAIL_DISCORD_RPC_TEXT_UNKNOWN_PLACE",
+          FieldKind::kBoundedRequiredString, 0, 128},
+};
+
+constexpr std::array<Field, 6> kDiscordOptionalStringFields{
+    Field{"integrations.discord_rpc.text.title",
+          "MOCKTAIL_DISCORD_RPC_TEXT_TITLE",
+          FieldKind::kBoundedOptionalString, 0, 128},
+    Field{"integrations.discord_rpc.text.state",
+          "MOCKTAIL_DISCORD_RPC_TEXT_STATE",
+          FieldKind::kBoundedOptionalString, 0, 128},
+    Field{"integrations.discord_rpc.images.large",
+          "MOCKTAIL_DISCORD_RPC_IMAGE_LARGE", FieldKind::kBoundedOptionalString, 0,
+          512},
+    Field{"integrations.discord_rpc.images.large_text",
+          "MOCKTAIL_DISCORD_RPC_IMAGE_LARGE_TEXT",
+          FieldKind::kBoundedOptionalString, 0, 128},
+    Field{"integrations.discord_rpc.images.small",
+          "MOCKTAIL_DISCORD_RPC_IMAGE_SMALL", FieldKind::kBoundedOptionalString, 0,
+          512},
+    Field{"integrations.discord_rpc.images.small_text",
+          "MOCKTAIL_DISCORD_RPC_IMAGE_SMALL_TEXT",
+          FieldKind::kBoundedOptionalString, 0, 128},
+};
+
+// Keys accepted but handled as explicit code in ValidateAndMap. Everything else
+// comes from the tables above, so the list of accepted keys cannot drift away
+// from the list of handled keys.
+constexpr std::array<std::string_view, 22> kHandledKeys{
+    "version",
+    "device",
+    "device.__mapping",
+    "device.type",
+    "device.platform",
+    "device.name",
+    "device.manufacturer",
+    "device.model",
+    "device.brand",
+    "device.code",
+    "device.sku",
+    "device.soc_model",
+    "device.touch",
+    "device.mouse",
+    "device.keyboard",
+    "runtime.headless",
+    "runtime.roblox_library",
+    "appearance.theme",
+    "graphics.backend",
+    "graphics.frame_rate_limit",
+    "graphics.quality",
+    "performance.physics_worker_mode",
+};
+
+template <std::size_t N>
+bool Contains(std::string_view key, const std::array<std::string_view, N>& keys) {
+  for (const std::string_view candidate : keys) {
+    if (candidate == key) return true;
+  }
+  return false;
+}
+
+template <std::size_t N>
+bool Contains(std::string_view key, const std::array<Field, N>& fields) {
+  for (const Field& field : fields) {
+    if (field.yaml == key) return true;
+  }
+  return false;
+}
+
+bool IsKnownKey(std::string_view key) {
+  return Contains(key, kHandledKeys) || Contains(key, kGraphicsFields) ||
+         Contains(key, kPerformanceFields) ||
+         Contains(key, kWindowAndDeviceFields) || Contains(key, kInputFields) ||
+         Contains(key, kFleasionPassthroughFields) ||
+         Contains(key, kIntegrationBooleanFields) ||
+         Contains(key, kDiscordRequiredStringFields) ||
+         Contains(key, kDiscordOptionalStringFields) ||
+         // Cross-checked as a pair, and the scheme/port rules are the parser's.
+         key == "performance.memory_limit_mb" || key == "performance.gamemode" ||
+         key == "window.title" || key == "network.use_system_proxy" ||
+         key == "network.proxy_host" || key == "network.proxy_port" ||
+         key == "network.ca_bundle" ||
+         key == "integrations.discord_rpc.application_id";
+}
+
+// "auto, on, or off" from "auto on off". Used for the two enum kinds so the
+// rejection message cannot fall out of step with the accepted values.
+std::string LiteralList(std::string_view literals) {
+  std::vector<std::string_view> parts;
+  std::size_t offset = 0;
+  while (offset < literals.size()) {
+    const std::size_t end = literals.find(' ', offset);
+    parts.push_back(literals.substr(
+        offset, end == std::string_view::npos ? std::string_view::npos
+                                              : end - offset));
+    if (end == std::string_view::npos) break;
+    offset = end + 1;
+  }
+  std::string joined;
+  for (std::size_t index = 0; index < parts.size(); ++index) {
+    if (index != 0) {
+      // "a or b" for two, "a, b, or c" from three on.
+      joined += index + 1 == parts.size() ? (index == 1 ? " or " : ", or ")
+                                         : ", ";
+    }
+    joined += parts[index];
+  }
+  return joined;
+}
+
+bool LiteralAllowed(std::string_view literals, std::string_view value) {
+  std::size_t offset = 0;
+  while (offset < literals.size()) {
+    const std::size_t end = literals.find(' ', offset);
+    if (literals.substr(offset, end == std::string_view::npos
+                                        ? std::string_view::npos
+                                        : end - offset) == value) {
+      return true;
+    }
+    if (end == std::string_view::npos) break;
+    offset = end + 1;
+  }
+  return false;
+}
+
+bool HasControlBytes(std::string_view value) {
+  return std::any_of(value.begin(), value.end(), [](unsigned char byte) {
+    return byte < 0x20 || byte == 0x7f;
+  });
+}
+
+// Validates and writes one key. `serialized` is what goes into the environment,
+// which is not always the configured spelling: a boolean becomes 1/0 or on/off
+// depending on what the reader expects, and a number is normalised.
+bool MapField(const Field& field, std::string_view value, ValueMap* environment,
+              std::string* error) {
+  const std::string prefix(field.yaml);
+  switch (field.kind) {
+    case FieldKind::kEnum:
+      if (!LiteralAllowed(field.literals, value)) {
+        *error = prefix + " must be " + LiteralList(field.literals);
+        return false;
+      }
+      (*environment)[std::string(field.variable)] = std::string(value);
+      return true;
+    case FieldKind::kBoundedUnsigned: {
+      std::uint32_t parsed = 0;
+      if (!ParseBoundedUnsigned(value, field.minimum, field.maximum, &parsed)) {
+        *error = prefix + " must be " + std::to_string(field.minimum) + " to " +
+                 std::to_string(field.maximum);
+        return false;
+      }
+      (*environment)[std::string(field.variable)] = std::string(value);
+      return true;
+    }
+    case FieldKind::kPositiveInt: {
+      int parsed = 0;
+      if (!ParsePositiveInt(value, &parsed)) {
+        *error = prefix + " must be a positive integer";
+        return false;
+      }
+      (*environment)[std::string(field.variable)] = std::to_string(parsed);
+      return true;
+    }
+    case FieldKind::kBooleanDigits:
+    case FieldKind::kBooleanOnOff: {
+      bool parsed = false;
+      if (!ParseBoolean(value, &parsed)) {
+        *error = prefix + " must be true or false";
+        return false;
+      }
+      const bool on_off = field.kind == FieldKind::kBooleanOnOff;
+      (*environment)[std::string(field.variable)] =
+          parsed ? (on_off ? "on" : "1") : (on_off ? "off" : "0");
+      return true;
+    }
+    case FieldKind::kBoundedRequiredString:
+    case FieldKind::kBoundedOptionalString: {
+      const bool required = field.kind == FieldKind::kBoundedRequiredString;
+      if ((required && value.empty()) || value.size() > field.maximum ||
+          HasControlBytes(value)) {
+        *error = prefix + (required ? " must be non-empty, bounded, and contain"
+                                      " no control bytes"
+                                    : " must be bounded and contain no control"
+                                      " bytes");
+        return false;
+      }
+      (*environment)[std::string(field.variable)] = std::string(value);
+      return true;
+    }
+    case FieldKind::kPassthrough:
+      (*environment)[std::string(field.variable)] = std::string(value);
+      return true;
+  }
+  *error = prefix + " is not a supported configuration key";
+  return false;
+}
+
+template <std::size_t N>
+bool ApplyFields(const std::array<Field, N>& fields,
+                 const std::unordered_map<std::string, std::string>& yaml,
+                 ValueMap* environment, std::string* error) {
+  for (const Field& field : fields) {
+    const auto found = yaml.find(std::string(field.yaml));
+    if (found == yaml.end()) {
+      continue;
+    }
+    if (!MapField(field, found->second, environment, error)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
                     std::string* error) {
   const auto value =
@@ -152,76 +501,12 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     return found == yaml.end() ? std::nullopt
                                : std::optional<std::string>(found->second);
   };
-  const std::unordered_set<std::string> supported = {
-      "version",
-      "device",
-      "device.__mapping",
-      "device.type",
-      "device.platform",
-      "device.name",
-      "device.manufacturer",
-      "device.model",
-      "device.brand",
-      "device.code",
-      "device.sku",
-      "device.soc_model",
-      "device.touch",
-      "device.mouse",
-      "device.keyboard",
-      "runtime.headless",
-      "runtime.roblox_library",
-      "appearance.theme",
-      "graphics.backend",
-      "graphics.frame_rate_limit",
-      "graphics.vsync",
-      "graphics.pipeline_cache",
-      "graphics.quality",
-      "performance.texture_memory_mb",
-      "performance.small_texture_upscale",
-      "audio.buffer_samples",
-      "performance.multithreaded_rendering",
-      "performance.physics_worker_mode",
-      "performance.memory_limit_mb",
-      "performance.gamemode",
-      "audio.output_device",
-      "audio.input_device",
-       "window.width",
-       "window.height",
-       "window.title",
-       "window.high_dpi",
-       "window.close_on_leave",
-       "input.touch_enabled",
-       "input.raw_mouse",
-      "compatibility.desktop_playability",
-      "network.use_system_proxy",
-      "network.proxy_host",
-      "network.proxy_port",
-      "network.ca_bundle",
-      "integrations.fleasion.enabled",
-      "integrations.fleasion.proxy_mode",
-      "integrations.fleasion.proxy_port",
-      "integrations.fleasion.ca_certificate",
-      "integrations.server_location_indicator",
-      "integrations.discord_rpc.enabled",
-      "integrations.discord_rpc.show_place_name",
-      "integrations.discord_rpc.show_elapsed_time",
-      "integrations.discord_rpc.application_id",
-      "integrations.discord_rpc.join.enabled",
-      "integrations.discord_rpc.join.public_servers_only",
-      "integrations.discord_rpc.join.button_label",
-      "integrations.discord_rpc.text.browsing",
-      "integrations.discord_rpc.text.joining",
-      "integrations.discord_rpc.text.playing",
-      "integrations.discord_rpc.text.state",
-      "integrations.discord_rpc.text.unknown_place",
-      "integrations.discord_rpc.text.title",
-      "integrations.discord_rpc.images.large",
-      "integrations.discord_rpc.images.large_text",
-      "integrations.discord_rpc.images.small",
-      "integrations.discord_rpc.images.small_text",
-  };
+  // The accepted-key list is derived from the field tables and the explicitly
+  // handled keys, so a key cannot be accepted without being handled, or
+  // handled without being accepted. It used to be a separate hand-written set
+  // of ~55 literals that had to be kept in step by hand.
   for (const auto& [key, ignored] : yaml) {
-    if (supported.find(key) == supported.end()) {
+    if (!IsKnownKey(key)) {
       *error = "unknown runtime configuration key: " + key;
       return false;
     }
@@ -343,21 +628,8 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     }
     (*environment)["MOCKTAIL_FRAME_RATE_LIMIT"] = *frame_rate;
   }
-  if (const auto vsync = value("graphics.vsync"); vsync.has_value()) {
-    if (*vsync != "auto" && *vsync != "on" && *vsync != "off") {
-      *error = "graphics.vsync must be auto, on, or off";
-      return false;
-    }
-    (*environment)["MOCKTAIL_VSYNC"] = *vsync;
-  }
-  if (const auto pipeline_cache = value("graphics.pipeline_cache");
-      pipeline_cache.has_value()) {
-    if (*pipeline_cache != "on" && *pipeline_cache != "off" &&
-        *pipeline_cache != "clear") {
-      *error = "graphics.pipeline_cache must be on, off, or clear";
-      return false;
-    }
-    (*environment)["MOCKTAIL_PIPELINE_CACHE_MODE"] = *pipeline_cache;
+  if (!ApplyFields(kGraphicsFields, yaml, environment, error)) {
+    return false;
   }
   if (const auto quality = value("graphics.quality"); quality.has_value()) {
     GraphicsQualityConfig parsed;
@@ -367,42 +639,8 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     }
     (*environment)["MOCKTAIL_GRAPHICS_QUALITY"] = parsed.value();
   }
-  if (const auto texture_memory = value("performance.texture_memory_mb");
-      texture_memory.has_value()) {
-    std::uint32_t parsed = 0;
-    if (!ParseBoundedUnsigned(*texture_memory, 0, 65536, &parsed)) {
-      *error = "performance.texture_memory_mb must be 0 to 65536";
-      return false;
-    }
-    (*environment)["MOCKTAIL_TEXTURE_MEMORY_MB"] = *texture_memory;
-  }
-  if (const auto upscale = value("performance.small_texture_upscale");
-      upscale.has_value()) {
-    std::uint32_t parsed = 0;
-    if (!ParseBoundedUnsigned(*upscale, 1, 8, &parsed)) {
-      *error = "performance.small_texture_upscale must be 1 to 8";
-      return false;
-    }
-    (*environment)["MOCKTAIL_SMALL_TEXTURE_UPSCALE"] = *upscale;
-  }
-  if (const auto buffer = value("audio.buffer_samples");
-      buffer.has_value()) {
-    std::uint32_t parsed = 0;
-    if (!ParseBoundedUnsigned(*buffer, 0, 8192, &parsed)) {
-      *error = "audio.buffer_samples must be 0 to 8192";
-      return false;
-    }
-    (*environment)["MOCKTAIL_AUDIO_BUFFER_SAMPLES"] = *buffer;
-  }
-  if (const auto multithreaded_rendering =
-          value("performance.multithreaded_rendering");
-      multithreaded_rendering.has_value()) {
-    bool parsed = false;
-    if (!ParseBoolean(*multithreaded_rendering, &parsed)) {
-      *error = "performance.multithreaded_rendering must be true or false";
-      return false;
-    }
-    (*environment)["MOCKTAIL_MULTITHREADED_RENDERING"] = parsed ? "1" : "0";
+  if (!ApplyFields(kPerformanceFields, yaml, environment, error)) {
+    return false;
   }
   if (const auto physics_worker_mode = value("performance.physics_worker_mode");
       physics_worker_mode.has_value()) {
@@ -435,39 +673,8 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     }
     (*environment)["MOCKTAIL_GAMEMODE"] = GameModePolicyName(parsed);
   }
-  if (const auto output_device = value("audio.output_device");
-      output_device.has_value()) {
-    if (!IsValidDeviceProfileValue(*output_device, 512)) {
-      *error =
-          "audio.output_device must be non-empty, bounded, and contain no "
-          "control bytes";
-      return false;
-    }
-    (*environment)["MOCKTAIL_AUDIO_OUTPUT_DEVICE"] = *output_device;
-  }
-  if (const auto input_device = value("audio.input_device");
-      input_device.has_value()) {
-    if (!IsValidDeviceProfileValue(*input_device, 512)) {
-      *error =
-          "audio.input_device must be non-empty, bounded, and contain no "
-          "control bytes";
-      return false;
-    }
-    (*environment)["MOCKTAIL_AUDIO_INPUT_DEVICE"] = *input_device;
-  }
-  for (const auto& [key, variable] : {
-           std::pair<std::string_view, std::string_view>("window.width",
-                                                         "MOCKTAIL_WIN_WIDTH"),
-           {"window.height", "MOCKTAIL_WIN_HEIGHT"},
-       }) {
-    if (const auto configured = value(key); configured.has_value()) {
-      int parsed = 0;
-      if (!ParsePositiveInt(*configured, &parsed)) {
-        *error = std::string(key) + " must be a positive integer";
-        return false;
-      }
-      (*environment)[std::string(variable)] = std::to_string(parsed);
-    }
+  if (!ApplyFields(kWindowAndDeviceFields, yaml, environment, error)) {
+    return false;
   }
   if (const auto title = value("window.title"); title.has_value()) {
     if (title->empty()) {
@@ -476,48 +683,8 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     }
     (*environment)["MOCKTAIL_WIN_TITLE"] = *title;
   }
-  if (const auto high_dpi = value("window.high_dpi"); high_dpi.has_value()) {
-    bool parsed = false;
-    if (!ParseBoolean(*high_dpi, &parsed)) {
-      *error = "window.high_dpi must be true or false";
-      return false;
-    }
-    (*environment)["MOCKTAIL_WIN_HIGH_DPI"] = parsed ? "1" : "0";
-  }
-  if (const auto close_on_leave = value("window.close_on_leave");
-      close_on_leave.has_value()) {
-    bool parsed = false;
-    if (!ParseBoolean(*close_on_leave, &parsed)) {
-      *error = "window.close_on_leave must be true or false";
-      return false;
-    }
-    (*environment)["MOCKTAIL_WIN_CLOSE_ON_LEAVE"] = parsed ? "1" : "0";
-  }
-  if (const auto touch = value("input.touch_enabled"); touch.has_value()) {
-    bool parsed = false;
-    if (!ParseBoolean(*touch, &parsed)) {
-      *error = "input.touch_enabled must be true or false";
-      return false;
-    }
-    (*environment)["MOCKTAIL_TOUCH_MODE"] = parsed ? "on" : "off";
-  }
-  if (const auto raw_mouse = value("input.raw_mouse"); raw_mouse.has_value()) {
-    bool parsed = false;
-    if (!ParseBoolean(*raw_mouse, &parsed)) {
-      *error = "input.raw_mouse must be true or false";
-      return false;
-    }
-    (*environment)["MOCKTAIL_RAW_MOUSE"] = parsed ? "on" : "off";
-  }
-  if (const auto desktop_playability =
-          value("compatibility.desktop_playability");
-      desktop_playability.has_value()) {
-    bool parsed = false;
-    if (!ParseBoolean(*desktop_playability, &parsed)) {
-      *error = "compatibility.desktop_playability must be true or false";
-      return false;
-    }
-    (*environment)["MOCKTAIL_DESKTOP_PLAYABILITY"] = parsed ? "1" : "0";
+  if (!ApplyFields(kInputFields, yaml, environment, error)) {
+    return false;
   }
   const auto proxy_host = value("network.proxy_host");
   const auto proxy_port = value("network.proxy_port");
@@ -559,41 +726,11 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     }
     (*environment)["MOCKTAIL_CA_BUNDLE"] = *ca_bundle;
   }
-  for (const auto& [key, variable] : {
-           std::pair<std::string_view, std::string_view>(
-               "integrations.discord_rpc.enabled",
-               "MOCKTAIL_DISCORD_RPC_ENABLED"),
-           {"integrations.fleasion.enabled", "MOCKTAIL_FLEASION_ENABLED"},
-           {"integrations.discord_rpc.show_place_name",
-            "MOCKTAIL_DISCORD_RPC_SHOW_PLACE_NAME"},
-           {"integrations.discord_rpc.show_elapsed_time",
-            "MOCKTAIL_DISCORD_RPC_SHOW_ELAPSED_TIME"},
-           {"integrations.discord_rpc.join.enabled",
-            "MOCKTAIL_DISCORD_RPC_JOIN_ENABLED"},
-           {"integrations.discord_rpc.join.public_servers_only",
-            "MOCKTAIL_DISCORD_RPC_PUBLIC_SERVERS_ONLY"},
-           {"integrations.server_location_indicator",
-            "MOCKTAIL_SERVER_LOCATION_INDICATOR"},
-       }) {
-    const std::optional<std::string> configured = value(key);
-    if (!configured.has_value()) {
-      continue;
-    }
-    bool parsed = false;
-    if (!ParseBoolean(*configured, &parsed)) {
-      *error = std::string(key) + " must be true or false";
-      return false;
-    }
-    (*environment)[std::string(variable)] = parsed ? "1" : "0";
+  if (!ApplyFields(kIntegrationBooleanFields, yaml, environment, error)) {
+    return false;
   }
-  for (const auto& [key, variable] : {
-           std::pair<std::string_view, std::string_view>(
-               "integrations.fleasion.proxy_mode", "MOCKTAIL_FLEASION_PROXY_MODE"),
-           {"integrations.fleasion.proxy_port", "MOCKTAIL_FLEASION_PROXY_PORT"},
-           {"integrations.fleasion.ca_certificate", "MOCKTAIL_FLEASION_CA_CERTIFICATE"},
-       }) {
-    if (const auto configured = value(key))
-      (*environment)[std::string(variable)] = *configured;
+  if (!ApplyFields(kFleasionPassthroughFields, yaml, environment, error)) {
+    return false;
   }
   if (const auto application_id =
           value("integrations.discord_rpc.application_id");
@@ -609,67 +746,12 @@ bool ValidateAndMap(const ValueMap& yaml, ValueMap* environment,
     }
     (*environment)["MOCKTAIL_DISCORD_APPLICATION_ID"] = *application_id;
   }
-  struct DiscordStringField {
-    std::string_view yaml;
-    std::string_view variable;
-    std::size_t maximum;
-  };
-  for (const DiscordStringField& field : {
-           DiscordStringField{"integrations.discord_rpc.join.button_label",
-                              "MOCKTAIL_DISCORD_RPC_JOIN_BUTTON_LABEL", 32},
-           {"integrations.discord_rpc.text.browsing",
-            "MOCKTAIL_DISCORD_RPC_TEXT_BROWSING", 128},
-           {"integrations.discord_rpc.text.joining",
-            "MOCKTAIL_DISCORD_RPC_TEXT_JOINING", 128},
-           {"integrations.discord_rpc.text.playing",
-            "MOCKTAIL_DISCORD_RPC_TEXT_PLAYING", 128},
-           {"integrations.discord_rpc.text.unknown_place",
-            "MOCKTAIL_DISCORD_RPC_TEXT_UNKNOWN_PLACE", 128},
-       }) {
-    const std::optional<std::string> configured = value(field.yaml);
-    if (!configured.has_value()) {
-      continue;
-    }
-    if (configured->empty() || configured->size() > field.maximum ||
-        std::any_of(configured->begin(), configured->end(),
-                    [](unsigned char byte) {
-                      return byte < 0x20 || byte == 0x7f;
-                    })) {
-      *error = std::string(field.yaml) +
-               " must be non-empty, bounded, and contain no control bytes";
-      return false;
-    }
-    (*environment)[std::string(field.variable)] = *configured;
+  if (!ApplyFields(kDiscordRequiredStringFields, yaml, environment, error)) {
+    return false;
   }
   // Presence fields may be empty: an empty value hides that field.
-  for (const DiscordStringField& field : {
-           DiscordStringField{"integrations.discord_rpc.text.title",
-                              "MOCKTAIL_DISCORD_RPC_TEXT_TITLE", 128},
-           {"integrations.discord_rpc.text.state",
-            "MOCKTAIL_DISCORD_RPC_TEXT_STATE", 128},
-           {"integrations.discord_rpc.images.large",
-            "MOCKTAIL_DISCORD_RPC_IMAGE_LARGE", 512},
-           {"integrations.discord_rpc.images.large_text",
-            "MOCKTAIL_DISCORD_RPC_IMAGE_LARGE_TEXT", 128},
-           {"integrations.discord_rpc.images.small",
-            "MOCKTAIL_DISCORD_RPC_IMAGE_SMALL", 512},
-           {"integrations.discord_rpc.images.small_text",
-            "MOCKTAIL_DISCORD_RPC_IMAGE_SMALL_TEXT", 128},
-       }) {
-    const std::optional<std::string> configured = value(field.yaml);
-    if (!configured.has_value()) {
-      continue;
-    }
-    if (configured->size() > field.maximum ||
-        std::any_of(configured->begin(), configured->end(),
-                    [](unsigned char byte) {
-                      return byte < 0x20 || byte == 0x7f;
-                    })) {
-      *error = std::string(field.yaml) +
-               " must be bounded and contain no control bytes";
-      return false;
-    }
-    (*environment)[std::string(field.variable)] = *configured;
+  if (!ApplyFields(kDiscordOptionalStringFields, yaml, environment, error)) {
+    return false;
   }
   return true;
 }
