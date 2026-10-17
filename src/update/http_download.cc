@@ -15,15 +15,11 @@
 #include <mutex>
 #include <string>
 
+#include "net/curl_support.h"
 #include "update/payload_integrity.h"
 
 namespace mocktail::update {
 namespace {
-
-std::once_flag g_curl_once;
-CURLcode g_curl_status = CURLE_FAILED_INIT;
-
-void InitialiseCurl() { g_curl_status = curl_global_init(CURL_GLOBAL_DEFAULT); }
 
 bool HostMatches(std::string_view host, std::string_view allowed) {
   if (host == allowed) return true;
@@ -40,30 +36,6 @@ std::string Lower(std::string value) {
   }
   return value;
 }
-
-struct CurlUrlDeleter {
-  void operator()(CURLU* url) const {
-    if (url != nullptr) curl_url_cleanup(url);
-  }
-};
-
-struct CurlStringDeleter {
-  void operator()(char* value) const {
-    if (value != nullptr) curl_free(value);
-  }
-};
-
-struct CurlHandleDeleter {
-  void operator()(CURL* handle) const {
-    if (handle != nullptr) curl_easy_cleanup(handle);
-  }
-};
-
-struct CurlHeadersDeleter {
-  void operator()(curl_slist* headers) const {
-    if (headers != nullptr) curl_slist_free_all(headers);
-  }
-};
 
 bool RedirectStatus(long status) {
   return status == 301 || status == 302 || status == 303 || status == 307 ||
@@ -155,29 +127,6 @@ int ReportTransferProgress(void* opaque, curl_off_t expected, curl_off_t now,
   return 0;
 }
 
-struct BytesWriter {
-  std::string* output = nullptr;
-  std::size_t maximum = 0;
-  bool exceeded = false;
-};
-
-std::size_t WriteBytes(char* data, std::size_t size, std::size_t count,
-                       void* opaque) {
-  auto* writer = static_cast<BytesWriter*>(opaque);
-  if (writer == nullptr || writer->output == nullptr || data == nullptr ||
-      (count != 0 && size > std::numeric_limits<std::size_t>::max() / count)) {
-    return 0;
-  }
-  const std::size_t bytes = size * count;
-  if (bytes > writer->maximum ||
-      writer->output->size() > writer->maximum - bytes) {
-    writer->exceeded = true;
-    return 0;
-  }
-  writer->output->append(data, bytes);
-  return bytes;
-}
-
 struct FileWriter {
   int descriptor = -1;
   std::size_t maximum = 0;
@@ -223,47 +172,29 @@ std::size_t WriteFileBytes(char* data, std::size_t size, std::size_t count,
   return bytes;
 }
 
+// The updater validates every redirect hop itself (IsTrustedHttpsUrl), so
+// libcurl is told not to follow them; that check is what keeps a redirect from
+// sending the request somewhere untrusted.
 bool Configure(CURL* handle, const HttpTransferRequest& request,
                std::string_view url, curl_slist* headers,
                std::array<char, CURL_ERROR_SIZE>* error_buffer) {
-  return curl_easy_setopt(handle, CURLOPT_URL, std::string(url).c_str()) ==
+  net::TransportOptions options;
+  options.user_agent = "Mocktail-native-updater/1";
+  options.connect_timeout_ms = request.connect_timeout_ms;
+  options.timeout_ms = request.transfer_timeout_ms;
+  options.follow_redirects = false;
+  return net::ApplyTransportOptions(handle, options) == CURLE_OK &&
+         curl_easy_setopt(handle, CURLOPT_URL, std::string(url).c_str()) ==
              CURLE_OK &&
          curl_easy_setopt(handle, CURLOPT_HTTPGET, 1L) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_FOLLOWLOCATION, 0L) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_PROTOCOLS_STR, "https") == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_REDIR_PROTOCOLS_STR, "https") ==
-             CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_NOSIGNAL, 1L) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_CONNECTTIMEOUT_MS,
-                          request.connect_timeout_ms) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_TIMEOUT_MS,
-                          request.transfer_timeout_ms) == CURLE_OK &&
          curl_easy_setopt(handle, CURLOPT_LOW_SPEED_LIMIT,
                           request.low_speed_bytes_per_second) == CURLE_OK &&
          curl_easy_setopt(handle, CURLOPT_LOW_SPEED_TIME,
                           request.low_speed_seconds) == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_ACCEPT_ENCODING, "") == CURLE_OK &&
-         curl_easy_setopt(handle, CURLOPT_USERAGENT,
-                          "Mocktail-native-updater/1") == CURLE_OK &&
          curl_easy_setopt(handle, CURLOPT_ERRORBUFFER, error_buffer->data()) ==
              CURLE_OK &&
          (headers == nullptr ||
           curl_easy_setopt(handle, CURLOPT_HTTPHEADER, headers) == CURLE_OK);
-}
-
-std::unique_ptr<curl_slist, CurlHeadersDeleter> BuildHeaders(
-    const std::vector<std::string>& values, std::string* error) {
-  curl_slist* list = nullptr;
-  for (const std::string& value : values) {
-    curl_slist* next = curl_slist_append(list, value.c_str());
-    if (next == nullptr) {
-      curl_slist_free_all(list);
-      *error = "cannot allocate HTTP request headers";
-      return {};
-    }
-    list = next;
-  }
-  return std::unique_ptr<curl_slist, CurlHeadersDeleter>(list);
 }
 
 std::string RedirectUrl(CURL* handle) {
@@ -282,7 +213,7 @@ std::string CurlFailure(CURLcode status,
 }
 
 std::string UrlHost(std::string_view url) {
-  std::unique_ptr<CURLU, CurlUrlDeleter> parsed(curl_url());
+  const net::UrlHandle parsed;
   char* raw_host = nullptr;
   if (!parsed ||
       curl_url_set(parsed.get(), CURLUPART_URL, std::string(url).c_str(), 0) !=
@@ -291,7 +222,7 @@ std::string UrlHost(std::string_view url) {
       raw_host == nullptr) {
     return {};
   }
-  std::unique_ptr<char, CurlStringDeleter> host(raw_host);
+  const net::OwnedCString host(raw_host);
   return Lower(host.get());
 }
 
@@ -310,13 +241,16 @@ HttpBytesResult DownloadBytesAttempt(const HttpTransferRequest& request,
   HttpBytesResult result;
   std::string current = request.url;
   for (int redirect = 0; redirect <= request.maximum_redirects; ++redirect) {
-    std::unique_ptr<CURL, CurlHandleDeleter> handle(curl_easy_init());
+    const net::EasyHandle handle(true);
     if (!handle) {
       result.error = "curl_easy_init failed";
       return result;
     }
-    auto headers = BuildHeaders(request.headers, &result.error);
-    if (!request.headers.empty() && !headers) return result;
+    const net::HeaderList headers(request.headers);
+    if (!request.headers.empty() && !headers.allocated()) {
+      result.error = "cannot allocate HTTP request headers";
+      return result;
+    }
     std::array<char, CURL_ERROR_SIZE> error_buffer{};
     if (!Configure(handle.get(), request, current, headers.get(),
                    &error_buffer)) {
@@ -324,8 +258,9 @@ HttpBytesResult DownloadBytesAttempt(const HttpTransferRequest& request,
       return result;
     }
     result.bytes.clear();
-    BytesWriter writer{&result.bytes, request.maximum_bytes, false};
-    curl_easy_setopt(handle.get(), CURLOPT_WRITEFUNCTION, WriteBytes);
+    net::BoundedStringSink writer{&result.bytes, request.maximum_bytes, false};
+    curl_easy_setopt(handle.get(), CURLOPT_WRITEFUNCTION,
+                     net::WriteBoundedString);
     curl_easy_setopt(handle.get(), CURLOPT_WRITEDATA, &writer);
     const CURLcode status = curl_easy_perform(handle.get());
     if (status != CURLE_OK) {
@@ -395,9 +330,9 @@ HttpDownloadResult DownloadFileAttempt(const HttpTransferRequest& request,
                      std::string(std::strerror(errno));
       return result;
     }
-    std::unique_ptr<CURL, CurlHandleDeleter> handle(curl_easy_init());
-    auto headers = BuildHeaders(request.headers, &result.error);
-    if (!handle || (!request.headers.empty() && !headers)) {
+    const net::EasyHandle handle(true);
+    const net::HeaderList headers(request.headers);
+    if (!handle || (!request.headers.empty() && !headers.allocated())) {
       close(descriptor);
       std::filesystem::remove(temporary, filesystem_error);
       if (result.error.empty()) result.error = "curl_easy_init failed";
@@ -508,7 +443,7 @@ HttpDownloadResult DownloadFileAttempt(const HttpTransferRequest& request,
 bool IsTrustedHttpsUrl(std::string_view url,
                        const std::vector<std::string>& allowed_hosts,
                        std::string* error) {
-  std::unique_ptr<CURLU, CurlUrlDeleter> parsed(curl_url());
+  const net::UrlHandle parsed;
   if (!parsed || curl_url_set(parsed.get(), CURLUPART_URL,
                               std::string(url).c_str(), 0) != CURLUE_OK) {
     if (error != nullptr) *error = "URL is malformed";
@@ -526,15 +461,15 @@ bool IsTrustedHttpsUrl(std::string_view url,
       curl_url_get(parsed.get(), CURLUPART_PORT, &raw_port, 0);
   const CURLUcode user_status =
       curl_url_get(parsed.get(), CURLUPART_USER, &raw_user, 0);
-  std::unique_ptr<char, CurlStringDeleter> scheme(raw_scheme);
-  std::unique_ptr<char, CurlStringDeleter> host(raw_host);
-  std::unique_ptr<char, CurlStringDeleter> port(raw_port);
-  std::unique_ptr<char, CurlStringDeleter> user(raw_user);
-  if (scheme_status != CURLUE_OK || host_status != CURLUE_OK ||
-      scheme == nullptr || host == nullptr || Lower(scheme.get()) != "https" ||
-      (port_status == CURLUE_OK && port != nullptr &&
+  const net::OwnedCString scheme(raw_scheme);
+  const net::OwnedCString host(raw_host);
+  const net::OwnedCString port(raw_port);
+  const net::OwnedCString user(raw_user);
+  if (scheme_status != CURLUE_OK || host_status != CURLUE_OK || !scheme ||
+      !host || Lower(scheme.get()) != "https" ||
+      (port_status == CURLUE_OK && port &&
        std::string_view(port.get()) != "443") ||
-      (user_status == CURLUE_OK && user != nullptr && user.get()[0] != '\0')) {
+      (user_status == CURLUE_OK && user && user.get()[0] != '\0')) {
     if (error != nullptr)
       *error = "URL must be credential-free HTTPS on port 443";
     return false;
@@ -557,9 +492,8 @@ HttpBytesResult DownloadBytes(const HttpTransferRequest& request) {
     if (result.error.empty()) result.error = "HTTP byte limit is zero";
     return result;
   }
-  std::call_once(g_curl_once, InitialiseCurl);
-  if (g_curl_status != CURLE_OK) {
-    result.error = curl_easy_strerror(g_curl_status);
+  if (net::InitialiseCurl() != CURLE_OK) {
+    result.error = curl_easy_strerror(CURLE_FAILED_INIT);
     return result;
   }
   const int attempts =
@@ -581,9 +515,8 @@ HttpDownloadResult DownloadFile(const HttpTransferRequest& request,
     if (result.error.empty()) result.error = "HTTP byte limit is zero";
     return result;
   }
-  std::call_once(g_curl_once, InitialiseCurl);
-  if (g_curl_status != CURLE_OK) {
-    result.error = curl_easy_strerror(g_curl_status);
+  if (net::InitialiseCurl() != CURLE_OK) {
+    result.error = curl_easy_strerror(CURLE_FAILED_INIT);
     return result;
   }
   std::error_code filesystem_error;
