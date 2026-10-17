@@ -167,6 +167,13 @@ class RobloxExperienceComposition final {
   // or Roblox chose the server itself. Main loop only.
   std::string ActiveGameInstanceId() const;
 
+  // True while an experience is being joined or is already running, and false
+  // while the guest is on the Roblox home screen. This is set as soon as the
+  // join is queued, before the game opens its connection, so a caller that
+  // samples the socket table can still see that connection as new. Main loop
+  // only.
+  bool InExperience() const;
+
  private:
   friend class RobloxExperienceCompositionWebSurfaceTest;
   struct GlobalObjects;

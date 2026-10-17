@@ -7481,16 +7481,20 @@ int mocktail::legacy::Run(const runtime::CommandLineOptions& options,
                        "because window.close_on_leave is on\n");
           mocktail::window::RequestQuit();
         }
-        // One lookup per session, once the game is actually running. The
-        // resolver runs on its own worker, so this never delays the loop.
-        // One lookup per session, watched from the moment the client is on screen.
-// The game session coordinator is not the signal here: it only advances when
-// the host launches an experience itself, and joining from the client's own
-// front page or from a place id never touches it. A presented frame is the
-// signal that works for every way in, and the resolver waits for the game's
-// connection rather than assuming the join already happened.
+        // One lookup per session, watched from the moment the guest starts
+        // joining an experience. The resolver runs on its own worker, so this
+        // never delays the loop.
+        //
+        // The signal is the experience the composition is joining or running,
+        // not the window. The Roblox home screen presents frames and keeps its
+        // own connections to Roblox open long before a game is joined, so
+        // watching from the first presented frame located a home-screen API or
+        // CDN socket and reported it as the server the player joined. Only a
+        // queued or running experience means there is a server to locate, and
+        // it is set before the game opens its connection, so the resolver's
+        // baseline still excludes it.
         if (runtime_config.server_location().enabled &&
-            mocktail::window::HasPresentedFrame() &&
+            experience_composition->InExperience() &&
             !server_location_requested) {
           server_location_requested = true;
           server_location.ObserveJoinedServer(

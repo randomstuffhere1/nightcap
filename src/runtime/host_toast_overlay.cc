@@ -5,6 +5,7 @@
 #include <fontconfig/fontconfig.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -34,9 +35,20 @@ constexpr int kTextSizePx = 14;
 // The gap between the screen's top edge and the card at rest.
 constexpr int kRestOffsetPx = 24;
 constexpr int kMaximumTextWidthPx = 520;
-// Down from above the top edge, held, then back up the way it came.
+// Down from above the top edge, held, then back up the way it came. The hold
+// is long enough to read the line and for a slow first join to settle before
+// the leave is even considered.
 constexpr std::int64_t kSlideUs = 260000;
-constexpr std::int64_t kHoldUs = 5000000;
+constexpr std::int64_t kHoldUs = 7000000;
+// A present interval longer than this is a stutter the leave slide would fall
+// through: at kSlideUs, the slide has four or more frames only when every
+// interval is under about 42 ms, which is a little under 25 fps. A steady
+// 25-30 or 50-60 frame rate clears it, and a stutter does not.
+constexpr std::int64_t kSteadyMaximumIntervalUs = 42000;
+// Two queries this close together are one present, not two (the Vulkan fast
+// path asks whether a notice is up, then the compositor asks again for the
+// card). No game presents anywhere near this fast.
+constexpr std::int64_t kSamePresentGapUs = 1000;
 
 constexpr std::uint8_t kCardRed = 31;
 constexpr std::uint8_t kCardGreen = 31;
@@ -229,10 +241,12 @@ void HostToastOverlay::Show(std::string_view message) {
     // The same notice again: show it again from the start rather than leaving
     // the player with whatever the previous one's animation had reached.
     started_us_ = MonotonicMicroseconds();
+    leave_started_us_ = 0;
     return;
   }
   message_.assign(message);
   started_us_ = MonotonicMicroseconds();
+  leave_started_us_ = 0;
   ReleaseFrameLocked();
 }
 
@@ -247,31 +261,78 @@ void HostToastOverlay::ReleaseFrameLocked() {
   }
 }
 
-int HostToastOverlay::ToastOffsetAt(std::int64_t elapsed_us) {
-  if (elapsed_us <= 0) {
-    return 0;
-  }
-  if (elapsed_us >= kSlideUs + kHoldUs + kSlideUs) {
-    return -kCardHeightPx;
-  }
-  if (elapsed_us < kSlideUs) {
-    // Down from above the screen's top edge: a whole card above the window,
-    // easing to the resting gap.
-    const double eased = SmoothStep(elapsed_us);
-    return static_cast<int>(kRestOffsetPx - eased * kRestOffsetPx -
-                            kCardHeightPx);
-  }
-  if (elapsed_us < kSlideUs + kHoldUs) {
+int HostToastOverlay::ToastOffsetAt(std::int64_t started_us,
+                                    std::int64_t leave_started_us,
+                                    std::int64_t now_us) {
+  if (leave_started_us == 0) {
+    const std::int64_t elapsed_us = now_us - started_us;
+    if (elapsed_us <= 0) {
+      return 0;
+    }
+    if (elapsed_us < kSlideUs) {
+      // Down from above the screen's top edge: a whole card above the window,
+      // easing to the resting gap.
+      const double eased = SmoothStep(elapsed_us);
+      return static_cast<int>(kRestOffsetPx - eased * kRestOffsetPx -
+                              kCardHeightPx);
+    }
     return kRestOffsetPx;
   }
+  const std::int64_t elapsed_us = now_us - leave_started_us;
   // Back up the way it came, so the whole of it clears the top edge.
-  const double eased = SmoothStep(elapsed_us - kSlideUs - kHoldUs);
+  const double eased = SmoothStep(std::max<std::int64_t>(0, elapsed_us));
   return static_cast<int>(kRestOffsetPx -
                           eased * (kRestOffsetPx + kCardHeightPx));
 }
 
-bool HostToastOverlay::ToastIsFinished(std::int64_t elapsed_us) {
-  return elapsed_us >= kSlideUs + kHoldUs + kSlideUs;
+bool HostToastOverlay::ToastIsFinished(std::int64_t leave_started_us,
+                                       std::int64_t now_us) {
+  return leave_started_us != 0 && now_us - leave_started_us >= kSlideUs;
+}
+
+bool HostToastOverlay::PresentIntervalsAreSteady(
+    const std::int64_t* intervals_us, std::size_t count) {
+  if (intervals_us == nullptr || count == 0) {
+    return false;
+  }
+  for (std::size_t index = 0; index < count; ++index) {
+    if (intervals_us[index] > kSteadyMaximumIntervalUs) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void HostToastOverlay::RecordPresentLocked(std::int64_t now_us) {
+  // The same present asked twice: the second query is not another frame.
+  if (last_present_us_ != 0 && now_us - last_present_us_ < kSamePresentGapUs) {
+    return;
+  }
+  last_present_us_ = now_us;
+  presents_us_[present_next_] = now_us;
+  present_next_ = (present_next_ + 1) % kPacingSamples;
+  if (present_count_ < kPacingSamples) {
+    ++present_count_;
+  }
+}
+
+bool HostToastOverlay::PresentsAreSteadyLocked() const {
+  if (present_count_ < kPacingSamples) {
+    return false;
+  }
+  // present_next_ points at the oldest kept present once the ring is full, so
+  // walking from it yields the intervals in the order they happened.
+  std::array<std::int64_t, kPacingSamples> intervals{};
+  std::int64_t previous = 0;
+  for (std::size_t index = 0; index < kPacingSamples; ++index) {
+    const std::int64_t present =
+        presents_us_[(present_next_ + index) % kPacingSamples];
+    if (index > 0) {
+      intervals[index - 1] = present - previous;
+    }
+    previous = present;
+  }
+  return PresentIntervalsAreSteady(intervals.data(), kPacingSamples - 1);
 }
 
 void HostToastOverlay::EnsureFontLocked() {
@@ -399,12 +460,28 @@ bool HostToastOverlay::QueryFrame(MocktailHostOverlayFrameInfo* frame) {
   std::lock_guard<std::mutex> lock(mutex_);
   *frame = {};
   frame->revision = revision_;
-  if (!initialized_ || message_.empty() || started_us_ == 0) {
+  if (!initialized_) {
     return false;
   }
-  if (ToastIsFinished(MonotonicMicroseconds() - started_us_)) {
+  const std::int64_t now_us = MonotonicMicroseconds();
+  // Every present is recorded, a notice on screen or not, so the pacing the
+  // exit waits on is the game's own and not something the notice disturbed.
+  RecordPresentLocked(now_us);
+  if (message_.empty() || started_us_ == 0) {
+    return false;
+  }
+  // The card slides in, holds, and only then starts to leave, and only once
+  // the game is presenting steadily enough that the leave is seen. While the
+  // game stutters the card simply stays at rest, so a dropped frame never
+  // reads as the notice vanishing without its slide.
+  if (leave_started_us_ == 0 &&
+      now_us - started_us_ >= kSlideUs + kHoldUs && PresentsAreSteadyLocked()) {
+    leave_started_us_ = now_us;
+  }
+  if (ToastIsFinished(leave_started_us_, now_us)) {
     message_.clear();
     started_us_ = 0;
+    leave_started_us_ = 0;
     ReleaseFrameLocked();
     return false;
   }
@@ -419,7 +496,7 @@ bool HostToastOverlay::QueryFrame(MocktailHostOverlayFrameInfo* frame) {
   // puts it. A negative y is fine: the compositor clips the part that has gone
   // past the screen's top edge.
   const int x = std::max(0, (logical_width - card_width_) / 2);
-  const int offset = ToastOffsetAt(MonotonicMicroseconds() - started_us_);
+  const int offset = ToastOffsetAt(started_us_, leave_started_us_, now_us);
   const int y = scaled_rest + (offset - kRestOffsetPx) * scale_;
   frame->visible = 1;
   frame->coordinate_width = static_cast<std::uint32_t>(logical_width);

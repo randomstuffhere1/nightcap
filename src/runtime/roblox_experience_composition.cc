@@ -2110,6 +2110,11 @@ std::string RobloxExperienceComposition::ActiveGameInstanceId() const {
                                        : std::string();
 }
 
+bool RobloxExperienceComposition::InExperience() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return presence_request_.has_value();
+}
+
 void RobloxExperienceComposition::NotifyPresence(
     RobloxExperiencePresencePhase phase,
     const RobloxExperienceLaunchRequest* request) const {

@@ -579,6 +579,7 @@ TEST(RobloxExperienceCompositionTest,
   EXPECT_EQ(QueryMicrophone(&probe).at("status"), "AUTHORIZED");
   ASSERT_TRUE(composition.OnLuaAppReady(readiness).ok());
   ASSERT_TRUE(composition.subscribed());
+  EXPECT_FALSE(composition.InExperience());
   EXPECT_EQ(probe.web_view_initializations, 1);
   EXPECT_EQ(probe.browser_bindings, 4);
   EXPECT_EQ(probe.browser_callbacks_created, 4);
@@ -606,8 +607,12 @@ TEST(RobloxExperienceCompositionTest,
       R"({"placeId":17580461965,"gameJoinContext":"PlayButton"})");
   env->CallVoidMethod(probe.callback, run, request);
 
+  // The join is only queued until the main loop drains it, so the guest is not
+  // in an experience yet and a server-location watch must not have started.
+  EXPECT_FALSE(composition.InExperience());
   EXPECT_EQ(probe.starts.load(), 0);
   DrainUntilPresented(&composition);
+  EXPECT_TRUE(composition.InExperience());
   EXPECT_EQ(probe.starts.load(), 1);
   EXPECT_EQ(probe.started_place, 17580461965);
   EXPECT_EQ(probe.join_request_type, 0);
@@ -637,6 +642,7 @@ TEST(RobloxExperienceCompositionTest,
   EXPECT_EQ(probe.starts.load(), 1);
   EXPECT_EQ(composition.Snapshot().state, GameSessionState::kReturnedToLuaApp);
   EXPECT_TRUE(composition.Snapshot().returned_to_lua_app);
+  EXPECT_FALSE(composition.InExperience());
   ASSERT_EQ(probe.presence_phases.size(), 3u);
   EXPECT_EQ(probe.presence_phases.back(),
             RobloxExperiencePresencePhase::kBrowsing);

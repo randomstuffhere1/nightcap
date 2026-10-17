@@ -52,6 +52,9 @@ Release notes on GitHub are taken from the matching section here.
   `FFlagDebugLuauCodegenAll` in `fflags.json` to choose it yourself.
 - Nightcap answers Roblox's Java calls with less work per call, and the audio thread no longer allocates
   memory for each block of sound it plays.
+- The server location notice stays up longer and no longer vanishes mid-stutter. Its slide-out only starts
+  once the game is presenting frames steadily (roughly 24 fps or better, with no long frames), so the
+  transition is seen instead of the notice appearing to blink away while the game catches up.
 - Building needs a Rust toolchain, 1.83 or newer, because the texture hot kernels moved to `rust/`. The
   crates are vendored under `rust/vendor`, so no build path reaches the network for them, and
   `rust/rust-toolchain.toml` picks the channel. Every packaging path declares the toolchain it needs,
@@ -65,6 +68,9 @@ Release notes on GitHub are taken from the matching section here.
   saved. An explicit cookie file or `MOCKTAIL_COOKIE` still fails closed.
 - Closing the game window no longer sits in `window closed, shutting down` for several seconds. The server
   location lookup now stops before it is joined rather than after, and notices it while it waits.
+- The server location notice no longer appears while you are only browsing the Roblox home screen, your
+  friends list or another page. The lookup now starts when you join an experience instead of at Nightcap's
+  first frame, so a home-screen connection to Roblox is no longer reported as the server you joined.
 
 ## [0.3.4] - 2026-10-11
 
