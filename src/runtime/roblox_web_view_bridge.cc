@@ -8,6 +8,7 @@
 #include <string>
 #include <utility>
 
+#include "net/curl_support.h"
 #include "runtime/environment.h"
 #include "webview/roblox_challenge_features.h"
 
@@ -215,27 +216,18 @@ Status EscapeCaptchaQueryValue(const std::string& value, std::string* escaped) {
   if (escaped == nullptr) {
     return Invalid("captcha query output is null");
   }
-  static std::once_flag curl_initialization;
-  static CURLcode curl_initialization_status = CURLE_FAILED_INIT;
-  std::call_once(curl_initialization, [] {
-    curl_initialization_status = curl_global_init(CURL_GLOBAL_DEFAULT);
-  });
-  if (curl_initialization_status != CURLE_OK) {
+  // curl_easy_escape needs an easy handle, and the handle is what brings
+  // libcurl's shared initialisation with it.
+  const net::EasyHandle curl(true);
+  if (!curl) {
     return Unavailable("could not initialize captcha URL encoder");
   }
-  CURL* curl = curl_easy_init();
-  if (curl == nullptr) {
-    return Unavailable("could not initialize captcha URL encoder");
-  }
-  char* encoded =
-      curl_easy_escape(curl, value.data(), static_cast<int>(value.size()));
-  if (encoded == nullptr) {
-    curl_easy_cleanup(curl);
+  const net::OwnedCString encoded(curl_easy_escape(
+      curl.get(), value.data(), static_cast<int>(value.size())));
+  if (!encoded) {
     return Unavailable("could not encode captcha credential value");
   }
-  escaped->assign(encoded);
-  curl_free(encoded);
-  curl_easy_cleanup(curl);
+  escaped->assign(encoded.get());
   return Status::Ok();
 }
 

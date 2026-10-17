@@ -24,7 +24,9 @@
 #include <utility>
 #include <vector>
 
+#include "net/curl_support.h"
 #include "runtime/owned_pthread.h"
+#include "runtime/system_proxy.h"
 
 namespace mocktail {
 namespace runtime {
@@ -408,84 +410,35 @@ bool SetDiscordActivity(int descriptor, const DiscordRpcActivity* activity,
   return WriteFrame(descriptor, DiscordOpcode::kFrame, DumpJson(request));
 }
 
-struct BoundedResponse {
-  std::string body;
-  bool exceeded = false;
-};
-
-std::once_flag g_curl_init_once;
-CURLcode g_curl_init_status = CURLE_FAILED_INIT;
-
-void InitializeCurl() {
-  g_curl_init_status = curl_global_init(CURL_GLOBAL_DEFAULT);
-}
-
-size_t WriteHttpResponse(char* data, size_t size, size_t count,
-                         void* user_data) {
-  auto* response = static_cast<BoundedResponse*>(user_data);
-  if (response == nullptr || data == nullptr ||
-      (count != 0 && size > std::numeric_limits<size_t>::max() / count)) {
-    return 0;
-  }
-  const std::size_t bytes = size * count;
-  if (bytes > kMaximumRobloxApiBytes ||
-      response->body.size() > kMaximumRobloxApiBytes - bytes) {
-    response->exceeded = true;
-    return 0;
-  }
-  response->body.append(data, bytes);
-  return bytes;
-}
-
 std::optional<Json> GetRobloxJson(std::string url) {
-  std::call_once(g_curl_init_once, InitializeCurl);
-  if (g_curl_init_status != CURLE_OK) {
+  const net::EasyHandle curl(true);
+  if (!curl) {
     return std::nullopt;
   }
-  CURL* curl = curl_easy_init();
-  if (curl == nullptr) {
-    return std::nullopt;
-  }
-  BoundedResponse response;
-  curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
-  curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
-  curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 2000L);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 3500L);
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mocktail/0.1");
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteHttpResponse);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-  std::string proxy_url;
-  const char* proxy_host = std::getenv("MOCKTAIL_HTTP_PROXY_HOST");
-  const char* proxy_port = std::getenv("MOCKTAIL_HTTP_PROXY_PORT");
-  const char* proxy_scheme = std::getenv("MOCKTAIL_HTTP_PROXY_SCHEME");
-  if (proxy_host != nullptr && proxy_port != nullptr) {
-    const std::optional<NetworkProxyConfig> proxy =
-        ParseNetworkProxyConfig(proxy_host, proxy_port,
-                                proxy_scheme != nullptr ? proxy_scheme
-                                                        : "http");
-    if (proxy.has_value()) {
-      proxy_url = BuildNetworkProxyUrl(*proxy);
-      curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
-      curl_easy_setopt(curl, CURLOPT_NOPROXY, "");
-    }
-  }
-  if (const char* ca_bundle = std::getenv("MOCKTAIL_CA_BUNDLE")) {
-    curl_easy_setopt(curl, CURLOPT_CAINFO, ca_bundle);
-  }
-  const CURLcode status = curl_easy_perform(curl);
+  std::string response_body;
+  net::BoundedStringSink response{&response_body, kMaximumRobloxApiBytes, false};
+  curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_HTTPGET, 1L);
+  net::TransportOptions options;
+  options.user_agent = "Mocktail/0.1";
+  options.connect_timeout_ms = 2000L;
+  options.timeout_ms = 3500L;
+  // Roblox presence endpoints are fixed, so a redirect is not expected; refusing
+  // one keeps the .ROBLOSECURITY cookie from being handed to another host.
+  options.follow_redirects = false;
+  net::ApplyTransportOptions(curl.get(), options);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, net::WriteBoundedString);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
+  ApplyConfiguredProxy(curl.get());
+  const CURLcode status = curl_easy_perform(curl.get());
   long http_status = 0;
   if (status == CURLE_OK) {
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
+    curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_status);
   }
-  curl_easy_cleanup(curl);
   if (status != CURLE_OK || http_status != 200 || response.exceeded) {
     return std::nullopt;
   }
-  Json parsed = Json::parse(response.body, nullptr, false);
+  Json parsed = Json::parse(response_body, nullptr, false);
   if (parsed.is_discarded()) {
     return std::nullopt;
   }
@@ -689,7 +642,9 @@ class DiscordRpcSession::Impl final {
       }
       return false;
     }
-    std::call_once(g_curl_init_once, InitializeCurl);
+    // Warm the shared libcurl initialisation before the worker thread starts,
+    // so the first presence lookup does not pay for it.
+    net::InitialiseCurl();
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (started_) {

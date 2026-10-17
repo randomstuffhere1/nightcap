@@ -2,23 +2,25 @@
 
 #include <curl/curl.h>
 
+
 #include <cstdlib>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+#include <vector>
+
+#include "net/curl_support.h"
 
 namespace mocktail {
 namespace runtime {
 namespace {
 
+// Matches the ceiling the other Roblox API readers use.
+constexpr std::size_t kMaximumResponseBytes = 512U * 1024U;
+
 Status Invalid(std::string message) {
   return Status::Error(StatusCode::kInvalidArgument, std::move(message));
-}
-
-size_t WriteToString(char* data, size_t size, size_t nmemb, void* userdata) {
-  static_cast<std::string*>(userdata)->append(data, size * nmemb);
-  return size * nmemb;
 }
 
 }  // namespace
@@ -67,8 +69,8 @@ Status ResolveFollowUserPlace(int64_t user_id, const std::string& auth_cookie,
     return Invalid("Roblox presence lookup requires an authenticated session");
   }
 
-  CURL* curl = curl_easy_init();
-  if (curl == nullptr) {
+  const net::EasyHandle curl(true);
+  if (!curl) {
     return Invalid("Roblox presence lookup could not initialize a request");
   }
 
@@ -76,29 +78,40 @@ Status ResolveFollowUserPlace(int64_t user_id, const std::string& auth_cookie,
   const std::string payload = body.dump();
   std::string response;
 
-  struct curl_slist* headers = nullptr;
-  headers = curl_slist_append(headers, "Content-Type: application/json");
   const std::string cookie_header = "Cookie: .ROBLOSECURITY=" + auth_cookie;
-  headers = curl_slist_append(headers, cookie_header.c_str());
+  // Reported rather than ignored, so a failed allocation cannot send the
+  // .ROBLOSECURITY cookie request with no cookie attached.
+  const net::HeaderList headers(
+      std::vector<std::string>{"Content-Type: application/json", cookie_header});
+  if (!headers.allocated()) {
+    return Invalid("Roblox presence lookup could not build its request");
+  }
 
-  curl_easy_setopt(curl, CURLOPT_URL,
+  curl_easy_setopt(curl.get(), CURLOPT_URL,
                    "https://presence.roblox.com/v1/presence/users");
-  curl_easy_setopt(curl, CURLOPT_POST, 1L);
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, payload.c_str());
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteToString);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 10L);
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+  curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
+  curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, payload.c_str());
+  curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
+  // This writer had no size bound at all, unlike the other Roblox API call
+  // sites; the shared sink caps it at the same ceiling they use and checks
+  // size * count for overflow.
+  net::BoundedStringSink writer{&response, kMaximumResponseBytes, false};
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, net::WriteBoundedString);
+  curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &writer);
+  net::TransportOptions options;
+  options.timeout_ms = 10000L;
+  options.follow_redirects = false;
+  net::ApplyTransportOptions(curl.get(), options);
 
-  const CURLcode result = curl_easy_perform(curl);
+  const CURLcode result = curl_easy_perform(curl.get());
   long http_status = 0;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_status);
-  curl_slist_free_all(headers);
-  curl_easy_cleanup(curl);
+  curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &http_status);
 
   if (result != CURLE_OK) {
     return Invalid("Roblox presence lookup failed to connect");
+  }
+  if (writer.exceeded) {
+    return Invalid("Roblox presence lookup response exceeded its size limit");
   }
   if (http_status != 200) {
     return Invalid("Roblox presence lookup was rejected (status " +
