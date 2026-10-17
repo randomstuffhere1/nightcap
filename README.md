@@ -77,11 +77,6 @@ ahead of it. Work from that repository is merged in as it lands, so the gap is
 the list below and nothing else. In a clone with both remotes,
 `git diff coderdayton/main main` is the same list.
 
-- **A settings window.** `mocktail --settings`, or **Settings** in the app menu,
-  opens a GTK4 window with a row for every `config.yaml` setting, plus an
-  `fflags.json` editor and a button that opens the config folder. Each control
-  only accepts values its setting accepts, so a bad value is refused where you
-  type it. It edits `config.yaml` in place and keeps your comments.
 - **Joining a private server from a link.** Roblox's `/share?code=` link and
   the join dialog turn into a host launch, and the browser closes itself. A
   public server link works as well, and one Roblox refuses says so instead of
